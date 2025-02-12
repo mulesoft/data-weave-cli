@@ -7,7 +7,7 @@ import org.mule.weave.dwnative.utils.DataWeaveUtils
 import org.mule.weave.v2.core.exception.InvalidLocationException
 import org.mule.weave.v2.core.io.service.CustomWorkingDirectoryService
 import org.mule.weave.v2.core.io.service.WorkingDirectoryService
-import org.mule.weave.v2.interpreted.CustomRuntimeModuleNodeCompiler
+import org.mule.weave.v2.interpreted.CompositeRuntimeModuleNodeCompiler
 import org.mule.weave.v2.interpreted.RuntimeModuleNodeCompiler
 import org.mule.weave.v2.interpreted.module.WeaveDataFormat
 import org.mule.weave.v2.model.EvaluationContext
@@ -187,7 +187,7 @@ class NativeModuleComponentFactory(dynamicLevel: () => WeaveResourceResolver, sy
     val weaveResourceResolver = dynamicLevel()
     val currentClassloader: ModuleParsingPhasesManager = ModuleParsingPhasesManager(ModuleLoaderManager(Seq(ModuleLoader(weaveResourceResolver)), new SPIBasedModuleLoaderProvider(weaveResourceResolver)))
     val parser: CompositeModuleParsingPhasesManager = CompositeModuleParsingPhasesManager(NativeSystemModuleComponents.systemModuleParser, currentClassloader)
-    val compiler: CustomRuntimeModuleNodeCompiler = RuntimeModuleNodeCompiler.chain(currentClassloader, systemModuleCompiler, parentLast = !systemFirst)
+    val compiler = RuntimeModuleNodeCompiler.chain(currentClassloader, systemModuleCompiler, parentLast = !systemFirst)
     ModuleComponents(new TwoLevelWeaveResourceResolver(NativeSystemModuleComponents.systemResourceResolver, () => weaveResourceResolver), parser, compiler)
   }
 }
