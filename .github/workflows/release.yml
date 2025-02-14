@@ -12,13 +12,14 @@ jobs:
   RELEASE_EXTENSION:
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        #newer macos distributions use aarch64 arch which has no graalvm version available for java 11
+        os: [macos-14, ubuntu-latest, windows-latest]
         include:
           - os: windows-latest
             script_name: windows
           - os: ubuntu-latest
             script_name: linux
-          - os: macos-latest
+          - os: macos-14
             script_name: osx
 
     runs-on: ${{ matrix.os }}
