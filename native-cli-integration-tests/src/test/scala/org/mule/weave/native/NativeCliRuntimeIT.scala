@@ -64,7 +64,9 @@ class NativeCliRuntimeIT extends AnyFunSpec
 
   val testSuites = Seq(
     TestSuite("master", loadTestZipFile(s"weave-suites/runtime-$weaveVersion-test.zip")),
-    TestSuite("yaml", loadTestZipFile(s"weave-suites/yaml-module-$weaveVersion-test.zip"))
+    TestSuite("yaml", loadTestZipFile(s"weave-suites/yaml-module-$weaveVersion-test.zip")),
+    TestSuite("yaml", loadTestZipFile(s"weave-suites/core-modules-$weaveVersion-test.zip")),
+
   )
 
   private def loadTestZipFile(testSuiteExample: String): File = {
@@ -218,8 +220,8 @@ class NativeCliRuntimeIT extends AnyFunSpec
 
           val (exitCode, _, _) = NativeCliITTestRunner(args).execute(TIMEOUT._1, TIMEOUT._2)
 
-          exitCode shouldBe 0
           doAssert(outputPath.toFile, scenario.output, maybeEncoding)
+          exitCode shouldBe 0
         }
     }
   }
@@ -374,6 +376,8 @@ class NativeCliRuntimeIT extends AnyFunSpec
         "read-binary-files",
         "underflow",
         "try",
+        "try-handle-attribute-delegate-with-failures",
+        "try-handle-lazy-values-with-failures",
         "urlEncodeDecode") ++
       // Uses resource name that is different on Cli than in the Tests
       Array("try-recursive-call", "runtime_orElseTry") ++

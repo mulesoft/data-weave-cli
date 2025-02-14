@@ -17,13 +17,14 @@ jobs:
   BUILD:
     strategy:
       matrix:
-        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        #newer macos distributions use aarch64 arch which has no graalvm version available for java 11
+        os: [ ubuntu-latest, windows-latest, macos-14-arm64 ]
         include:
           - os: windows-latest
             script_name: windows
           - os: ubuntu-latest
             script_name: linux
-          - os: macos-latest
+          - os: macos-14-arm64
             script_name: osx
     runs-on: ${{ matrix.os }}
     # Steps represent a sequence of tasks that will be executed as part of the job
@@ -73,7 +74,7 @@ jobs:
 
       # Upload the artifact file
       - name: Upload generated script
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: dw-${{env.NATIVE_VERSION}}-${{runner.os}}
           path: native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.script_name }}.zip
