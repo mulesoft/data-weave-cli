@@ -49,7 +49,7 @@ jobs:
       # Runs a single command using the runners shell
       - name: Run Build
         run: |
-          ./gradlew --stacktrace build
+          ./gradlew --stacktrace  --no-problems-report  build
         shell: bash
       #Run regression tests
       - name: Run regression test 2.7
@@ -68,7 +68,7 @@ jobs:
       
       # Generate distro
       - name: Create Distro
-        run: ./gradlew --stacktrace native-cli:distro
+        run: ./gradlew --stacktrace  --no-problems-report native-cli:distro
         shell: bash
 
       # Upload the artifact file
