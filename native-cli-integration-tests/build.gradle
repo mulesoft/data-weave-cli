@@ -30,11 +30,11 @@ dependencies {
     testImplementation group: 'commons-beanutils', name: 'commons-beanutils', version: '1.9.4'
 }
 
-task cleanTestSuites(type: Delete) {
+tasks.register('cleanTestSuites', Delete) {
     delete "$projectDir/build/resources/weave-suites"
 }
 
-task downloadTestSuites(type: Copy) {
+tasks.register('downloadTestSuites', Copy) {
     from configurations.weaveSuite
     into "$projectDir/build/resources/weave-suites"
 }

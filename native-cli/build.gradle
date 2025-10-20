@@ -125,31 +125,7 @@ graalvmNative {
                     "coursier.," +
                     "org.mule.weave.v2.sdk.SPIBasedModuleLoaderProvider\$")
             buildArgs.add("--initialize-at-build-time=" +
-                    "sun.instrument.InstrumentationImpl," +
-                    "org.mule.weave.dwnative.initializer.Startup," +
-                    "org.mule.weave.dwnative.," +
-                    "org.mule.weave.v2.parser.," +
-                    "org.mule.weave.v2.codegen.StringCodeWriter," +
-                    "org.mule.weave.v2.resources.WeaveResourceLoader\$," +
-                    "org.mule.weave.v2.annotations.," +
-                    "org.mule.weave.v2.ts.," +
-                    "org.mule.weave.v2.scope.," +
-                    "org.mule.weave.v2.scope.," +
-                    "org.mule.weave.v2.grammar.," +
-                    "org.mule.weave.v2.sdk.," +
-                    "org.mule.weave.v2.utils.," +
-                    "org.mule.weave.v2.versioncheck.," +
-                    //Parboiled
-                    "scala.," +
-                    "org.parboiled2.," +
-                    "shapeless.syntax.")
-
-    //For Runtime execution
-//            "org.mule.weave.v2.interpreted.,"+
-//            "org.mule.weave.v2.model.values.,"
-//            "org.mule.weave.v2.model.types.,"
-//            "org.mule.weave.v2.core.functions."
-//    option "-H:+TraceClassInitialization"
+                    "sun.instrument.InstrumentationImpl" )
             buildArgs.add("--trace-class-initialization=coursier.core.Type\$")
             buildArgs.add("-H:DeadlockWatchdogInterval=1000")
             buildArgs.add("--report-unsupported-elements-at-runtime")
