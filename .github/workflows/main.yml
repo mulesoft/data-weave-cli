@@ -41,9 +41,9 @@ jobs:
       - name: Setup Graalvm
         uses: graalvm/setup-graalvm@v1
         with:
-          version: ${{env.GRAALVM_VERSION}}
+#          version: ${{env.GRAALVM_VERSION}}
           java-version: '24'
-          components: 'native-image'
+          distribution: 'graalvm'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Runs a single command using the runners shell
