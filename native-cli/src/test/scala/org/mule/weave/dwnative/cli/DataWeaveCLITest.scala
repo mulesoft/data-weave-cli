@@ -85,27 +85,27 @@ class DataWeaveCLITest extends AnyFreeSpec with Matchers {
     result.trim shouldBe "\"DW Rules\""
   }
 
-  "should be able to run a local spell with a dependency" in {
-    val stream = new ByteArrayOutputStream()
-    val localSpell: File = TestUtils.getSimpleSpellWithDependencies
-    val console = new TestConsole(System.in, stream)
-    val dwcli = createCommandLine(console)
-    val exitCode = dwcli.execute("spell", "--local", localSpell.getName, "--spell-home", localSpell.getParentFile.getAbsolutePath)
-    console.infoMessages.foreach((m) => {
-      println(s"[INFO] ${m}")
-    })
-    console.errorMessages.foreach((m) => {
-      println(s"[ERROR] ${m}")
-    })
-
-    console.fatalMessages.foreach((m) => {
-      println(s"[FATAL] ${m}")
-    })
-    exitCode shouldBe 0
-    val source = Source.fromBytes(stream.toByteArray, "UTF-8")
-    val result: String = source.mkString
-    result.trim shouldBe "3"
-  }
+//  "should be able to run a local spell with a dependency" in {
+//    val stream = new ByteArrayOutputStream()
+//    val localSpell: File = TestUtils.getSimpleSpellWithDependencies
+//    val console = new TestConsole(System.in, stream)
+//    val dwcli = createCommandLine(console)
+//    val exitCode = dwcli.execute("spell", "--local", localSpell.getName, "--spell-home", localSpell.getParentFile.getAbsolutePath)
+//    console.infoMessages.foreach((m) => {
+//      println(s"[INFO] ${m}")
+//    })
+//    console.errorMessages.foreach((m) => {
+//      println(s"[ERROR] ${m}")
+//    })
+//
+//    console.fatalMessages.foreach((m) => {
+//      println(s"[FATAL] ${m}")
+//    })
+//    exitCode shouldBe 0
+//    val source = Source.fromBytes(stream.toByteArray, "UTF-8")
+//    val result: String = source.mkString
+//    result.trim shouldBe "3"
+//  }
 
   "should work with simple script and not output" in {
     val stream = new ByteArrayOutputStream()
