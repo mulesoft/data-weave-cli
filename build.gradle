@@ -11,16 +11,16 @@ subprojects {
     apply plugin: 'maven-publish'
     apply plugin: 'scala'
 
-    group 'org.mule.weave.native'
-    version nativeVersion
+    group = 'org.mule.weave.native'
+    version = nativeVersion
 
-    compileScala {
-        targetCompatibility = "11"
-        sourceCompatibility = "11"
-    }
+//    compileScala {
+//        targetCompatibility = "24"
+//        sourceCompatibility = "11"
+//    }
 
 
-    compileJava   {
+    compileJava {
         sourceCompatibility = '11'
         targetCompatibility = '11'
     }
@@ -29,22 +29,22 @@ subprojects {
 //        mavenLocal()
         mavenCentral()
         maven {
-            name "mule-releases"
-            url "https://repository.mulesoft.org/nexus/content/repositories/releases/"
+            name = "mule-releases"
+            url = "https://repository.mulesoft.org/nexus/content/repositories/releases/"
         }
         maven {
-            name "mule-snapshots"
-            url "https://repository.mulesoft.org/nexus/content/repositories/snapshots/"
+            name = "mule-snapshots"
+            url = "https://repository.mulesoft.org/nexus/content/repositories/snapshots/"
         }
         maven {
-            name "jitpack.io"
-            url "https://jitpack.io"
+            name = "jitpack.io"
+            url = "https://jitpack.io"
         }
         gradlePluginPortal()
     }
 
 
     dependencies {
-        implementation group: 'org.scala-lang', name: 'scala-library', version: scalaVersion
+        implementation "org.scala-lang:scala-library:${scalaVersion}"
     }
 }

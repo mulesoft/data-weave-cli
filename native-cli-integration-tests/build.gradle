@@ -39,6 +39,15 @@ tasks.register('downloadTestSuites', Copy) {
     into "$projectDir/build/resources/weave-suites"
 }
 
+tasks.named('processTestResources') {
+    dependsOn(downloadTestSuites)
+}
+
+tasks.named('processResources') {
+    dependsOn('processTestResources')
+}
+
+
 downloadTestSuites.dependsOn(cleanTestSuites)
 test.dependsOn(downloadTestSuites)
 test.dependsOn(":native-cli:nativeCompile")

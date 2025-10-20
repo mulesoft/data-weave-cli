@@ -29,7 +29,8 @@ if [[ ! -d ${graal_dir}/graalvm-community-jdk-${graalvmVersion}_macos-x64_bin.ta
     tar xf ${graalvmDist}
     echo $graal_dir
     popd
-    setUpEnvironmentVariables
+
   else 
     echo "GraalVM already installed"
 fi
+setUpEnvironmentVariables

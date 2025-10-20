@@ -1,9 +1,9 @@
 plugins {
-    id "com.github.johnrengelman.shadow" version  "7.1.2"
+
     id "com.github.maiflai.scalatest" version "${scalaTestPluginVersion}"
     id 'application'
     // Apply GraalVM Native Image plugin
-    id 'org.graalvm.buildtools.native' version '0.9.14'
+    id 'org.graalvm.buildtools.native' version '0.11.2'
 }
 
 sourceSets {
@@ -14,7 +14,6 @@ sourceSets {
     }
 }
 
-mainClassName = 'org.mule.weave.cli.DWCLI'
 
 dependencies {
     implementation 'info.picocli:picocli:4.7.0'
@@ -75,16 +74,16 @@ compileScala {
 }
 
 // Merging Service Files
-shadowJar {
-    zip64 true
-    mergeServiceFiles()
-}
+//shadowJar {
+//    zip64 true
+//    mergeServiceFiles()
+//}
 
 
 import org.apache.tools.ant.taskdefs.condition.Os
 
 task distro(dependsOn: nativeCompile, type: Zip) {
-    classifier = "native-distro-" + getOsName()
+    archiveClassifier = "native-distro-" + getOsName()
     into("libs") {
         from { configurations.runtimeClasspath.filter { it.getName().contains("ndjson-module") } }
     }
@@ -104,7 +103,9 @@ private static String getOsName() {
         prefix = "windows"
     prefix
 }
+
 graalvmNative {
+    toolchainDetection = true
     binaries {
         main {
             // Main options
@@ -114,9 +115,10 @@ graalvmNative {
 
             // Advanced options
             buildArgs.add("-H:+ReportExceptionStackTraces")
+            buildArgs.add("-H:+UnlockExperimentalVMOptions")
             buildArgs.add("--no-fallback")
-            buildArgs.add("--allow-incomplete-classpath")
-            buildArgs.add("-H:EnableURLProtocols=http,https")
+            buildArgs.add("--enable-http")
+            buildArgs.add("--enable-https")
             buildArgs.add("--initialize-at-run-time=" +
                     "io.netty," +
                     "org.asynchttpclient," +
@@ -124,26 +126,17 @@ graalvmNative {
                     "scala.util.Random," +
                     "coursier.," +
                     "org.mule.weave.v2.sdk.SPIBasedModuleLoaderProvider\$")
-            buildArgs.add("--initialize-at-build-time=" +
-                    "sun.instrument.InstrumentationImpl" )
-            buildArgs.add("--trace-class-initialization=coursier.core.Type\$")
+            buildArgs.add("--initialize-at-build-time=sun.instrument.InstrumentationImpl")
             buildArgs.add("-H:DeadlockWatchdogInterval=1000")
-            buildArgs.add("--report-unsupported-elements-at-runtime")
             buildArgs.add("-H:CompilationExpirationPeriod=0")
-            buildArgs.add("--trace-object-instantiation=java.util.Random")
             buildArgs.add("-H:+AddAllCharsets")
-            buildArgs.add("-H:+IncludeAllLocales")
-//    option "-H:+DashboardAll"
-//    option "-H:DashboardDump=/Users/mdeachaval/labs/palantir/weave-native-library/native-cli/dump"
-//    option "-H:+PrintImageObjectTree"
             buildArgs.add("-J-Xmx6G")
-            
+
             // Development options
-            useFatJar = false // Instead of passing each jar individually, builds a fat jar
+            useFatJar = true // Instead of passing each jar individually, builds a fat jar
         }
     }
 }
-
 
 
 compileJava {
@@ -157,8 +150,8 @@ compileJava {
 tasks.compileScala.classpath = sourceSets.main.compileClasspath
 tasks.compileJava.classpath += files(sourceSets.main.scala.classesDirectory)
 
-nativeCompile.dependsOn("shadowJar")
+//nativeCompile.dependsOn("shadowJar")
 
-tasks.named("nativeCompile") {
-    classpathJar = file("${buildDir}/libs/native-cli-" + nativeVersion + "-all.jar")
-}
+//tasks.named("nativeCompile") {
+//    classpathJar = file("${buildDir}/libs/native-cli-" + nativeVersion + "-all.jar")
+//}

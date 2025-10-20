@@ -46,7 +46,7 @@ class DataWeaveCLITest extends AnyFreeSpec with Matchers {
   "should take into account the env variable for default output" in {
     val console = new TestConsole(System.in, System.out, Map())
     val dwcli = createCommandLine(console)
-    dwcli.execute("list-spells")
+    dwcli.execute("spell", "list")
     console.fatalMessages.isEmpty shouldBe true
   }
 

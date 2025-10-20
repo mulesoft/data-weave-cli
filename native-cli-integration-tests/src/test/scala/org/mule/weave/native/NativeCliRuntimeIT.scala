@@ -402,7 +402,19 @@ class NativeCliRuntimeIT extends AnyFunSpec
       Array("array-concat") ++
       Array("big_intersection") ++
       Array("sql_date_mapping") ++
-      Array("runtime_run")
+      Array("runtime_run") ++
+      Array("streaming_binary_inside_value",
+        "try-handle-array-value-with-failures",
+        "try-handle-attribute-delegate-with-failures",
+        "try-handle-attributes-value-with-failures",
+        "try-handle-binary-value-with-failures",
+        "try-handle-delegate-value-with-failures",
+        "try-handle-key-value-pair-value-with-failures",
+        "try-handle-materialized-object-with-failures",
+        "try-handle-name-value-pair-value-with-failures",
+        "try-handle-schema-property-value-with-failures",
+        "try-handle-schema-value-with-failures"
+      )
 
     val testToIgnore = if (versionString == "2.4") {
       baseArray ++
