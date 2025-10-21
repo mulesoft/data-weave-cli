@@ -84,7 +84,7 @@ shadowJar {
 import org.apache.tools.ant.taskdefs.condition.Os
 
 task distro(dependsOn: nativeCompile, type: Zip) {
-    classifier = "native-distro-" + getOsName()
+    archiveClassifier = "native-distro-" + getOsName()
     into("libs") {
         from { configurations.runtimeClasspath.filter { it.getName().contains("ndjson-module") } }
     }

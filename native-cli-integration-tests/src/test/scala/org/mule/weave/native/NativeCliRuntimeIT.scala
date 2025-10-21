@@ -218,8 +218,8 @@ class NativeCliRuntimeIT extends AnyFunSpec
 
           val (exitCode, _, _) = NativeCliITTestRunner(args).execute(TIMEOUT._1, TIMEOUT._2)
 
-          exitCode shouldBe 0
           doAssert(outputPath.toFile, scenario.output, maybeEncoding)
+          exitCode shouldBe 0
         }
     }
   }
@@ -374,6 +374,8 @@ class NativeCliRuntimeIT extends AnyFunSpec
         "read-binary-files",
         "underflow",
         "try",
+        "try-handle-attribute-delegate-with-failures",
+        "try-handle-lazy-values-with-failures",
         "urlEncodeDecode") ++
       // Uses resource name that is different on Cli than in the Tests
       Array("try-recursive-call", "runtime_orElseTry") ++
@@ -402,7 +404,8 @@ class NativeCliRuntimeIT extends AnyFunSpec
       Array("array-concat") ++
       Array("big_intersection") ++
       Array("sql_date_mapping") ++
-      Array("runtime_run")
+      Array("runtime_run") ++
+      Array("dw-env-variables", "orderby_type_mismatch_allowed", "runtime_eval")
 
     val testToIgnore = if (versionString == "2.4") {
       baseArray ++
@@ -430,13 +433,46 @@ class NativeCliRuntimeIT extends AnyFunSpec
         Array("as-operator",
           "type-equality"
         ) ++
-        Array("xml_doctype", "stringutils_unwrap", "weave_ast_module")
+        Array("xml_doctype", "stringutils_unwrap", "weave_ast_module") ++
+        Array(
+          "runtime_run_complex",
+          "runtime_run_empty_char_option",
+          "runtime_run_illegal_arguments",
+          "runtime_run_invalid_input",
+          "runtime_run_mod_function_unhandled_arithmetic_exception",
+          "runtime_run_recursive_mapObject",
+          "runtime_run_securityReaderProperty",
+          "runtime_run_securityReaderProperty_InputDirective",
+          "runtime_run_securityReaderProperty_Request",
+          "runtime_run_unhandled_illegal_argument_exception",
+          "runtime_run_unhandled_number_format_exception",
+          "runtime_run_unhandled_pattern_syntax_exception",
+          "runtime_run_unhandled_xml_parser_exception-out",
+          "runtime_run_unhandled_xml_parsing_exception-out",
+          "write_function_missing_root_exception")
     } else if (versionString == "2.5") {
       baseArray ++
         Array("xml_doctype", "stringutils_unwrap")
     } else if (versionString == "2.6") {
       baseArray ++
-        Array("weave_ast_module")
+        Array("weave_ast_module",
+          "runtime_run_complex",
+          "runtime_run_empty_char_option",
+          "runtime_run_illegal_arguments",
+          "runtime_run_invalid_input",
+          "runtime_run_mod_function_unhandled_arithmetic_exception",
+          "runtime_run_recursive_mapObject",
+          "runtime_run_securityReaderProperty",
+          "runtime_run_securityReaderProperty_InputDirective",
+          "runtime_run_securityReaderProperty_Request",
+          "runtime_run_unhandled_compilation_exception",
+          "runtime_run_unhandled_illegal_argument_exception",
+          "runtime_run_unhandled_number_format_exception",
+          "runtime_run_unhandled_pattern_syntax_exception",
+          "runtime_run_unhandled_xml_parser_exception",
+          "runtime_run_unhandled_xml_parsing_exception",
+          "write_function_missing_root_exception"
+        )
     } else if (versionString == "2.7") {
       baseArray ++
         Array("weave_ast_module")

@@ -6,7 +6,6 @@ import org.scalatest.freespec.AnyFreeSpec
 import org.scalatest.matchers.should.Matchers
 
 import java.io.File
-import java.net.URL
 
 class NativeCliTest extends AnyFreeSpec
   with Matchers
