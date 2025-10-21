@@ -39,7 +39,8 @@ jobs:
       - name: Setup Graalvm
         uses: graalvm/setup-graalvm@v1
         with:
-          version: ${{env.GRAALVM_VERSION}}
+          # version: ${{env.GRAALVM_VERSION}}
+          distribution: 'graalvm-community'
           java-version: '17'
           components: 'native-image'
           github-token: ${{ secrets.GITHUB_TOKEN }}
