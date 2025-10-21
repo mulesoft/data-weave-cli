@@ -447,8 +447,8 @@ class NativeCliRuntimeIT extends AnyFunSpec
           "runtime_run_unhandled_illegal_argument_exception",
           "runtime_run_unhandled_number_format_exception",
           "runtime_run_unhandled_pattern_syntax_exception",
-          "runtime_run_unhandled_xml_parser_exception-out",
-          "runtime_run_unhandled_xml_parsing_exception-out",
+          "runtime_run_unhandled_xml_parser_exception",
+          "runtime_run_unhandled_xml_parsing_exception",
           "write_function_missing_root_exception")
     } else if (versionString == "2.5") {
       baseArray ++
