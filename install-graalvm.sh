@@ -10,16 +10,16 @@ setUpEnvironmentVariables() {
   echo "Setup GRAALVM_HOME and JAVA_HOME environment variables"  
   if [[ $os == darwin ]]
   then
-    export GRAALVM_HOME=${PWD}/${graal_dir}/graalvm-ce-java11-${graalvmVersion}/Contents/Home
+    export GRAALVM_HOME=${PWD}/${graal_dir}/graalvm-ce-java17-${graalvmVersion}/Contents/Home
   else
-    export GRAALVM_HOME=${PWD}/${graal_dir}/graalvm-ce-java11-${graalvmVersion}
+    export GRAALVM_HOME=${PWD}/${graal_dir}/graalvm-ce-java17-${graalvmVersion}
   fi
   export JAVA_HOME=${GRAALVM_HOME}
 }
 
-if [[ ! -d ${graal_dir}/graalvm-ce-java11-${graalvmVersion} ]]
+if [[ ! -d ${graal_dir}/graalvm-ce-java17-${graalvmVersion} ]]
   then
-    graalvmDist=graalvm-ce-java11-${os}-amd64-${graalvmVersion}.tar.gz
+    graalvmDist=graalvm-ce-java17-${os}-amd64-${graalvmVersion}.tar.gz
     echo "Installing GraalVM: ${graalvmDist}"
     mkdir -p ${graal_dir}
     pushd ${graal_dir}
