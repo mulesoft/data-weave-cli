@@ -17,10 +17,8 @@ jobs:
   BUILD:
     strategy:
       matrix:
-        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        os: [ ubuntu-latest, macos-latest ]
         include:
-          - os: windows-latest
-            script_name: windows
           - os: ubuntu-latest
             script_name: linux
           - os: macos-latest
