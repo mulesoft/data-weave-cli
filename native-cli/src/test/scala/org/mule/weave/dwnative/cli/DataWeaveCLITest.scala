@@ -46,7 +46,7 @@ class DataWeaveCLITest extends AnyFreeSpec with Matchers {
   "should take into account the env variable for default output" in {
     val console = new TestConsole(System.in, System.out, Map())
     val dwcli = createCommandLine(console)
-    dwcli.execute("spells", "list")
+    dwcli.execute("spell", "list")
     console.fatalMessages.isEmpty shouldBe true
   }
 
@@ -78,6 +78,7 @@ class DataWeaveCLITest extends AnyFreeSpec with Matchers {
     val localSpell: File = TestUtils.getMyLocalSpellWithLib
     val dwcli = createCommandLine(new TestConsole(System.in, stream))
     val exitCode = dwcli.execute("spell", "--local", localSpell.getName, "--spell-home", localSpell.getParentFile.getAbsolutePath)
+    println(stream.toString())
     exitCode shouldBe 0
     val source = Source.fromBytes(stream.toByteArray, "UTF-8")
     val result: String = source.mkString

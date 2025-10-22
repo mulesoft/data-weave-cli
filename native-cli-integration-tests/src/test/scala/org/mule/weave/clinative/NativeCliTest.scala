@@ -1,4 +1,4 @@
-package org.mule.weave.native
+package org.mule.weave.clinative
 
 import org.mule.weave.v2.utils.DataWeaveVersion
 import org.scalatest.BeforeAndAfterAll
@@ -24,7 +24,8 @@ class NativeCliTest extends AnyFreeSpec
   }
 
   "it should execute simple case correctly" in {
-    val (_, output, _) = NativeCliITTestRunner(Array("run", "1 to 10")).execute()
+    val transformationPath = getResourcePath("scripts/Range.dwl")
+    val (_, output, _) = NativeCliITTestRunner(Array("run", "-f", transformationPath)).execute()
     output shouldBe "[\n  1,\n  2,\n  3,\n  4,\n  5,\n  6,\n  7,\n  8,\n  9,\n  10\n]"
   }
 

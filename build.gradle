@@ -14,10 +14,10 @@ subprojects {
     group = 'org.mule.weave.native'
     version = nativeVersion
 
-    compileScala {
-        targetCompatibility = "11"
-        sourceCompatibility = "11"
-    }
+//    compileScala {
+//        targetCompatibility = "24"
+//        sourceCompatibility = "11"
+//    }
 
 
     compileJava {

@@ -4,31 +4,33 @@ source gradle.properties
 
 graal_dir=.graalvm
 
+
+
 [[ $(uname -a) =~ Darwin ]] && os=darwin || os=linux
 
 setUpEnvironmentVariables() {
   echo "Setup GRAALVM_HOME and JAVA_HOME environment variables"  
   if [[ $os == darwin ]]
   then
-    export GRAALVM_HOME=${PWD}/${graal_dir}/graalvm-ce-java17-${graalvmVersion}/Contents/Home
+    export GRAALVM_HOME=${PWD}/${graal_dir}/graalvm-community-openjdk-${graalvmVersion}+11.1/Contents/Home
   else
-    export GRAALVM_HOME=${PWD}/${graal_dir}/graalvm-ce-java17-${graalvmVersion}
+    export GRAALVM_HOME=${PWD}/${graal_dir}/graalvm-community-openjdk-${graalvmVersion}+11.1
   fi
   export JAVA_HOME=${GRAALVM_HOME}
 }
 
-if [[ ! -d ${graal_dir}/graalvm-ce-java17-${graalvmVersion} ]]
+if [[ ! -d ${graal_dir}/graalvm-community-jdk-${graalvmVersion}_macos-x64_bin.tar.gz ]]
   then
-    graalvmDist=graalvm-ce-java17-${os}-amd64-${graalvmVersion}.tar.gz
+    graalvmDist=graalvm-community-jdk-${graalvmVersion}_macos-x64_bin.tar.gz
     echo "Installing GraalVM: ${graalvmDist}"
     mkdir -p ${graal_dir}
     pushd ${graal_dir}
-    curl -OL -A "Mozilla Chrome Safari" https://github.com/graalvm/graalvm-ce-builds/releases/download/vm-${graalvmVersion}/${graalvmDist}
+    curl -OL -A "Mozilla Chrome Safari" https://github.com/graalvm/graalvm-ce-builds/releases/download/jdk-${graalvmVersion}/${graalvmDist}
     tar xf ${graalvmDist}
     echo $graal_dir
     popd
-    setUpEnvironmentVariables
-    ${GRAALVM_HOME}/bin/gu install native-image
+
   else 
     echo "GraalVM already installed"
 fi
+setUpEnvironmentVariables

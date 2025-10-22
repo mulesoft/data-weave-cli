@@ -17,8 +17,11 @@ jobs:
   BUILD:
     strategy:
       matrix:
-        os: [ ubuntu-latest, macos-latest ]
+#        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        os: [ ubuntu-latest,  macos-latest ]
         include:
+#          - os: windows-latest
+#            script_name: windows
           - os: ubuntu-latest
             script_name: linux
           - os: macos-latest
@@ -29,20 +32,17 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      # Read graalvm version
-      - name: Read Graalvm version
-        run: |
-          echo "GRAALVM_VERSION=$(grep graalvmVersion gradle.properties | cut -d '=' -f2)" >> $GITHUB_ENV
-        shell: bash
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
       
       # Setup Graalvm
       - name: Setup Graalvm
         uses: graalvm/setup-graalvm@v1
         with:
-          # version: ${{env.GRAALVM_VERSION}}
-          distribution: 'graalvm-community'
-          java-version: '17'
+#          version: ${{env.GRAALVM_VERSION}}
+          java-version: '24'
           components: 'native-image'
+          distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Runs a single command using the runners shell
@@ -51,6 +51,14 @@ jobs:
           ./gradlew --stacktrace build
         shell: bash
       #Run regression tests
+      - name: Run regression test 2.9.0
+        run: |
+          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.9.0 -DweaveSuiteVersion=2.9.0 native-cli-integration-tests:test
+        shell: bash
+      - name: Run regression test 2.10
+        run: |
+          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.10.0 -DweaveSuiteVersion=2.10.0 native-cli-integration-tests:test
+        shell: bash
       - name: Run regression test 2.6
         run: |
           ./gradlew --stacktrace -PweaveTestSuiteVersion=2.6.19 -DweaveSuiteVersion=2.6.19 native-cli-integration-tests:test
@@ -59,7 +67,7 @@ jobs:
         run: |
           ./gradlew --stacktrace -PweaveTestSuiteVersion=2.4.0-HF-SNAPSHOT -DweaveSuiteVersion=2.4.0-HF-SNAPSHOT native-cli-integration-tests:test
         shell: bash
-      
+
       # Generate distro
       - name: Create Distro
         run: ./gradlew --stacktrace native-cli:distro
