@@ -53,7 +53,7 @@ tasks.named('processResources') {
 
 downloadTestSuites.dependsOn(cleanTestSuites)
 test.dependsOn(downloadTestSuites)
-//test.dependsOn(":native-cli:nativeCompile")
+test.dependsOn(":native-cli:nativeCompile")
 
 test {
     if (System.getProperty("weaveSuiteVersion") != null) {
