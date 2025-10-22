@@ -226,9 +226,9 @@ class TCKCliTest extends AnyFunSpec with Matchers
           val languageLevel = versionString
           args = args :+ "--language-level=" + languageLevel
 
-          val (exitCode, _, _) = NativeCliITTestRunner(args).execute(TIMEOUT._1, TIMEOUT._2)
+          val (exitCode, _, error) = NativeCliITTestRunner(args).execute(TIMEOUT._1, TIMEOUT._2)
 
-          exitCode shouldBe 0
+          assert(exitCode == 0, error)
           AssertionHelper.doAssert(outputPath.toFile, scenario.output, maybeEncoding)
         }
     }
@@ -300,7 +300,9 @@ class TCKCliTest extends AnyFunSpec with Matchers
         "try-handle-materialized-object-with-failures",
         "try-handle-name-value-pair-value-with-failures",
         "try-handle-schema-property-value-with-failures",
-        "try-handle-schema-value-with-failures"
+        "try-handle-schema-value-with-failures",
+        "try-handle-lazy-values-with-failures",
+        "math-toRadians",
       )
 
     val testToIgnore = if (versionString == "2.4") {

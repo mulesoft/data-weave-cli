@@ -130,6 +130,7 @@ graalvmNative {
             buildArgs.add("-H:DeadlockWatchdogInterval=1000")
             buildArgs.add("-H:CompilationExpirationPeriod=0")
             buildArgs.add("-H:+AddAllCharsets")
+            buildArgs.add("-H:+IncludeAllLocales")
             buildArgs.add("-J-Xmx6G")
 
             // Development options
