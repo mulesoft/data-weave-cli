@@ -1,4 +1,4 @@
-package org.mule.weave.native
+package org.mule.weave.clinative
 
 import java.io.File
 import java.util.concurrent.TimeUnit
