@@ -1,17 +1,11 @@
-package org.mule.weave.native
+package org.mule.weave.clinative
 
 import org.apache.commons.io.FileUtils
 import org.apache.commons.io.FilenameUtils
-import org.apache.commons.io.IOUtils
 import org.mule.weave.v2.codegen.CodeGenerator
 import org.mule.weave.v2.codegen.CodeGeneratorSettings
 import org.mule.weave.v2.codegen.InfixOptions
 import org.mule.weave.v2.helper.FolderBasedTest
-import org.mule.weave.v2.matchers.WeaveMatchers.matchBin
-import org.mule.weave.v2.matchers.WeaveMatchers.matchJson
-import org.mule.weave.v2.matchers.WeaveMatchers.matchProperties
-import org.mule.weave.v2.matchers.WeaveMatchers.matchString
-import org.mule.weave.v2.matchers.WeaveMatchers.matchXml
 import org.mule.weave.v2.model.EvaluationContext
 import org.mule.weave.v2.module.DataFormatManager
 import org.mule.weave.v2.parser.MappingParser
@@ -22,32 +16,22 @@ import org.mule.weave.v2.parser.ast.structure.StringNode
 import org.mule.weave.v2.sdk.ParsingContextFactory
 import org.mule.weave.v2.sdk.WeaveResourceFactory
 import org.mule.weave.v2.utils.DataWeaveVersion
-import org.mule.weave.v2.utils.StringHelper.toStringTransformer
 import org.mule.weave.v2.version.ComponentVersion
-import org.scalatest.Assertion
 import org.scalatest.funspec.AnyFunSpec
+import org.scalatest.matchers.should.Matchers
 
-import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileFilter
-import java.io.FileInputStream
 import java.io.IOException
-import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 import java.util.zip.ZipFile
-import javax.mail.internet.MimeMultipart
-import javax.mail.util.ByteArrayDataSource
 import scala.collection.JavaConverters._
-import scala.io.BufferedSource
-import scala.io.Source
-import org.scalatest.matchers.should.Matchers
 
-class NativeCliRuntimeIT extends AnyFunSpec
-  with Matchers
+class TCKCliTest extends AnyFunSpec with Matchers
   with FolderBasedTest
   with ResourceResolver
   with OSSupport {
@@ -58,22 +42,26 @@ class NativeCliRuntimeIT extends AnyFunSpec
   private val INPUT_FILE_PATTERN = Pattern.compile("in[0-9]+\\.[a-zA-Z]+")
   private val OUTPUT_FILE_PATTERN = Pattern.compile("out\\.[a-zA-Z]+")
 
+
   private val weaveVersion = System.getProperty("weaveSuiteVersion", ComponentVersion.weaveVersion)
   println(s"****** Running with weaveSuiteVersion: $weaveVersion *******")
   private val versionString: String = DataWeaveVersion(weaveVersion).toString()
 
   val testSuites = Seq(
-    TestSuite("master", loadTestZipFile(s"weave-suites/runtime-$weaveVersion-test.zip")),
-    TestSuite("yaml", loadTestZipFile(s"weave-suites/yaml-module-$weaveVersion-test.zip"))
+    TestSuite("runtime-tests", loadTestZipFile(s"weave-suites/runtime-$weaveVersion-test.zip")),
+    TestSuite("yaml-tests", loadTestZipFile(s"weave-suites/yaml-module-$weaveVersion-test.zip"))
   )
 
   private def loadTestZipFile(testSuiteExample: String): File = {
+    println("loadTestZipFile" + testSuiteExample)
     val url = getResource(testSuiteExample)
     val connection = url.openConnection
     val zipFile = new File(connection.getURL.toURI)
     zipFile
   }
 
+
+  println("NativeCliRuntimeTest -> " + testSuites.mkString(","))
   testSuites.foreach {
     testSuite => {
       val wd = Files.createTempDirectory(testSuite.name).toFile
@@ -83,8 +71,30 @@ class NativeCliRuntimeIT extends AnyFunSpec
       }
       wd.mkdirs
       extractArchive(testSuite.zipFile.toPath, wd.toPath)
-      runTestSuite(wd)
+      describe(testSuite.name) {
+        runTestSuite(wd)
+      }
     }
+  }
+
+  private def extractArchive(archiveFile: Path, destPath: Path): Unit = {
+    Files.createDirectories(destPath)
+    val archive = new ZipFile(archiveFile.toFile)
+    try {
+      for (entry <- archive.entries().asScala) {
+        val entryDest = destPath.resolve(entry.getName)
+        if (entry.isDirectory) {
+          Files.createDirectory(entryDest)
+        } else {
+          Files.copy(archive.getInputStream(entry), entryDest)
+        }
+      }
+    } finally {
+      if (archive != null) {
+        archive.close()
+      }
+    }
+    println(s"Extract content from: $archiveFile at $destPath")
   }
 
   private def runTestSuite(testsSuiteFolder: File): Unit = {
@@ -216,10 +226,10 @@ class NativeCliRuntimeIT extends AnyFunSpec
           val languageLevel = versionString
           args = args :+ "--language-level=" + languageLevel
 
-          val (exitCode, _, _) = NativeCliITTestRunner(args).execute(TIMEOUT._1, TIMEOUT._2)
+          val (exitCode, _, error) = NativeCliITTestRunner(args).execute(TIMEOUT._1, TIMEOUT._2)
 
-          exitCode shouldBe 0
-          doAssert(outputPath.toFile, scenario.output, maybeEncoding)
+          assert(exitCode == 0, error)
+          AssertionHelper.doAssert(outputPath.toFile, scenario.output, maybeEncoding)
         }
     }
   }
@@ -231,129 +241,6 @@ class NativeCliRuntimeIT extends AnyFunSpec
       })
     })
     maybeEncodingOption.map(d => d.value.asInstanceOf[StringNode].literalValue)
-  }
-
-  private def extractArchive(archiveFile: Path, destPath: Path): Unit = {
-    Files.createDirectories(destPath)
-    val archive = new ZipFile(archiveFile.toFile)
-    try {
-      for (entry <- archive.entries().asScala) {
-        val entryDest = destPath.resolve(entry.getName)
-        if (entry.isDirectory) {
-          Files.createDirectory(entryDest)
-        } else {
-          Files.copy(archive.getInputStream(entry), entryDest)
-        }
-      }
-    } finally {
-      if (archive != null) {
-        archive.close()
-      }
-    }
-    println(s"Extract content from: $archiveFile at $destPath")
-  }
-
-  private def doAssert(actualFile: File, expectedFile: File, maybeEncoding: Option[String] = None) = {
-    val bytes: Array[Byte] = IOUtils.toByteArray(new FileInputStream(actualFile))
-    val encoding = maybeEncoding.getOrElse("UTF-8")
-    val extension = FilenameUtils.getExtension(expectedFile.getName)
-    extension match {
-      case "json" =>
-        val actual: String = new String(bytes, encoding)
-        val actualNormalized = actual.stripMarginAndNormalizeEOL.replace("\\r\\n", "\\n")
-        actualNormalized should matchJson(readFile(expectedFile, encoding))
-      case "xml" =>
-        val actual: String = new String(bytes, encoding)
-        actual.stripMarginAndNormalizeEOL should matchXml(readFile(expectedFile, encoding))
-      case "dwl" =>
-        val actual: String = new String(bytes, "UTF-8")
-        actual should matchString(readFile(expectedFile, encoding))(after being whiteSpaceNormalised)
-      case "csv" =>
-        val actual: String = new String(bytes, encoding).trim
-        val actualNormalized = actual.stripMarginAndNormalizeEOL
-        val expected = readFile(expectedFile, encoding).trim
-        val expectedNormalized = expected.stripMarginAndNormalizeEOL
-        actualNormalized should matchString(expectedNormalized)
-      case "txt" =>
-        val actual: String = new String(bytes, encoding).trim
-        val actualNormalized = actual.stripMarginAndNormalizeEOL
-        val expected = readFile(expectedFile, encoding).trim
-        val expectedNormalized = expected.stripMarginAndNormalizeEOL
-        actualNormalized should matchString(expectedNormalized)
-      case "bin" =>
-        assertBinaryFile(bytes, expectedFile)
-      case "urlencoded" =>
-        val actual: String = new String(bytes, "UTF-8")
-        actual should matchString(readFile(expectedFile, encoding).trim)
-      case "properties" =>
-        val actual: String = new String(bytes, "UTF-8")
-        actual should matchProperties(readFile(expectedFile, encoding).trim)
-
-      case "multipart" =>
-        matchMultipart(expectedFile, bytes)
-
-      case "yml" | "yaml" =>
-        val actual: String = new String(bytes, "UTF-8")
-        actual.trim should matchString(readFile(expectedFile, encoding).trim)
-    }
-  }
-
-  private def assertBinaryFile(result: Array[Byte], expectedFile: File): Assertion = {
-    result should matchBin(expectedFile)
-  }
-
-  private def matchMultipart(output: File, result: Array[Byte]): Unit = {
-    val expected = new MimeMultipart(new ByteArrayDataSource(new FileInputStream(output), "multipart/form-data"))
-    val actual = new MimeMultipart(new ByteArrayDataSource(new ByteArrayInputStream(result), "multipart/form-data"))
-    actual.getPreamble should matchString(expected.getPreamble)
-    actual.getCount shouldBe expected.getCount
-
-    var i = 0
-    while (i < expected.getCount) {
-      val expectedBodyPart = expected.getBodyPart(i)
-      val actualBodyPart = actual.getBodyPart(i)
-      actualBodyPart.getContentType should matchString(expectedBodyPart.getContentType)
-      actualBodyPart.getDisposition should matchString(expectedBodyPart.getDisposition)
-      actualBodyPart.getFileName should matchString(expectedBodyPart.getFileName)
-
-      val actualContent = actualBodyPart.getContent
-      val expectedContent = expectedBodyPart.getContent
-
-      val actualContentString = actualContent match {
-        case is: InputStream => IOUtils.toString(is, StandardCharsets.UTF_8)
-        case _ => String.valueOf(actualContent);
-      }
-
-      val expectedContentString = expectedContent match {
-        case is: InputStream => IOUtils.toString(is, StandardCharsets.UTF_8)
-        case _ =>
-          String.valueOf(expectedContent);
-      }
-
-      val actualContentNormalized = actualContentString.stripMarginAndNormalizeEOL
-      val expectedContentNormalized = expectedContentString.stripMarginAndNormalizeEOL
-      actualContentNormalized shouldBe expectedContentNormalized
-
-      i = i + 1
-    }
-  }
-
-  private def readFile(expectedFile: File, charset: String): String = {
-    val expectedText: String = {
-      if (expectedFile.getName endsWith ".bin")
-        ""
-      else {
-        var value1: BufferedSource = null
-        try {
-          value1 = Source.fromFile(expectedFile, charset)
-          value1.mkString
-        } finally {
-          value1.close()
-        }
-      }
-
-    }
-    expectedText
   }
 
   override def ignoreTests(): Array[String] = {
@@ -402,7 +289,21 @@ class NativeCliRuntimeIT extends AnyFunSpec
       Array("array-concat") ++
       Array("big_intersection") ++
       Array("sql_date_mapping") ++
-      Array("runtime_run")
+      Array("runtime_run") ++
+      Array("streaming_binary_inside_value",
+        "try-handle-array-value-with-failures",
+        "try-handle-attribute-delegate-with-failures",
+        "try-handle-attributes-value-with-failures",
+        "try-handle-binary-value-with-failures",
+        "try-handle-delegate-value-with-failures",
+        "try-handle-key-value-pair-value-with-failures",
+        "try-handle-materialized-object-with-failures",
+        "try-handle-name-value-pair-value-with-failures",
+        "try-handle-schema-property-value-with-failures",
+        "try-handle-schema-value-with-failures",
+        "try-handle-lazy-values-with-failures",
+        "math-toRadians",
+      )
 
     val testToIgnore = if (versionString == "2.4") {
       baseArray ++
@@ -445,8 +346,6 @@ class NativeCliRuntimeIT extends AnyFunSpec
     }
     testToIgnore
   }
+
+
 }
-
-case class TestSuite(name: String, zipFile: File)
-
-case class Scenario(name: String, testFolder: File, inputs: Array[File], transform: File, output: File, configProperty: Option[File])

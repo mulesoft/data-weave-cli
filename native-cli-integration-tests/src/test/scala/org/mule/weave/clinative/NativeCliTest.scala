@@ -1,4 +1,4 @@
-package org.mule.weave.native
+package org.mule.weave.clinative
 
 import org.mule.weave.v2.utils.DataWeaveVersion
 import org.scalatest.BeforeAndAfterAll
