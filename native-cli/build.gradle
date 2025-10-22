@@ -31,7 +31,9 @@ dependencies {
     implementation group: 'org.mule.weave', name: 'process-module', version: ioVersion
     implementation(group: 'org.mule.weave', name: 'http-netty-module', version: ioVersion) {
         exclude group: 'org.slf4j'
+        exclude group: 'org.mule.weave', module: 'caffeine-cache-service'
     }
+    implementation group: 'org.mule.weave', name: 'guava-cache-service', version: weaveVersion
     implementation group: 'org.mule.weave', name: 'ndjson-module', version: weaveVersion
     testImplementation group: 'org.scalatest', name: 'scalatest_2.12', version: scalaTestVersion
     testRuntimeOnly 'com.vladsch.flexmark:flexmark-all:0.62.2'
