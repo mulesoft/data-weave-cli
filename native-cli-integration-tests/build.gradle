@@ -19,6 +19,7 @@ dependencies {
 
     weaveSuite "org.mule.weave:runtime:${weaveTestSuiteVersion}:test@zip"
     weaveSuite "org.mule.weave:yaml-module:${weaveTestSuiteVersion}:test@zip"
+    weaveSuite "org.mule.weave:core-modules:${weaveTestSuiteVersion}:test@zip"
     testRuntimeOnly 'com.vladsch.flexmark:flexmark-all:0.64.8'
     // https://mvnrepository.com/artifact/org.scalatest/scalatest
     testImplementation group: 'org.scalatest', name: 'scalatest_2.12', version: '3.2.19'

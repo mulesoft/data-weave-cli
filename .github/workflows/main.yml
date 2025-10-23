@@ -41,7 +41,7 @@ jobs:
         with:
 #          version: ${{env.GRAALVM_VERSION}}
           java-version: '24'
-          distribution: 'graalvm'
+          distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Runs a single command using the runners shell
@@ -50,11 +50,10 @@ jobs:
           ./gradlew --stacktrace  --no-problems-report  build
         shell: bash
       #Run regression tests
-      - name: Run regression test 2.9.0
+      - name: Run regression test 2.9.8
         run: |
-          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.9.0 -DweaveSuiteVersion=2.9.0 native-cli-integration-tests:test
+          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.9.8 -DweaveSuiteVersion=2.9.8 native-cli-integration-tests:test
         shell: bash
-      #Run regression tests
       - name: Run regression test 2.10
         run: |
           ./gradlew --stacktrace -PweaveTestSuiteVersion=2.10.0 -DweaveSuiteVersion=2.10.0 native-cli-integration-tests:test
