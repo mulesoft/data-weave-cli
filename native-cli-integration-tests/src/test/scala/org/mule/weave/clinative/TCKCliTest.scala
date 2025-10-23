@@ -49,7 +49,8 @@ class TCKCliTest extends AnyFunSpec with Matchers
 
   val testSuites = Seq(
     TestSuite("runtime-tests", loadTestZipFile(s"weave-suites/runtime-$weaveVersion-test.zip")),
-    TestSuite("yaml-tests", loadTestZipFile(s"weave-suites/yaml-module-$weaveVersion-test.zip"))
+    TestSuite("yaml-tests", loadTestZipFile(s"weave-suites/yaml-module-$weaveVersion-test.zip")),
+    TestSuite("core-modules-tests", loadTestZipFile(s"weave-suites/core-modules-$weaveVersion-test.zip"))
   )
 
   private def loadTestZipFile(testSuiteExample: String): File = {
@@ -300,9 +301,7 @@ class TCKCliTest extends AnyFunSpec with Matchers
         "try-handle-materialized-object-with-failures",
         "try-handle-name-value-pair-value-with-failures",
         "try-handle-schema-property-value-with-failures",
-        "try-handle-schema-value-with-failures",
-        "try-handle-lazy-values-with-failures",
-        "math-toRadians",
+        "try-handle-schema-value-with-failures"
       )
 
     val testToIgnore = if (versionString == "2.4") {
@@ -341,6 +340,17 @@ class TCKCliTest extends AnyFunSpec with Matchers
     } else if (versionString == "2.7") {
       baseArray ++
         Array("weave_ast_module")
+    } else if (versionString == "2.9") {
+      baseArray ++
+        Array(
+          "math-toRadians",
+          "try-handle-lazy-values-with-failures"
+        )
+    } else if (versionString == "2.10") {
+      baseArray ++
+        Array(
+          "try-handle-lazy-values-with-failures"
+        )
     } else {
       baseArray
     }

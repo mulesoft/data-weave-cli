@@ -12,10 +12,11 @@ jobs:
   RELEASE_EXTENSION:
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+#        os: [macos-latest, ubuntu-latest, windows-latest]
+        os: [ ubuntu-latest, windows-latest ]
         include:
-          - os: windows-latest
-            script_name: windows
+#          - os: windows-latest
+#            script_name: windows
           - os: ubuntu-latest
             script_name: linux
           - os: macos-latest
@@ -25,21 +26,18 @@ jobs:
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v2
-          
-      # Read graalvm version
-      - name: Read Graalvm version
-        run: |
-          echo "GRAALVM_VERSION=$(grep graalvmVersion gradle.properties | cut -d '=' -f2)" >> $GITHUB_ENV
-        shell: bash
-      
+      - uses: actions/checkout@v4
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
       # Setup Graalvm
       - name: Setup Graalvm
         uses: graalvm/setup-graalvm@v1
         with:
-          version: ${{env.GRAALVM_VERSION}}
+#          version: ${{env.GRAALVM_VERSION}}
           java-version: '24'
-          components: 'native-image'
+          distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Guess Extension Version
