@@ -17,28 +17,46 @@ sourceSets {
 dependencies {
     api(project(":native-cli"))
 
-    testImplementation group: 'org.mule.weave', name: 'parser', version: weaveVersion
-    testImplementation group: 'org.mule.weave', name: 'test-helpers', version: weaveVersion
-
     weaveSuite "org.mule.weave:runtime:${weaveTestSuiteVersion}:test@zip"
     weaveSuite "org.mule.weave:yaml-module:${weaveTestSuiteVersion}:test@zip"
-    testRuntimeOnly 'com.vladsch.flexmark:flexmark-all:0.62.2'
+    testRuntimeOnly 'com.vladsch.flexmark:flexmark-all:0.64.8'
+    // https://mvnrepository.com/artifact/org.scalatest/scalatest
+    testImplementation group: 'org.scalatest', name: 'scalatest_2.12', version: '3.2.19'
+
+    testImplementation "org.mule.weave:parser:${weaveVersion}"
+    testImplementation "org.mule.weave:test-helpers:${weaveVersion}"
     testImplementation 'commons-io:commons-io:2.11.0'
-    testImplementation group: 'com.sun.mail', name: 'jakarta.mail', version: '1.6.4'
-    testImplementation group: 'xerces', name: 'xercesImpl', version: '2.12.1'
-    testImplementation group: 'xalan', name: 'xalan', version: '2.7.2'
-    testImplementation group: 'commons-beanutils', name: 'commons-beanutils', version: '1.9.4'
+    testImplementation 'com.sun.mail:jakarta.mail:1.6.4'
+    testImplementation 'xerces:xercesImpl:2.12.1'
+    testImplementation 'xalan:xalan:2.7.2'
+    testImplementation 'commons-beanutils:commons-beanutils:1.9.4'
+    implementation group: 'com.sun.mail', name: 'jakarta.mail', version: '2.0.1'
 }
 
-task cleanTestSuites(type: Delete) {
+tasks.register('cleanTestSuites', Delete) {
     delete "$projectDir/build/resources/weave-suites"
 }
 
-task downloadTestSuites(type: Copy) {
+tasks.register('downloadTestSuites', Copy) {
     from configurations.weaveSuite
     into "$projectDir/build/resources/weave-suites"
 }
 
+tasks.named('processTestResources') {
+    dependsOn(downloadTestSuites)
+}
+
+tasks.named('processResources') {
+    dependsOn('processTestResources')
+}
+
+
 downloadTestSuites.dependsOn(cleanTestSuites)
 test.dependsOn(downloadTestSuites)
 test.dependsOn(":native-cli:nativeCompile")
+
+test {
+    if (System.getProperty("weaveSuiteVersion") != null) {
+        systemProperty "weaveSuiteVersion", System.getProperty("weaveSuiteVersion")
+    }
+}
