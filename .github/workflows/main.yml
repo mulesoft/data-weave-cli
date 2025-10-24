@@ -31,11 +31,11 @@ jobs:
 
       - name: Get IP address (Linux)
         run: ifconfig
-        if: runner.os == 'mulesoft-ubuntu'
+        if: ${{ matrix.script_name }} == 'linux'
 
       - name: Get IP address (Windows)
         run: ipconfig
-        if: runner.os == 'mulesoft-windows'
+        if: ${{ matrix.script_name }} == 'windows'
 
       # Create Release
 #      - name: Create Release
