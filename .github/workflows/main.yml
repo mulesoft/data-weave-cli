@@ -17,15 +17,10 @@ jobs:
   BUILD:
     strategy:
       matrix:
-#        os: [ ubuntu-latest, windows-latest, macos-latest ]
-        os: [ ubuntu-latest,  macos-latest ]
+        os: [ mulesoft-ubuntu ]
         include:
-#          - os: windows-latest
-#            script_name: windows
-          - os: ubuntu-latest
+          - os: mulesoft-ubuntu
             script_name: linux
-          - os: macos-latest
-            script_name: osx
     runs-on: ${{ matrix.os }}
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
@@ -39,7 +34,6 @@ jobs:
       - name: Setup Graalvm
         uses: graalvm/setup-graalvm@v1
         with:
-#          version: ${{env.GRAALVM_VERSION}}
           java-version: '24'
           distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
