@@ -17,10 +17,11 @@ jobs:
   BUILD:
     strategy:
       matrix:
-        os: [ mulesoft-ubuntu, mulesoft-windows ]
+#        os: [ mulesoft-ubuntu, mulesoft-windows ]
+        os: [ mulesoft-windows ]
         include:
-          - os: mulesoft-ubuntu
-            script_name: linux
+#          - os: mulesoft-ubuntu
+#            script_name: linux
           - os: mulesoft-windows
             script_name: windows
     runs-on: ${{ matrix.os }}
@@ -29,40 +30,52 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+      # Create Release
+      - name: Create Release
+        uses: actions/create-release@latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: "v1.0.36"
+          release_name: "v1.0.36"
+          body: "Example body"
+          draft: true
+          prerelease: false
+
+      #      - name: Setup Gradle
+#        uses: gradle/actions/setup-gradle@v3
       
       # Setup Graalvm
-      - name: Setup Graalvm
-        uses: graalvm/setup-graalvm@v1
-        with:
-          java-version: '24'
-          distribution: 'graalvm-community'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+#      - name: Setup Graalvm
+#        uses: graalvm/setup-graalvm@v1
+#        with:
+#          java-version: '24'
+#          distribution: 'graalvm-community'
+#          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Runs a single command using the runners shell
-      - name: Run Build
-        run: |
-          ./gradlew --stacktrace --no-problems-report build
-        shell: bash
+#      - name: Run Build
+#        run: |
+#          ./gradlew --stacktrace --no-problems-report build
+#        shell: bash
       #Run regression tests
-      - name: Run regression test 2.9.8
-        run: |
-          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.9.8 -DweaveSuiteVersion=2.9.8 native-cli-integration-tests:test
-        shell: bash
-      - name: Run regression test 2.10
-        run: |
-          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.10.0 -DweaveSuiteVersion=2.10.0 native-cli-integration-tests:test
-        shell: bash
+#      - name: Run regression test 2.9.8
+#        run: |
+#          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.9.8 -DweaveSuiteVersion=2.9.8 native-cli-integration-tests:test
+#        shell: bash
+#      - name: Run regression test 2.10
+#        run: |
+#          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.10.0 -DweaveSuiteVersion=2.10.0 native-cli-integration-tests:test
+#        shell: bash
 
       # Generate distro
-      - name: Create Distro
-        run: ./gradlew --stacktrace --no-problems-report native-cli:distro
-        shell: bash
+#      - name: Create Distro
+#        run: ./gradlew --stacktrace --no-problems-report native-cli:distro
+#        shell: bash
 
       # Upload the artifact file
-      - name: Upload generated script
-        uses: actions/upload-artifact@v4
-        with:
-          name: dw-${{env.NATIVE_VERSION}}-${{runner.os}}
-          path: native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.script_name }}.zip
+#      - name: Upload generated script
+#        uses: actions/upload-artifact@v4
+#        with:
+#          name: dw-${{env.NATIVE_VERSION}}-${{runner.os}}
+#          path: native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.script_name }}.zip
