@@ -1,20 +1,14 @@
-# This is a basic workflow to help you get started with Actions
+name: CI Native CLI
 
-name: Build Native CLI
-
-# Controls when the action will run. Triggers the workflow on push or pull request
-# events but only for the master branch
 on:
-  push:
-    branches: [ master ]
-  pull_request:
-    branches: [ master ]
+  schedule:
+    - cron: '0 12 * * 3' # This runs the workflow every wednesday day at 12:00 UTC
 env:
   NATIVE_VERSION: 100.100.100
+
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  BUILD:
+  CI:
     strategy:
       matrix:
         os: [ mulesoft-ubuntu, mulesoft-windows ]
@@ -41,23 +35,14 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Runs a single command using the runners shell
-      - name: Run Build
+      - name: Run Build (Latest)
         run: |
-          ./gradlew --stacktrace --no-problems-report build
-        shell: bash
-      #Run regression tests
-      - name: Run regression test 2.9.8
-        run: |
-          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.9.8 -DweaveSuiteVersion=2.9.8 native-cli-integration-tests:test
-        shell: bash
-      - name: Run regression test 2.10
-        run: |
-          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.10.0 -DweaveSuiteVersion=2.10.0 native-cli-integration-tests:test
+          ./gradlew --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT -PweaveTestSuiteVersion=2.11.0-SNAPSHOT -PweaveSuiteVersion=2.11.0-SNAPSHOT build
         shell: bash
 
       # Generate distro
       - name: Create Distro
-        run: ./gradlew --stacktrace --no-problems-report native-cli:distro
+        run: ./gradlew --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT -PweaveTestSuiteVersion=2.11.0-SNAPSHOT -PweaveSuiteVersion=2.11.0-SNAPSHOT native-cli:distro
         shell: bash
 
       # Upload the artifact file
