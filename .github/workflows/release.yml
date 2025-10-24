@@ -13,11 +13,11 @@ jobs:
       matrix:
 #        os: [macos-latest, ubuntu-latest, windows-latest]
 #        os: [ macos-latest, ubuntu-latest ]
-        os: [ ubuntu-latest ]
+        os: [ mulesoft-ubuntu ]
         include:
 #          - os: windows-latest
 #            script_name: windows
-          - os: ubuntu-latest
+          - os: mulesoft-ubuntu
             script_name: linux
  #         - os: macos-latest
  #           script_name: osx
