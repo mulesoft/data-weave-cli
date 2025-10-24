@@ -30,6 +30,9 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
+      - name: Display IP Configuration
+        run: ipconfig /all
+
       # Create Release
       - name: Create Release
         uses: actions/create-release@latest
