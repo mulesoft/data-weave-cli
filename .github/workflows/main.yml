@@ -17,10 +17,8 @@ jobs:
   BUILD:
     strategy:
       matrix:
-        os: [ mulesoft-ubuntu, mulesoft-windows ]
+        os: [ mulesoft-windows ]
         include:
-          - os: mulesoft-ubuntu
-            script_name: linux
           - os: mulesoft-windows
             script_name: windows
     runs-on: ${{ matrix.os }}
@@ -29,29 +27,17 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      - name: Get IP address (Linux)
-        run: ifconfig
-        if: runner.os == 'Linux'
-
-      - name: Get IP address - 2 (Linux)
-        run: hostname -I
-        if: runner.os == 'Linux'
-
-      - name: Get IP address (Windows)
-        run: ipconfig
-        if: runner.os == 'Windows'
-
       # Create Release
-#      - name: Create Release
-#        uses: actions/create-release@latest
-#        env:
-#          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-#        with:
-#          tag_name: "v1.0.36"
-#          release_name: "v1.0.36"
-#          body: "Example body"
-#          draft: true
-#          prerelease: false
+      - name: Create Release
+        uses: actions/create-release@latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: "v1.0.36"
+          release_name: "v1.0.36"
+          body: "Example body"
+          draft: true
+          prerelease: false
 
       #      - name: Setup Gradle
 #        uses: gradle/actions/setup-gradle@v3
