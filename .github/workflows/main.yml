@@ -31,11 +31,15 @@ jobs:
 
       - name: Get IP address (Linux)
         run: ifconfig
-        if: ${{ matrix.script_name }} == 'linux'
+        if: runner.os == 'Linux'
+
+      - name: Get IP address - 2 (Linux)
+        run: hostname -I
+        if: runner.os == 'Linux'
 
       - name: Get IP address (Windows)
         run: ipconfig
-        if: ${{ matrix.script_name }} == 'windows'
+        if: runner.os == 'Windows'
 
       # Create Release
 #      - name: Create Release
