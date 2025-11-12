@@ -291,7 +291,8 @@ class TCKCliTest extends AnyFunSpec with Matchers
       Array("big_intersection") ++
       Array("sql_date_mapping") ++
       Array("runtime_run") ++
-      Array("streaming_binary_inside_value",
+      Array("is-empty-using-empty-stream",
+        "streaming_binary_inside_value",
         "try-handle-array-value-with-failures",
         "try-handle-attribute-delegate-with-failures",
         "try-handle-attributes-value-with-failures",
