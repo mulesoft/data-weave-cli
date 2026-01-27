@@ -2,8 +2,6 @@ plugins {
 
     id "com.github.maiflai.scalatest" version "${scalaTestPluginVersion}"
     id 'application'
-    // Apply GraalVM Native Image plugin
-    id 'org.graalvm.buildtools.native' version '0.11.2'
 }
 
 sourceSets {
