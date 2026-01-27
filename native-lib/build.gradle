@@ -1,0 +1,97 @@
+dependencies {
+  api group: 'org.mule.weave', name: 'runtime', version: weaveVersion
+  api group: 'org.mule.weave', name: 'core-modules', version: weaveVersion
+
+  implementation group: 'org.mule.weave', name: 'parser', version: weaveVersion
+  implementation group: 'org.mule.weave', name: 'wlang', version: weaveVersion
+  compileOnly group: 'org.graalvm.sdk', name: 'graal-sdk', version: graalvmVersion
+  compileOnly group: 'org.graalvm.nativeimage', name: 'svm', version: graalvmVersion
+
+  implementation "org.scala-lang:scala-library:${scalaVersion}"
+
+  testImplementation platform('org.junit:junit-bom:5.10.0')
+  testImplementation 'org.junit.jupiter:junit-jupiter'
+  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+  useJUnitPlatform()
+}
+
+tasks.matching { it.name == 'nativeCompileClasspathJar' }.configureEach { t ->
+  t.exclude('META-INF/services/org.mule.weave.v2.module.DataFormat')
+  t.from("${projectDir}/src/main/resources/META-INF/services/org.mule.weave.v2.module.DataFormat") {
+    into('META-INF/services')
+    rename { 'org.mule.weave.v2.module.DataFormat' }
+  }
+}
+
+// Configure GraalVM native-image to build a shared library
+graalvmNative {
+//  toolchainDetection = true
+  binaries {
+    main {
+      sharedLibrary = true
+      debug = true
+      verbose = true
+      fallback = false
+      //agent = false
+      useFatJar = true
+      //buildArgs.add('-Ob') //  quick build mode to speed up builds during development
+      buildArgs.add('--no-fallback')
+      buildArgs.add('-H:Name=dwlib')
+      buildArgs.add('--verbose')
+      buildArgs.add("--report-unsupported-elements-at-runtime")
+      buildArgs.add("-J-Xmx6G")
+
+      buildArgs.add("-H:+ReportExceptionStackTraces")
+      buildArgs.add("-H:+UnlockExperimentalVMOptions")
+      buildArgs.add("--initialize-at-build-time=sun.instrument.InstrumentationImpl")
+      buildArgs.add("-H:DeadlockWatchdogInterval=1000")
+      buildArgs.add("-H:CompilationExpirationPeriod=0")
+      buildArgs.add("-H:+AddAllCharsets")
+      buildArgs.add("-H:+IncludeAllLocales")
+      // Pass project directory as system property for header path resolution
+      buildArgs.add("-Dproject.root=${projectDir}")
+    }
+  }
+}
+
+def pythonExe = (project.findProperty('pythonExe') ?: 'python3') as String
+
+tasks.register('stagePythonNativeLib', Copy) {
+  dependsOn tasks.named('nativeCompile')
+  from("${buildDir}/native/nativeCompile") {
+    include('dwlib.*')
+  }
+  into("${projectDir}/python/src/dataweave/native")
+}
+
+tasks.register('buildPythonWheel', Exec) {
+  dependsOn tasks.named('stagePythonNativeLib')
+  workingDir("${projectDir}/python")
+  outputs.dir("${projectDir}/python/dist")
+  doFirst {
+    file("${projectDir}/python/dist").mkdirs()
+  }
+  commandLine(pythonExe, '-m', 'pip', 'wheel', '--no-deps', '-w', 'dist', '.')
+}
+
+tasks.register('pythonTest', Exec) {
+  if (project.findProperty('skipPythonTests')?.toString()?.toBoolean() == true) {
+    enabled = false
+  }
+
+  dependsOn tasks.named('stagePythonNativeLib')
+  workingDir("${projectDir}/python")
+  commandLine(pythonExe, 'tests/test_dataweave_module.py')
+}
+
+tasks.named('test') {
+  dependsOn tasks.named('pythonTest')
+}
+
+tasks.named('clean') {
+  delete("${projectDir}/python/dist")
+  delete("${projectDir}/python/src/dataweave/native")
+}

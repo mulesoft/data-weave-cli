@@ -20,3 +20,5 @@ out/
 
 # GraalVM
 .graalvm
+
+grimoires/
