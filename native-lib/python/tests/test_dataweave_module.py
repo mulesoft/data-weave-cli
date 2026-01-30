@@ -17,10 +17,10 @@ def test_basic():
     try:
         result = dataweave.run_script("2 + 2", {})
         assert result.get_string() == "4", f"Expected '4', got '{result.get_string()}'"
-        print("✓ Basic script execution works")
+        print("[OK] Basic script execution works")
         return True
     except Exception as e:
-        print(f"✗ Basic script execution failed: {e}")
+        print(f"[FAIL] Basic script execution failed: {e}")
         return False
 
 def test_with_inputs():
@@ -29,10 +29,10 @@ def test_with_inputs():
     try:
         result = dataweave.run_script("num1 + num2", {"num1": 25, "num2": 17})
         assert result.get_string() == "42", f"Expected '42', got '{result.get_string()}'"
-        print("✓ Script with inputs works")
+        print("[OK] Script with inputs works")
         return True
     except Exception as e:
-        print(f"✗ Script with inputs failed: {e}")
+        print(f"[FAIL] Script with inputs failed: {e}")
         return False
 
 def test_context_manager():
@@ -45,10 +45,10 @@ def test_context_manager():
             assert result.get_string() == "12", f"Expected '12', got '{result.get_string()}'"
             result = dataweave.run_script("sqrt(10000)")
             assert result.get_string() == "100", f"Expected '100', got '{result.get_string()}'"
-            print("✓ Script execution witch context manager works")
+            print("[OK] Script execution witch context manager works")
             return True
     except Exception as e:
-        print(f"✗ Script execution witch context manager failed: {e}")
+        print(f"[FAIL] Script execution witch context manager failed: {e}")
         return False
 
 def test_encoding():
@@ -83,10 +83,10 @@ def test_encoding():
         assert "Billy" in out, f"Expected name 'Billy' in CSV, got: {out!r}"
         assert "31" in out, f"Expected age '31' in CSV, got: {out!r}"
 
-        print("✓ Encoding conversion works")
+        print("[OK] Encoding conversion works")
         return True
     except Exception as e:
-        print(f"✗ Encoding conversion failed: {e}")
+        print(f"[FAIL] Encoding conversion failed: {e}")
         return False
 
 def test_auto_conversion():
@@ -101,10 +101,10 @@ def test_auto_conversion():
         )
         assert result.get_string() == "1", f"Expected '1', got '{result.get_string()}'"
 
-        print("✓ Auto-conversion works")
+        print("[OK] Auto-conversion works")
         return True
     except Exception as e:
-        print(f"✗ Auto-conversion failed: {e}")
+        print(f"[FAIL] Auto-conversion failed: {e}")
         return False
 
 def main():
@@ -131,19 +131,19 @@ def main():
         print("="*70)
         
         if passed == total:
-            print("\n✓ All tests passed!")
+            print("\n[OK] All tests passed!")
             sys.exit(0)
         else:
-            print(f"\n✗ {total - passed} test(s) failed")
+            print(f"\n[FAIL] {total - passed} test(s) failed")
             sys.exit(1)
             
     except dataweave.DataWeaveLibraryNotFoundError as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n[ERROR] {e}")
         print("\nPlease build the native library first:")
         print("  ./gradlew nativeCompile")
         sys.exit(2)
     except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
+        print(f"\n[ERROR] Unexpected error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

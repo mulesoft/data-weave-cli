@@ -23,52 +23,52 @@ def example_simple_functions():
     ok = True
 
     # Simple script execution
-    print("\n📝 Simple arithmetic:")
+    print("\n[*] Simple arithmetic:")
     script = "2 + 2"
     result = dataweave.run_script(script)
     ok = assert_result(script, result, "4") and ok
 
-    print("\n📝 Square root:")
+    print("\n[*] Square root:")
     script = "sqrt(144)"
     result = dataweave.run_script(script)
     ok = assert_result(script, result, "12") and ok
 
-    print("\n📝 Array operations:")
+    print("\n[*] Array operations:")
     script = "[1, 2, 3] map $ * 2"
     result = dataweave.run_script(script)
     ok = assert_result(script, result, "[\n  2, \n  4, \n  6\n]") and ok
 
-    print("\n📝 String operations:")
+    print("\n[*] String operations:")
     script = "upper('hello world')"
     result = dataweave.run_script(script)
     ok = assert_result(script, result, '"HELLO WORLD"') and ok
 
     # Script with inputs (simple values - auto-converted)
-    print("\n📝 Script with inputs (auto-converted):")
+    print("\n[*] Script with inputs (auto-converted):")
     script = "num1 + num2"
     result = dataweave.run_script(script, {"num1": 25, "num2": 17})
     ok = assert_result(script, result, "42") and ok
 
     # Script with complex inputs
-    print("\n📝 Script with complex object:")
+    print("\n[*] Script with complex object:")
     script = "payload.name"
     result = dataweave.run_script(script, {"payload": {"content": '{"name": "John", "age": 30}', "mimeType": "application/json"}})
     ok = assert_result(script, result, '"John"') and ok
 
     # Script with mixed input types
-    print("\n📝 Script with mixed input types:")
+    print("\n[*] Script with mixed input types:")
     script = "greeting ++ ' ' ++ payload.name"
     result = dataweave.run_script(script, {"greeting": "Hello", "payload": {"content": '{"name": "Alice", "role": "Developer"}', "mimeType": "application/json"}})
     ok = assert_result(script, result, '"Hello Alice"') and ok
 
     # Binary output
-    print("\n📝 Binary output:")
+    print("\n[*] Binary output:")
     script = "output application/octet-stream\n---\ndw::core::Binaries::fromBase64(\"holamund\")"
     result = dataweave.run_script(script)
     ok = assert_result(script, result, "holamund") and ok
 
     # Script with InputValue
-    print("\n📝 Inputs:")
+    print("\n[*] Inputs:")
     input_value = dataweave.InputValue(
         content="1234567",
         mimeType="application/csv",
@@ -80,7 +80,7 @@ def example_simple_functions():
 
     # Cleanup when done
     dataweave.cleanup()
-    print("\n✓ Cleanup completed")
+    print("\n[OK] Cleanup completed")
 
     return ok
 
@@ -89,9 +89,9 @@ def assert_result(script, result, expected):
     print(f"   {script} = {result}")
     ok = result.get_string() == expected
     if ok:
-        status = "✅"
+        status = "[OK]"
     else:
-        status = f"❌ (expected: {expected})"
+        status = f"[FAIL] (expected: {expected})"
     print(f"   result as string = {result.get_string()}  {status}")
     print(f"   result as bytes = {result.get_bytes()}")
     return ok
@@ -106,7 +106,7 @@ def example_context_manager():
     ok = True
 
     with dataweave.DataWeave() as dw:
-        print("\n📝 Multiple operations with same runtime:")
+        print("\n[*] Multiple operations with same runtime:")
 
         script = "2 + 2"
         result = dw.run(script)
@@ -120,7 +120,7 @@ def example_context_manager():
         result = dw.run(script, {"numbers": [1, 2, 3, 4, 5], "multiplier": 10})
         ok = assert_result(script, result, "[\n  10, \n  20, \n  30, \n  40, \n  50\n]") and ok
 
-    print("\n✓ Context manager automatically cleaned up resources")
+    print("\n[OK] Context manager automatically cleaned up resources")
 
     return ok
 
@@ -131,7 +131,7 @@ def example_explicit_format():
     print("Example 3: Explicit Format (Advanced)")
     print("="*70)
     
-    print("\n📝 Using explicit content and mimeType:")
+    print("\n[*] Using explicit content and mimeType:")
 
     ok = True
 
@@ -153,15 +153,15 @@ def example_error_handling():
     print("="*70)
     
     try:
-        print("\n📝 Invalid script (will show error):")
+        print("\n[*] Invalid script (will show error):")
         result = dataweave.run_script("invalid syntax here", {})
-        print(f"   Result: {result} {'✅' if result.success == False else '❌'}")
+        print(f"   Result: {result} {'[OK]' if result.success == False else '[FAIL]'}")
             
     except dataweave.DataWeaveLibraryNotFoundError as e:
-        print(f"❌ Library not found: {e}")
+        print(f"[ERROR] Library not found: {e}")
         print("   Please build the library first: ./gradlew nativeCompile")
     except dataweave.DataWeaveError as e:
-        print(f"❌ DataWeave error: {e}")
+        print(f"[ERROR] DataWeave error: {e}")
 
 
 def main():
@@ -181,17 +181,17 @@ def main():
 
         print("\n" + "="*70)
         if all_ok:
-            print("✓ All examples completed successfully!")
+            print("[OK] All examples completed successfully!")
         else:
-            print("✗ One or more examples failed")
+            print("[FAIL] One or more examples failed")
         print("="*70)
         
     except dataweave.DataWeaveLibraryNotFoundError as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n[ERROR] {e}")
         print("\nPlease build the native library first:")
         print("  ./gradlew nativeCompile")
     except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
+        print(f"\n[ERROR] Unexpected error: {e}")
         import traceback
         traceback.print_exc()
 

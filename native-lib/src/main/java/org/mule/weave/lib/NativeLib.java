@@ -8,22 +8,21 @@ import org.graalvm.nativeimage.c.type.CTypeConversion;
 
 import java.nio.charset.StandardCharsets;
 
+/**
+ * GraalVM native entry points exposed for FFI consumers.
+ *
+ * <p>This class provides C-callable functions to execute DataWeave scripts and to free the returned
+ * unmanaged strings.</p>
+ */
 public class NativeLib {
 
     /**
-     * TODO FIX documentation
      * Native method that executes a DataWeave script with inputs and returns the result.
      * Can be called from Python via FFI.
      *
-     * Example JSON format:
-     * {
-     *   "payload": {"content": "{\"field\": \"value\"}", "mimeType": "application/json"},
-     *   "vars": {"content": "test", "mimeType": "text/plain"}
-     * }
-     *
      * @param thread the isolate thread (automatically provided by GraalVM)
      * @param script the DataWeave script to execute (C string pointer)
-     * @param inputsJson JSON string containing the inputs map with content and mimeType for each binding
+     * @param inputsJson JSON string containing the inputs map with content (base64 encoded), mimeType, properties and charset for each binding
      * @return the script execution result (C string pointer)
      */
     @CEntryPoint(name = "run_script")
@@ -36,6 +35,12 @@ public class NativeLib {
         return toUnmanagedCString(result);
     }
 
+    /**
+     * Frees a C string previously returned by {@link #runDwScriptEncoded(IsolateThread, CCharPointer, CCharPointer)}.
+     *
+     * @param thread the isolate thread (automatically provided by GraalVM)
+     * @param pointer the pointer to the unmanaged C string to free; if null, this is a no-op
+     */
     @CEntryPoint(name = "free_cstring")
     public static void freeCString(IsolateThread thread, CCharPointer pointer) {
         if (pointer.isNull()) {

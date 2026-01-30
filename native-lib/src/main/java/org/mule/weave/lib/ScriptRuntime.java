@@ -16,10 +16,22 @@ import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.util.Base64;
 
+/**
+ * Singleton wrapper around a {@link DWScriptingEngine} used to compile and execute DataWeave scripts.
+ *
+ * <p>Execution results are returned as a JSON string containing a base64-encoded payload plus metadata
+ * (mime type, charset, and whether the result is binary). Errors are returned as a JSON string with
+ * {@code success=false} and an escaped error message.</p>
+ */
 public class ScriptRuntime {
 
     private static final ScriptRuntime INSTANCE = new ScriptRuntime();
 
+    /**
+     * Returns the singleton instance.
+     *
+     * @return the shared {@link ScriptRuntime}
+     */
     public static ScriptRuntime getInstance() {
         return INSTANCE;
     }
@@ -30,10 +42,26 @@ public class ScriptRuntime {
         engine = DWScriptingEngine.builder().build();
     }
 
+    /**
+     * Executes a DataWeave script with no input bindings.
+     *
+     * @param script the DataWeave script source
+     * @return a JSON string describing either the successful result or an error
+     */
     public String run(String script) {
         return run(script, null);
     }
 
+    /**
+     * Executes a DataWeave script with optional input bindings encoded as JSON.
+     *
+     * <p>The expected JSON structure maps binding names to an object containing {@code content}
+     * (base64), {@code mimeType}, optional {@code charset}, and optional {@code properties}.</p>
+     *
+     * @param script the DataWeave script source
+     * @param inputsJson JSON string encoding the input bindings map, or {@code null}
+     * @return a JSON string describing either the successful result or an error
+     */
     public String run(String script, String inputsJson) {
         ScriptingBindings bindings = parseJsonInputsToBindings(inputsJson);
         String[] inputs = bindings.bindingNames();
@@ -74,10 +102,6 @@ public class ScriptRuntime {
         }
     }
 
-    /**
-     * Simple JSON parser for input map without external dependencies.
-     * Expected format: {"name1": {"content": "value1", "mimeType": "type1", "charset": "charset1", "properties": {"prop1": "value1", "prop2": "value2"}}}
-     */
     private ScriptingBindings parseJsonInputsToBindings(String inputsJson) {
         ScriptingBindings bindings = new ScriptingBindings();
         
