@@ -24,6 +24,11 @@ tasks.matching { it.name == 'nativeCompileClasspathJar' }.configureEach { t ->
     into('META-INF/services')
     rename { 'org.mule.weave.v2.module.DataFormat' }
   }
+  t.exclude('META-INF/services/org.mule.weave.v2.parser.phase.ModuleLoader')
+  t.from("${projectDir}/src/main/resources/META-INF/services/org.mule.weave.v2.parser.phase.ModuleLoader") {
+    into('META-INF/services')
+    rename { 'org.mule.weave.v2.parser.phase.ModuleLoader' }
+  }
 }
 
 // Configure GraalVM native-image to build a shared library
@@ -70,11 +75,22 @@ tasks.register('stagePythonNativeLib', Copy) {
 tasks.register('buildPythonWheel', Exec) {
   dependsOn tasks.named('stagePythonNativeLib')
   workingDir("${projectDir}/python")
+  // Track inputs so Gradle rebuilds when native lib or Python sources change
+  inputs.dir("${projectDir}/python/src/dataweave")
+  inputs.file("${projectDir}/python/setup.py")
+  inputs.file("${projectDir}/python/setup.cfg")
+  inputs.file("${projectDir}/python/pyproject.toml")
   outputs.dir("${projectDir}/python/dist")
   doFirst {
+    // Clean old wheels and build artifacts to ensure fresh build
+    delete("${projectDir}/python/dist")
+    delete("${projectDir}/python/build")
     file("${projectDir}/python/dist").mkdirs()
   }
-  commandLine(pythonExe, '-m', 'pip', 'wheel', '--no-deps', '-w', 'dist', '.')
+  // Use setup.py bdist_wheel to generate platform-specific wheel tags
+  // The custom setup.py overrides bdist_wheel to set correct platform tags
+  // for the bundled native library (dwlib)
+  commandLine(pythonExe, 'setup.py', 'bdist_wheel', '-d', 'dist')
 }
 
 tasks.register('pythonTest', Exec) {
@@ -93,5 +109,7 @@ tasks.named('test') {
 
 tasks.named('clean') {
   delete("${projectDir}/python/dist")
+  delete("${projectDir}/python/build")
   delete("${projectDir}/python/src/dataweave/native")
+  delete("${projectDir}/python/src/dataweave_native.egg-info")
 }

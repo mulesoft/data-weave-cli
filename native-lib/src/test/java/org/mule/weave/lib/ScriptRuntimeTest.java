@@ -185,7 +185,7 @@ class ScriptRuntimeTest {
             "{\"payload\": {\"content\": \"%s\", \"mimeType\": \"application/json\"}}",
             encode(jsonInput)
         );
-        
+
         // DataWeave script to extract name
         String script = "output application/json\n---\npayload.name";
         

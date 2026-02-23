@@ -10,6 +10,26 @@ Basic Usage:
 
     result = dataweave.run_script("2 + 2")
     print(result.get_string())
+
+    # Call cleanup() when done to release native resources
+    dataweave.cleanup()
+
+Using context manager (recommended for automatic cleanup):
+    from dataweave import DataWeave
+
+    with DataWeave() as dw:
+        result = dw.run("2 + 2")
+        print(result.get_string())
+    # Resources are automatically released when exiting the 'with' block
+
+Handling errors:
+    import dataweave
+
+    result = dataweave.run_script("1 / 0")
+    if not result.success:
+        print(f"Error: {result.error}")
+    else:
+        print(result.get_string())
 """
 
 import base64
@@ -114,7 +134,7 @@ def _candidate_library_paths() -> list[Path]:
     # tree, locate native-lib/build/native/nativeCompile.
     for parent in pkg_dir.parents:
         build_dir = parent / "build" / "native" / "nativeCompile"
-        if build_dir.name == "nativeCompile" and build_dir.parent.name == "native" and build_dir.parent.parent.name == "build":
+        if build_dir.exists():
             paths.append(build_dir / "dwlib.dylib")
             paths.append(build_dir / "dwlib.so")
             paths.append(build_dir / "dwlib.dll")

@@ -41,9 +41,9 @@ def test_context_manager():
     try:
         with dataweave.DataWeave() as dw:
 
-            result = dataweave.run_script("sqrt(144)")
+            result = dw.run("sqrt(144)")
             assert result.get_string() == "12", f"Expected '12', got '{result.get_string()}'"
-            result = dataweave.run_script("sqrt(10000)")
+            result = dw.run("sqrt(10000)")
             assert result.get_string() == "100", f"Expected '100', got '{result.get_string()}'"
             print("[OK] Script execution witch context manager works")
             return True

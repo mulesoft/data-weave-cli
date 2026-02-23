@@ -23,7 +23,7 @@ public class NativeLib {
      * @param thread the isolate thread (automatically provided by GraalVM)
      * @param script the DataWeave script to execute (C string pointer)
      * @param inputsJson JSON string containing the inputs map with content (base64 encoded), mimeType, properties and charset for each binding
-     * @return the script execution result (C string pointer)
+     * @return the script execution result base64 encoded (C string pointer)
      */
     @CEntryPoint(name = "run_script")
     public static CCharPointer runDwScriptEncoded(IsolateThread thread, CCharPointer script, CCharPointer inputsJson) {
