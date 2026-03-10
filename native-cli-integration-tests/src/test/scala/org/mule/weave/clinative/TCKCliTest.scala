@@ -259,6 +259,7 @@ class TCKCliTest extends AnyFunSpec with Matchers
         "lazy_metadata_definition",
         "module-singleton",
         "multipart-write-binary",
+        "private_scope_directives",
         "read-binary-files",
         "underflow",
         "try",
