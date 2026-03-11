@@ -102,6 +102,41 @@ public class ScriptRuntime {
         }
     }
 
+    /**
+     * Executes a DataWeave script and returns a {@link StreamSession} whose {@link java.io.InputStream}
+     * can be read incrementally, avoiding loading the entire result into memory.
+     *
+     * @param script    the DataWeave script source
+     * @param inputsJson JSON string encoding the input bindings map, or {@code null}
+     * @return a {@link StreamSession} with the result stream and metadata, or an error session
+     */
+    public StreamSession runStreaming(String script, String inputsJson) {
+        ScriptingBindings bindings = parseJsonInputsToBindings(inputsJson);
+        String[] inputs = bindings.bindingNames();
+
+        try {
+            DWScript compiled = engine.compileDWScript(script, inputs);
+            DWResult dwResult = compiled.writeDWResult(bindings);
+
+            if (dwResult.getContent() instanceof InputStream) {
+                return new StreamSession(
+                        (InputStream) dwResult.getContent(),
+                        dwResult.getMimeType(),
+                        dwResult.getCharset().name(),
+                        ((DataWeaveResult) dwResult).isBinary()
+                );
+            } else {
+                return StreamSession.ofError("Result is not an InputStream: " + dwResult.getContent().getClass().getName());
+            }
+        } catch (Exception e) {
+            String message = e.getMessage();
+            if (message == null || message.trim().isEmpty()) {
+                message = e.toString();
+            }
+            return StreamSession.ofError(message);
+        }
+    }
+
     private ScriptingBindings parseJsonInputsToBindings(String inputsJson) {
         ScriptingBindings bindings = new ScriptingBindings();
         

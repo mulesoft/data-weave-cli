@@ -107,6 +107,86 @@ def test_auto_conversion():
         print(f"[FAIL] Auto-conversion failed: {e}")
         return False
 
+def test_streaming_basic():
+    """Test basic streaming execution"""
+    print("\nTesting streaming basic execution...")
+    try:
+        with dataweave.run_stream("2 + 2") as stream:
+            assert stream.mimeType is not None, "Expected mimeType in metadata"
+            result = stream.read_all_string()
+            assert result == "4", f"Expected '4', got '{result}'"
+        print("[OK] Streaming basic execution works")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Streaming basic execution failed: {e}")
+        return False
+
+def test_streaming_with_inputs():
+    """Test streaming execution with inputs"""
+    print("\nTesting streaming with inputs...")
+    try:
+        with dataweave.run_stream("num1 + num2", {"num1": 25, "num2": 17}) as stream:
+            result = stream.read_all_string()
+            assert result == "42", f"Expected '42', got '{result}'"
+        print("[OK] Streaming with inputs works")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Streaming with inputs failed: {e}")
+        return False
+
+def test_streaming_chunked_read():
+    """Test streaming with small chunk reads"""
+    print("\nTesting streaming chunked read...")
+    try:
+        script = """output application/json
+---
+{items: (1 to 100) map {id: $, name: "item_" ++ $}}"""
+        with dataweave.run_stream(script) as stream:
+            chunks = []
+            while True:
+                chunk = stream.read(32)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            full = b"".join(chunks)
+            assert len(chunks) > 1, f"Expected multiple chunks, got {len(chunks)}"
+            assert b"item_1" in full, "Expected 'item_1' in result"
+            assert b"item_100" in full, "Expected 'item_100' in result"
+        print(f"[OK] Streaming chunked read works ({len(chunks)} chunks)")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Streaming chunked read failed: {e}")
+        return False
+
+def test_streaming_iterator():
+    """Test streaming via iterator protocol"""
+    print("\nTesting streaming iterator...")
+    try:
+        with dataweave.run_stream("output application/json --- [1,2,3]") as stream:
+            chunks = list(stream)
+            full = b"".join(chunks)
+            text = full.decode(stream.charset or "utf-8")
+            assert "1" in text and "3" in text, f"Expected [1,2,3] in result, got '{text}'"
+        print("[OK] Streaming iterator works")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Streaming iterator failed: {e}")
+        return False
+
+def test_streaming_context_manager():
+    """Test that streaming context manager properly cleans up"""
+    print("\nTesting streaming context manager cleanup...")
+    try:
+        with dataweave.DataWeave() as dw:
+            with dw.run_stream("sqrt(144)") as stream:
+                result = stream.read_all_string()
+                assert result == "12", f"Expected '12', got '{result}'"
+        print("[OK] Streaming context manager works")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Streaming context manager failed: {e}")
+        return False
+
 def main():
     """Run all tests"""
     print("="*70)
@@ -120,6 +200,11 @@ def main():
         results.append(test_context_manager())
         results.append(test_encoding())
         results.append(test_auto_conversion())
+        results.append(test_streaming_basic())
+        results.append(test_streaming_with_inputs())
+        results.append(test_streaming_chunked_read())
+        results.append(test_streaming_iterator())
+        results.append(test_streaming_context_manager())
         
         # Cleanup
         dataweave.cleanup()

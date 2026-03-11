@@ -1,10 +1,15 @@
 package org.mule.weave.lib;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.Charset;
 import java.util.Base64;
 
@@ -241,6 +246,112 @@ class ScriptRuntimeTest {
                         "\"properties\": {\"header\": false, \"separator\": \"4\"}}}"));
         assertEquals("567", result.result);
 
+    }
+
+    @Test
+    void streamSimpleScript() throws IOException {
+        ScriptRuntime runtime = ScriptRuntime.getInstance();
+
+        System.out.println("Testing streaming simple script:");
+        System.out.println("=".repeat(50));
+
+        StreamSession session = runtime.runStreaming("sqrt(144)", null);
+        assertFalse(session.isError(), "Expected successful session");
+        assertNull(session.getError());
+        assertNotNull(session.getMimeType());
+
+        byte[] buf = new byte[64];
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        int n;
+        while ((n = session.read(buf, buf.length)) > 0) {
+            bos.write(buf, 0, n);
+        }
+        String result = bos.toString(session.getCharset());
+        assertEquals("12", result);
+        StreamSession.close(session.register()); // clean up handle
+
+        System.out.println("Result: " + result);
+        System.out.println("✓ Streaming simple script passed!");
+        System.out.println("=".repeat(50));
+    }
+
+    @Test
+    void streamWithInputs() throws IOException {
+        ScriptRuntime runtime = ScriptRuntime.getInstance();
+
+        System.out.println("Testing streaming with inputs:");
+        System.out.println("=".repeat(50));
+
+        String inputsJson = String.format(
+            "{\"num1\": {\"content\": \"%s\", \"mimeType\": \"application/json\"}, " +
+            "\"num2\": {\"content\": \"%s\", \"mimeType\": \"application/json\"}}",
+            encode(25), encode(17)
+        );
+
+        StreamSession session = runtime.runStreaming("num1 + num2", inputsJson);
+        assertFalse(session.isError());
+
+        byte[] buf = new byte[64];
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        int n;
+        while ((n = session.read(buf, buf.length)) > 0) {
+            bos.write(buf, 0, n);
+        }
+        String result = bos.toString(session.getCharset());
+        assertEquals("42", result);
+        StreamSession.close(session.register());
+
+        System.out.println("Result: " + result);
+        System.out.println("✓ Streaming with inputs passed!");
+        System.out.println("=".repeat(50));
+    }
+
+    @Test
+    void streamChunkedRead() throws IOException {
+        ScriptRuntime runtime = ScriptRuntime.getInstance();
+
+        System.out.println("Testing streaming chunked read:");
+        System.out.println("=".repeat(50));
+
+        String script = "output application/json\n---\n{items: (1 to 100) map {id: $, name: \"item_\" ++ $}}";
+
+        StreamSession session = runtime.runStreaming(script, null);
+        assertFalse(session.isError());
+
+        byte[] smallBuf = new byte[32];
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        int n;
+        int chunkCount = 0;
+        while ((n = session.read(smallBuf, smallBuf.length)) > 0) {
+            bos.write(smallBuf, 0, n);
+            chunkCount++;
+        }
+        String result = bos.toString(session.getCharset());
+        assertTrue(chunkCount > 1, "Expected multiple chunks, got " + chunkCount);
+        assertTrue(result.contains("item_1"));
+        assertTrue(result.contains("item_100"));
+        StreamSession.close(session.register());
+
+        System.out.printf("Read %d chunks, total %d bytes%n", chunkCount, bos.size());
+        System.out.println("✓ Streaming chunked read passed!");
+        System.out.println("=".repeat(50));
+    }
+
+    @Test
+    void streamErrorSession() {
+        ScriptRuntime runtime = ScriptRuntime.getInstance();
+
+        System.out.println("Testing streaming error session:");
+        System.out.println("=".repeat(50));
+
+        StreamSession session = runtime.runStreaming("invalid syntax here", null);
+        assertTrue(session.isError());
+        assertNotNull(session.getError());
+        assertTrue(session.getError().contains("Unable to resolve reference"));
+
+        System.out.println("Error: " + session.getError());
+        System.out.println("✓ Streaming error session passed!");
+        System.out.println("=".repeat(50));
     }
 
     static class Result {

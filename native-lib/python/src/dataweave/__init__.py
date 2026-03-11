@@ -34,10 +34,11 @@ Handling errors:
 
 import base64
 import ctypes
+import io
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Iterator, Optional, Union
 
 
 class DataWeaveError(Exception):
@@ -46,6 +47,9 @@ class DataWeaveError(Exception):
 
 class DataWeaveLibraryNotFoundError(Exception):
     pass
+
+
+_DEFAULT_CHUNK_SIZE = 8192
 
 
 _ENV_NATIVE_LIB = "DATAWEAVE_NATIVE_LIB"
@@ -86,6 +90,95 @@ class ExecutionResult:
         if self.binary:
             return self.result
         return self.get_bytes().decode(self.charset or "utf-8")
+
+
+class DataWeaveStream(io.RawIOBase):
+    """A file-like stream that reads script execution results from the native library
+    without loading the entire output into memory.
+
+    Implements :class:`io.RawIOBase` so it can be wrapped with
+    :func:`io.BufferedReader` or used anywhere a binary file-like object is expected.
+
+    Usage::
+
+        with dw.run_stream("output application/json --- payload") as stream:
+            for chunk in stream:
+                process(chunk)
+
+    The stream **must** be closed (or used as a context manager) to release native
+    resources.  Metadata (``mimeType``, ``charset``, ``binary``) is available as
+    attributes immediately after creation.
+    """
+
+    def __init__(self, lib, thread, handle: int, metadata: dict):
+        super().__init__()
+        self._lib = lib
+        self._thread = thread
+        self._handle = handle
+        self.mimeType: Optional[str] = metadata.get("mimeType")
+        self.charset: Optional[str] = metadata.get("charset")
+        self.binary: bool = bool(metadata.get("binary", False))
+        self._closed_native = False
+
+    # ── io.RawIOBase interface ──────────────────────────────────────────
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b) -> Optional[int]:
+        """Read up to ``len(b)`` bytes into the pre-allocated buffer *b*."""
+        if self.closed:
+            raise ValueError("I/O operation on closed stream")
+        buf = (ctypes.c_char * len(b))()
+        n = self._lib.run_script_read(self._thread, self._handle, buf, len(b))
+        if n <= 0:
+            return 0
+        b[:n] = buf[:n]
+        return n
+
+    def read(self, size: int = -1) -> bytes:
+        """Read up to *size* bytes.  ``-1`` reads until EOF."""
+        if self.closed:
+            raise ValueError("I/O operation on closed stream")
+        if size == 0:
+            return b""
+        if size < 0:
+            chunks = []
+            while True:
+                chunk = self.read(_DEFAULT_CHUNK_SIZE)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks)
+        buf = ctypes.create_string_buffer(size)
+        n = self._lib.run_script_read(self._thread, self._handle, buf, size)
+        if n <= 0:
+            return b""
+        return buf.raw[:n]
+
+    def close(self):
+        if not self._closed_native and self._handle is not None:
+            try:
+                self._lib.run_script_close(self._thread, self._handle)
+            except Exception:
+                pass
+            self._closed_native = True
+        super().close()
+
+    # ── convenience helpers ─────────────────────────────────────────────
+
+    def read_all_string(self) -> str:
+        """Read the full result and decode it as a string using the session charset."""
+        raw = self.read(-1)
+        return raw.decode(self.charset or "utf-8")
+
+    def __iter__(self) -> Iterator[bytes]:
+        """Iterate over the stream in chunks."""
+        while True:
+            chunk = self.read(_DEFAULT_CHUNK_SIZE)
+            if not chunk:
+                break
+            yield chunk
 
 
 def _parse_native_encoded_response(raw: str) -> ExecutionResult:
@@ -284,6 +377,45 @@ class DataWeave:
             self._lib.free_cstring.argtypes = [self._graal_isolatethread_t_ptr, ctypes.c_void_p]
             self._lib.free_cstring.restype = None
 
+        # Streaming API
+        if hasattr(self._lib, "run_script_open"):
+            self._lib.run_script_open.argtypes = [
+                self._graal_isolatethread_t_ptr,
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+            ]
+            self._lib.run_script_open.restype = ctypes.c_long
+
+            self._lib.run_script_read.argtypes = [
+                self._graal_isolatethread_t_ptr,
+                ctypes.c_long,
+                ctypes.c_char_p,
+                ctypes.c_int,
+            ]
+            self._lib.run_script_read.restype = ctypes.c_int
+
+            self._lib.run_script_metadata.argtypes = [
+                self._graal_isolatethread_t_ptr,
+                ctypes.c_long,
+            ]
+            self._lib.run_script_metadata.restype = ctypes.c_void_p
+
+            self._lib.run_script_stream_error.argtypes = [
+                self._graal_isolatethread_t_ptr,
+                ctypes.c_long,
+            ]
+            self._lib.run_script_stream_error.restype = ctypes.c_void_p
+
+            self._lib.run_script_close.argtypes = [
+                self._graal_isolatethread_t_ptr,
+                ctypes.c_long,
+            ]
+            self._lib.run_script_close.restype = None
+
+            self._has_streaming = True
+        else:
+            self._has_streaming = False
+
     def _decode_and_free(self, ptr: Optional[int]) -> str:
         if not ptr:
             return ""
@@ -321,6 +453,67 @@ class DataWeave:
         self._thread = None
         self._isolate = None
         self._lib = None
+
+    def run_stream(self, script: str, inputs: Optional[Dict[str, Any]] = None) -> DataWeaveStream:
+        """Execute a DataWeave script and return a :class:`DataWeaveStream` for
+        reading the result incrementally.
+
+        The returned stream **must** be closed (or used as a context manager) to
+        release native resources.
+
+        :param script: the DataWeave script source
+        :param inputs: optional input bindings
+        :return: a :class:`DataWeaveStream`
+        :raises DataWeaveError: if the runtime is not initialized or streaming is unsupported
+        """
+        if not self._initialized:
+            raise DataWeaveError("DataWeave runtime not initialized. Call initialize() first.")
+        if not self._has_streaming:
+            raise DataWeaveError("Native library does not support the streaming API (run_script_open not found).")
+
+        if inputs is None:
+            inputs = {}
+
+        normalized_inputs = {key: _normalize_input_value(val) for key, val in inputs.items()}
+        inputs_json = json.dumps(normalized_inputs)
+
+        try:
+            handle = self._lib.run_script_open(
+                self._thread,
+                script.encode("utf-8"),
+                inputs_json.encode("utf-8"),
+            )
+
+            # Check for error session
+            err_ptr = self._lib.run_script_stream_error(self._thread, handle)
+            err_msg = ""
+            if err_ptr:
+                try:
+                    err_msg = ctypes.string_at(err_ptr).decode("utf-8")
+                finally:
+                    if hasattr(self._lib, "free_cstring"):
+                        self._lib.free_cstring(self._thread, err_ptr)
+
+            if err_msg:
+                self._lib.run_script_close(self._thread, handle)
+                raise DataWeaveError(err_msg)
+
+            # Fetch metadata
+            meta_ptr = self._lib.run_script_metadata(self._thread, handle)
+            metadata = {}
+            if meta_ptr:
+                try:
+                    meta_raw = ctypes.string_at(meta_ptr).decode("utf-8")
+                    metadata = json.loads(meta_raw)
+                finally:
+                    if hasattr(self._lib, "free_cstring"):
+                        self._lib.free_cstring(self._thread, meta_ptr)
+
+            return DataWeaveStream(self._lib, self._thread, handle, metadata)
+        except DataWeaveError:
+            raise
+        except Exception as e:
+            raise DataWeaveError(f"Failed to open streaming session: {e}")
 
     def run(self, script: str, inputs: Optional[Dict[str, Any]] = None) -> ExecutionResult:
         if not self._initialized:
@@ -367,6 +560,11 @@ def run_script(script: str, inputs: Optional[Dict[str, Any]] = None) -> Executio
     return _get_global_instance().run(script, inputs)
 
 
+def run_stream(script: str, inputs: Optional[Dict[str, Any]] = None) -> DataWeaveStream:
+    """Execute a script and return a :class:`DataWeaveStream` for incremental reading."""
+    return _get_global_instance().run_stream(script, inputs)
+
+
 def cleanup():
     global _global_instance
     if _global_instance is not None:
@@ -377,8 +575,10 @@ def cleanup():
 __all__ = [
     "DataWeaveError",
     "DataWeaveLibraryNotFoundError",
+    "DataWeaveStream",
     "ExecutionResult",
     "InputValue",
     "run_script",
+    "run_stream",
     "cleanup",
 ]
