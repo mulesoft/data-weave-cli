@@ -12,6 +12,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.Charset;
 import java.util.Base64;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 
 class ScriptRuntimeTest {
 
@@ -334,6 +336,120 @@ class ScriptRuntimeTest {
 
         System.out.printf("Read %d chunks, total %d bytes%n", chunkCount, bos.size());
         System.out.println("✓ Streaming chunked read passed!");
+        System.out.println("=".repeat(50));
+    }
+
+    @Test
+    void streamWithStreamingInput() throws Exception {
+        ScriptRuntime runtime = ScriptRuntime.getInstance();
+
+        System.out.println("Testing streaming with streaming input:");
+        System.out.println("=".repeat(50));
+
+        // Create an input stream session for JSON data
+        InputStreamSession inputSession = new InputStreamSession("application/json", "UTF-8");
+        long inputHandle = inputSession.register();
+
+        // Build inputs JSON referencing the streamHandle
+        String inputsJson = "{\"payload\": {\"streamHandle\": \"" + inputHandle + "\", \"mimeType\": \"application/json\"}}";
+
+        // The DW engine will read from the PipedInputStream on the main thread,
+        // so we must feed data from a separate thread.
+        CountDownLatch started = new CountDownLatch(1);
+        AtomicReference<Exception> feedError = new AtomicReference<>();
+
+        Thread feeder = new Thread(() -> {
+            try {
+                started.countDown();
+                String jsonData = "{\"name\": \"Alice\", \"age\": 30}";
+                byte[] bytes = jsonData.getBytes("UTF-8");
+                inputSession.write(bytes, bytes.length);
+                inputSession.closeWriter();
+            } catch (Exception e) {
+                feedError.set(e);
+            }
+        });
+        feeder.start();
+        started.await();
+
+        // Run streaming with the piped input
+        StreamSession session = runtime.runStreaming("output application/json\n---\npayload.name", inputsJson);
+        assertFalse(session.isError(), "Expected successful session but got: " + session.getError());
+
+        byte[] buf = new byte[64];
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        int n;
+        while ((n = session.read(buf, buf.length)) > 0) {
+            bos.write(buf, 0, n);
+        }
+        String result = bos.toString(session.getCharset());
+        assertEquals("\"Alice\"", result);
+        StreamSession.close(session.register());
+        InputStreamSession.close(inputHandle);
+        feeder.join(5000);
+        assertNull(feedError.get(), "Feeder thread threw: " + feedError.get());
+
+        System.out.println("Result: " + result);
+        System.out.println("✓ Streaming with streaming input passed!");
+        System.out.println("=".repeat(50));
+    }
+
+    @Test
+    void streamWithLargeStreamingInput() throws Exception {
+        ScriptRuntime runtime = ScriptRuntime.getInstance();
+
+        System.out.println("Testing streaming with large streaming input:");
+        System.out.println("=".repeat(50));
+
+        InputStreamSession inputSession = new InputStreamSession("application/json", "UTF-8");
+        long inputHandle = inputSession.register();
+
+        String inputsJson = "{\"payload\": {\"streamHandle\": \"" + inputHandle + "\", \"mimeType\": \"application/json\"}}";
+
+        // Feed a large JSON array from a separate thread
+        AtomicReference<Exception> feedError = new AtomicReference<>();
+        Thread feeder = new Thread(() -> {
+            try {
+                StringBuilder sb = new StringBuilder("[");
+                for (int i = 1; i <= 1000; i++) {
+                    if (i > 1) sb.append(",");
+                    sb.append("{\"id\":").append(i).append(",\"val\":\"item_").append(i).append("\"}");
+                }
+                sb.append("]");
+                byte[] bytes = sb.toString().getBytes("UTF-8");
+                // Write in chunks to simulate streaming
+                int chunkSize = 4096;
+                for (int off = 0; off < bytes.length; off += chunkSize) {
+                    int len = Math.min(chunkSize, bytes.length - off);
+                    byte[] chunk = new byte[len];
+                    System.arraycopy(bytes, off, chunk, 0, len);
+                    inputSession.write(chunk, len);
+                }
+                inputSession.closeWriter();
+            } catch (Exception e) {
+                feedError.set(e);
+            }
+        });
+        feeder.start();
+
+        StreamSession session = runtime.runStreaming("output application/json\n---\nsizeOf(payload)", inputsJson);
+        assertFalse(session.isError(), "Expected successful session but got: " + session.getError());
+
+        byte[] buf = new byte[256];
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        int n;
+        while ((n = session.read(buf, buf.length)) > 0) {
+            bos.write(buf, 0, n);
+        }
+        String result = bos.toString(session.getCharset());
+        assertEquals("1000", result);
+        StreamSession.close(session.register());
+        InputStreamSession.close(inputHandle);
+        feeder.join(10000);
+        assertNull(feedError.get(), "Feeder thread threw: " + feedError.get());
+
+        System.out.println("Result: " + result);
+        System.out.println("✓ Streaming with large streaming input passed!");
         System.out.println("=".repeat(50));
     }
 

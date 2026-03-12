@@ -22,3 +22,5 @@ out/
 .graalvm
 
 grimoires/
+
+.windsurf/

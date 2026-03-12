@@ -9,9 +9,64 @@ sys.path.insert(0, str(_PYTHON_SRC_DIR))
 import dataweave
 import resource
 import psutil, os
+import threading
+import json
 
-def example_streaming_larger_than_memory():
-    print("\nTesting streaming larger than memory...")
+def example_streaming_input_output():
+    print("\nTesting streaming input and output (square numbers)...")
+    try:
+        num_elements = 1_000_000 * 20
+        chunk_size = 1024 * 64
+
+        input_stream = dataweave.open_input_stream("application/json", "utf-8")
+
+        script = """output application/json deferred=true
+---
+payload map ($ * $)"""
+
+        def feed_input():
+            try:
+                input_stream.write(b"[")
+                for i in range(num_elements):
+                    if i > 0:
+                        input_stream.write(b",")
+                    input_stream.write(str(i).encode("utf-8"))
+                input_stream.write(b"]")
+            finally:
+                input_stream.close()
+
+        feeder = threading.Thread(target=feed_input, daemon=True)
+        feeder.start()
+
+        with dataweave.run_stream(script, inputs={"payload": input_stream}) as stream:
+            print(f">>> Output mimeType={stream.mimeType}, charset={stream.charset}, binary={stream.binary}")
+            chunk_count = 0
+            total_bytes = 0
+            while True:
+                chunk = stream.read(chunk_size)
+                if not chunk:
+                    break
+                chunk_count += 1
+                total_bytes += len(chunk)
+                if chunk_count % 1000 == 0:
+                    usage = resource.getrusage(resource.RUSAGE_SELF)
+                    current_rss = psutil.Process(os.getpid()).memory_info().rss
+                    print(f"--- chunk {chunk_count}: {len(chunk)} bytes, total: {total_bytes / 1048576:.1f} MB, Max RSS: {usage.ru_maxrss / 1048576:.1f} MB, Current RSS: {current_rss / 1048576:.1f} MB ---")
+
+        feeder.join()
+
+        peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576
+        print(f"\n[OK] Streaming input/output done ({chunk_count} chunks, {total_bytes/ 1048576:.1f} MB, {num_elements:,} elements)")
+        print(f"Peak memory (max RSS): {peak_rss:.1f} MB")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Streaming input/output failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def example_streaming_output_larger_than_memory():
+    print("\nTesting streaming output larger than memory...")
     try:
         script = """output application/json deferred=true
 ---
@@ -74,7 +129,8 @@ def example_streaming_adding_chunks():
 
 
 def main():
-    example_streaming_larger_than_memory()
+    example_streaming_input_output()
+#     example_streaming_output_larger_than_memory()
 #     example_streaming_adding_chunks()
 
 

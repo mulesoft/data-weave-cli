@@ -181,6 +181,116 @@ class DataWeaveStream(io.RawIOBase):
             yield chunk
 
 
+class DataWeaveInputStream:
+    """Wraps a native input stream session handle, allowing the caller to
+    push data into the DW engine as an input binding.
+
+    The caller writes bytes via :meth:`write` and signals EOF via :meth:`close`.
+    This object is intended to be used from a **separate thread** that feeds
+    input while the main thread reads the output stream.
+
+    Usage::
+
+        dw = DataWeave()
+        dw.initialize()
+        input_handle = dw.open_input_stream("application/json")
+
+        def feed():
+            with open("large.json", "rb") as f:
+                while chunk := f.read(8192):
+                    input_handle.write(chunk)
+            input_handle.close()
+
+        import threading
+        t = threading.Thread(target=feed)
+        t.start()
+
+        with dw.run_stream("payload", inputs={"payload": input_handle}) as out:
+            for chunk in out:
+                process(chunk)
+        t.join()
+    """
+
+    def __init__(self, lib, isolate, isolate_t_ptr, isolatethread_t_ptr, handle: int, mime_type: str, charset: Optional[str] = None):
+        self._lib = lib
+        self._isolate = isolate
+        self._isolate_t_ptr = isolate_t_ptr
+        self._isolatethread_t_ptr = isolatethread_t_ptr
+        self._handle = handle
+        self.mime_type: str = mime_type
+        self.charset: Optional[str] = charset
+        self._closed = False
+        self._attached_thread = None
+
+    @property
+    def handle(self) -> int:
+        """The native handle for this input stream session."""
+        return self._handle
+
+    def _ensure_thread_attached(self):
+        """Attach the current OS thread to the GraalVM isolate if not already attached.
+
+        Each OS thread that calls a ``@CEntryPoint`` function must have its own
+        ``IsolateThread`` token.  This method calls ``graal_attach_thread`` to
+        obtain one for the feeder thread.
+        """
+        if self._attached_thread is not None:
+            return
+        self._lib.graal_attach_thread.argtypes = [
+            self._isolate_t_ptr,
+            ctypes.POINTER(self._isolatethread_t_ptr),
+        ]
+        self._lib.graal_attach_thread.restype = ctypes.c_int
+
+        thread = self._isolatethread_t_ptr()
+        rc = self._lib.graal_attach_thread(self._isolate, ctypes.byref(thread))
+        if rc != 0:
+            raise DataWeaveError(f"Failed to attach feeder thread to GraalVM isolate (error {rc})")
+        self._attached_thread = thread
+
+    def _detach_thread(self):
+        """Detach the feeder thread from the GraalVM isolate."""
+        if self._attached_thread is not None:
+            try:
+                self._lib.graal_detach_thread.argtypes = [self._isolatethread_t_ptr]
+                self._lib.graal_detach_thread.restype = ctypes.c_int
+                self._lib.graal_detach_thread(self._attached_thread)
+            except Exception:
+                pass
+            self._attached_thread = None
+
+    def write(self, data: bytes) -> None:
+        """Write bytes into the input stream.
+
+        :param data: the bytes to write
+        :raises DataWeaveError: on I/O failure or if the stream is closed
+        """
+        if self._closed:
+            raise DataWeaveError("Input stream is already closed")
+        if not data:
+            return
+        self._ensure_thread_attached()
+        buf = ctypes.create_string_buffer(data)
+        rc = self._lib.input_stream_write(self._attached_thread, self._handle, buf, len(data))
+        if rc != 0:
+            raise DataWeaveError("Failed to write to input stream")
+
+    def close(self) -> None:
+        """Close the write end of the pipe, signalling EOF to the DW engine."""
+        if not self._closed:
+            self._ensure_thread_attached()
+            self._lib.input_stream_close(self._attached_thread, self._handle)
+            self._closed = True
+            self._detach_thread()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+
 def _parse_native_encoded_response(raw: str) -> ExecutionResult:
     if raw is None:
         return ExecutionResult(False, None, "Native returned null", False, None, None)
@@ -416,6 +526,33 @@ class DataWeave:
         else:
             self._has_streaming = False
 
+        # Streaming Input API
+        if hasattr(self._lib, "input_stream_open"):
+            self._lib.input_stream_open.argtypes = [
+                self._graal_isolatethread_t_ptr,
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+            ]
+            self._lib.input_stream_open.restype = ctypes.c_long
+
+            self._lib.input_stream_write.argtypes = [
+                self._graal_isolatethread_t_ptr,
+                ctypes.c_long,
+                ctypes.c_char_p,
+                ctypes.c_int,
+            ]
+            self._lib.input_stream_write.restype = ctypes.c_int
+
+            self._lib.input_stream_close.argtypes = [
+                self._graal_isolatethread_t_ptr,
+                ctypes.c_long,
+            ]
+            self._lib.input_stream_close.restype = ctypes.c_int
+
+            self._has_streaming_input = True
+        else:
+            self._has_streaming_input = False
+
     def _decode_and_free(self, ptr: Optional[int]) -> str:
         if not ptr:
             return ""
@@ -454,6 +591,38 @@ class DataWeave:
         self._isolate = None
         self._lib = None
 
+    def open_input_stream(self, mime_type: str, charset: Optional[str] = None) -> DataWeaveInputStream:
+        """Create a new streaming input that can be written to from a separate thread.
+
+        The returned :class:`DataWeaveInputStream` can be passed as a value in the
+        ``inputs`` dict of :meth:`run_stream`. The caller **must** write data and
+        call :meth:`DataWeaveInputStream.close` (or use it as a context manager)
+        from a **separate thread** to avoid deadlocks.
+
+        :param mime_type: the MIME type of the data being streamed
+        :param charset: the charset (default UTF-8)
+        :return: a :class:`DataWeaveInputStream`
+        :raises DataWeaveError: if the runtime is not initialized or streaming input is unsupported
+        """
+        if not self._initialized:
+            raise DataWeaveError("DataWeave runtime not initialized. Call initialize() first.")
+        if not self._has_streaming_input:
+            raise DataWeaveError("Native library does not support streaming input API (input_stream_open not found).")
+
+        charset_arg = charset.encode("utf-8") if charset else None
+        handle = self._lib.input_stream_open(
+            self._thread,
+            mime_type.encode("utf-8"),
+            charset_arg,
+        )
+        if handle <= 0:
+            raise DataWeaveError("Failed to create input stream session")
+        return DataWeaveInputStream(
+            self._lib, self._isolate,
+            self._graal_isolate_t_ptr, self._graal_isolatethread_t_ptr,
+            handle, mime_type, charset,
+        )
+
     def run_stream(self, script: str, inputs: Optional[Dict[str, Any]] = None) -> DataWeaveStream:
         """Execute a DataWeave script and return a :class:`DataWeaveStream` for
         reading the result incrementally.
@@ -474,7 +643,17 @@ class DataWeave:
         if inputs is None:
             inputs = {}
 
-        normalized_inputs = {key: _normalize_input_value(val) for key, val in inputs.items()}
+        normalized_inputs = {}
+        for key, val in inputs.items():
+            if isinstance(val, DataWeaveInputStream):
+                normalized_inputs[key] = {
+                    "streamHandle": str(val.handle),
+                    "mimeType": val.mime_type,
+                }
+                if val.charset:
+                    normalized_inputs[key]["charset"] = val.charset
+            else:
+                normalized_inputs[key] = _normalize_input_value(val)
         inputs_json = json.dumps(normalized_inputs)
 
         try:
@@ -565,6 +744,11 @@ def run_stream(script: str, inputs: Optional[Dict[str, Any]] = None) -> DataWeav
     return _get_global_instance().run_stream(script, inputs)
 
 
+def open_input_stream(mime_type: str, charset: Optional[str] = None) -> DataWeaveInputStream:
+    """Create a streaming input session. See :meth:`DataWeave.open_input_stream`."""
+    return _get_global_instance().open_input_stream(mime_type, charset)
+
+
 def cleanup():
     global _global_instance
     if _global_instance is not None:
@@ -574,10 +758,12 @@ def cleanup():
 
 __all__ = [
     "DataWeaveError",
+    "DataWeaveInputStream",
     "DataWeaveLibraryNotFoundError",
     "DataWeaveStream",
     "ExecutionResult",
     "InputValue",
+    "open_input_stream",
     "run_script",
     "run_stream",
     "cleanup",

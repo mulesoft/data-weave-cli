@@ -181,8 +181,28 @@ public class ScriptRuntime {
                 String nestedContent = json.substring(pos + 1, objEnd);
                 pos = objEnd + 1;
                 
+                String streamHandleRaw = extractStringValue(nestedContent, "streamHandle");
                 String contentRaw = extractStringValue(nestedContent, "content");
-                if (contentRaw != null) {
+
+                if (streamHandleRaw != null) {
+                    // Streaming input: look up the InputStreamSession by handle
+                    long streamHandle = Long.parseLong(streamHandleRaw);
+                    InputStreamSession inputSession = InputStreamSession.get(streamHandle);
+                    if (inputSession == null) {
+                        throw new RuntimeException("Invalid streamHandle " + streamHandle + " for input '" + name + "'");
+                    }
+                    String mimeTypeRaw = extractStringValue(nestedContent, "mimeType");
+                    if (mimeTypeRaw == null) {
+                        mimeTypeRaw = inputSession.getMimeType();
+                    }
+                    String charsetRaw = extractStringValue(nestedContent, "charset");
+                    Charset charset = Charset.forName(charsetRaw != null ? charsetRaw : inputSession.getCharset());
+                    Option<String> mimeType = Option.apply(mimeTypeRaw);
+
+                    BindingValue bindingValue = new BindingValue(inputSession.getInputStream(), mimeType, Map$.MODULE$.empty(), charset);
+                    bindings.addBinding(name, bindingValue);
+
+                } else if (contentRaw != null) {
                     String mimeTypeRaw = extractStringValue(nestedContent, "mimeType");
                     String propertiesRaw = null;
                     if (nestedContent.indexOf("\"properties\": {") != -1) {

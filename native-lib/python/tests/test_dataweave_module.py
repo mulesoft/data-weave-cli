@@ -187,6 +187,123 @@ def test_streaming_context_manager():
         print(f"[FAIL] Streaming context manager failed: {e}")
         return False
 
+def test_streaming_input_basic():
+    """Test streaming input with a separate feeder thread"""
+    print("\nTesting streaming input basic...")
+    try:
+        import threading
+
+        with dataweave.DataWeave() as dw:
+            input_stream = dw.open_input_stream("application/json")
+
+            def feed():
+                try:
+                    input_stream.write(b'{"name": "Alice", "age": 30}')
+                    input_stream.close()
+                except Exception as e:
+                    print(f"  Feed error: {e}")
+
+            t = threading.Thread(target=feed)
+            t.start()
+
+            with dw.run_stream(
+                "output application/json\n---\npayload.name",
+                inputs={"payload": input_stream},
+            ) as out:
+                result = out.read_all_string()
+
+            t.join(timeout=5)
+            assert result == '"Alice"', f"Expected '\"Alice\"', got '{result}'"
+
+        print("[OK] Streaming input basic works")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Streaming input basic failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def test_streaming_input_large():
+    """Test streaming a large input in chunks from a feeder thread"""
+    print("\nTesting streaming input large...")
+    try:
+        import threading
+
+        with dataweave.DataWeave() as dw:
+            input_stream = dw.open_input_stream("application/json")
+
+            def feed():
+                try:
+                    # Build a large JSON array and stream it in chunks
+                    data = b"["
+                    for i in range(1, 501):
+                        if i > 1:
+                            data += b","
+                        data += f'{{"id":{i},"val":"item_{i}"}}'.encode()
+                    data += b"]"
+                    chunk_size = 4096
+                    for offset in range(0, len(data), chunk_size):
+                        input_stream.write(data[offset:offset + chunk_size])
+                    input_stream.close()
+                except Exception as e:
+                    print(f"  Feed error: {e}")
+
+            t = threading.Thread(target=feed)
+            t.start()
+
+            with dw.run_stream(
+                "output application/json\n---\nsizeOf(payload)",
+                inputs={"payload": input_stream},
+            ) as out:
+                result = out.read_all_string()
+
+            t.join(timeout=10)
+            assert result == "500", f"Expected '500', got '{result}'"
+
+        print("[OK] Streaming input large works")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Streaming input large failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def test_streaming_input_context_manager():
+    """Test DataWeaveInputStream as a context manager"""
+    print("\nTesting streaming input context manager...")
+    try:
+        import threading
+
+        with dataweave.DataWeave() as dw:
+            input_stream = dw.open_input_stream("application/json")
+
+            def feed():
+                try:
+                    with input_stream:
+                        input_stream.write(b'[1, 2, 3]')
+                except Exception as e:
+                    print(f"  Feed error: {e}")
+
+            t = threading.Thread(target=feed)
+            t.start()
+
+            with dw.run_stream(
+                "output application/json\n---\npayload[2]",
+                inputs={"payload": input_stream},
+            ) as out:
+                result = out.read_all_string()
+
+            t.join(timeout=5)
+            assert result == "3", f"Expected '3', got '{result}'"
+
+        print("[OK] Streaming input context manager works")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Streaming input context manager failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main():
     """Run all tests"""
     print("="*70)
@@ -205,6 +322,9 @@ def main():
         results.append(test_streaming_chunked_read())
         results.append(test_streaming_iterator())
         results.append(test_streaming_context_manager())
+        results.append(test_streaming_input_basic())
+        results.append(test_streaming_input_large())
+        results.append(test_streaming_input_context_manager())
         
         # Cleanup
         dataweave.cleanup()

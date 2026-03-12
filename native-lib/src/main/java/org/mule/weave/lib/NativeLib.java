@@ -50,7 +50,79 @@ public class NativeLib {
         UnmanagedMemory.free(pointer);
     }
 
-    // ── Streaming API ────────────────────────────────────────────────────
+    // ── Streaming Input API ─────────────────────────────────────────────
+
+    /**
+     * Creates a new input stream session that the caller can write data into.
+     * The returned handle references a {@link java.io.PipedInputStream}/{@link java.io.PipedOutputStream}
+     * pair. The caller writes chunks via {@link #inputStreamWrite} and signals EOF
+     * with {@link #inputStreamClose}. The handle can then be referenced in the inputs
+     * JSON passed to {@link #runScriptOpen} using a {@code "streamHandle"} key.
+     *
+     * @param thread   the isolate thread
+     * @param mimeType the MIME type of the data being streamed (C string)
+     * @param charset  the charset of the data (C string), may be null for UTF-8
+     * @return a positive handle for the input stream session
+     */
+    @CEntryPoint(name = "input_stream_open")
+    public static long inputStreamOpen(IsolateThread thread, CCharPointer mimeType, CCharPointer charset) {
+        String mime = CTypeConversion.toJavaString(mimeType);
+        String cs = charset.isNull() ? null : CTypeConversion.toJavaString(charset);
+        InputStreamSession session = new InputStreamSession(mime, cs);
+        return session.register();
+    }
+
+    /**
+     * Writes a chunk of bytes into an open input stream session.
+     *
+     * @param thread     the isolate thread
+     * @param handle     the input stream session handle
+     * @param buffer     the data to write
+     * @param bufferSize number of bytes to write from the buffer
+     * @return {@code 0} on success, {@code -1} on error (invalid handle or I/O failure)
+     */
+    @CEntryPoint(name = "input_stream_write")
+    public static int inputStreamWrite(IsolateThread thread, long handle, CCharPointer buffer, int bufferSize) {
+        InputStreamSession session = InputStreamSession.get(handle);
+        if (session == null) {
+            return -1;
+        }
+        try {
+            byte[] tmp = new byte[bufferSize];
+            for (int i = 0; i < bufferSize; i++) {
+                tmp[i] = buffer.read(i);
+            }
+            session.write(tmp, bufferSize);
+            return 0;
+        } catch (IOException e) {
+            return -1;
+        }
+    }
+
+    /**
+     * Closes the write end of an input stream session, signalling EOF to the reader.
+     * The session remains in the registry so the DW engine can finish reading.
+     * It will be fully cleaned up when the output streaming session is closed.
+     *
+     * @param thread the isolate thread
+     * @param handle the input stream session handle
+     * @return {@code 0} on success, {@code -1} on error
+     */
+    @CEntryPoint(name = "input_stream_close")
+    public static int inputStreamClose(IsolateThread thread, long handle) {
+        InputStreamSession session = InputStreamSession.get(handle);
+        if (session == null) {
+            return -1;
+        }
+        try {
+            session.closeWriter();
+            return 0;
+        } catch (IOException e) {
+            return -1;
+        }
+    }
+
+    // ── Streaming Output API ──────────────────────────────────────────────
 
     /**
      * Executes a DataWeave script and returns an opaque handle to a streaming session.
