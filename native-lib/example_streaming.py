@@ -11,11 +11,13 @@ import resource
 import psutil, os
 import threading
 import json
+import time
 
 def example_streaming_input_output():
     print("\nTesting streaming input and output (square numbers)...")
     try:
-        num_elements = 1_000_000 * 20
+        start_time = time.monotonic()
+        num_elements = 1_000_000 * 10
         chunk_size = 1024 * 64
 
         input_stream = dataweave.open_input_stream("application/json", "utf-8")
@@ -39,7 +41,9 @@ payload map ($ * $)"""
         feeder.start()
 
         with dataweave.run_stream(script, inputs={"payload": input_stream}) as stream:
-            print(f">>> Output mimeType={stream.mimeType}, charset={stream.charset}, binary={stream.binary}")
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            current_rss = psutil.Process(os.getpid()).memory_info().rss
+            print(f">>> Output mimeType={stream.mimeType}, charset={stream.charset}, binary={stream.binary}, Max RSS: {usage.ru_maxrss / 1048576:.1f} MB, Current RSS: {current_rss / 1048576:.1f} MB ---")
             chunk_count = 0
             total_bytes = 0
             while True:
@@ -48,7 +52,7 @@ payload map ($ * $)"""
                     break
                 chunk_count += 1
                 total_bytes += len(chunk)
-                if chunk_count % 1000 == 0:
+                if chunk_count % 5000 == 0:
                     usage = resource.getrusage(resource.RUSAGE_SELF)
                     current_rss = psutil.Process(os.getpid()).memory_info().rss
                     print(f"--- chunk {chunk_count}: {len(chunk)} bytes, total: {total_bytes / 1048576:.1f} MB, Max RSS: {usage.ru_maxrss / 1048576:.1f} MB, Current RSS: {current_rss / 1048576:.1f} MB ---")
@@ -56,7 +60,9 @@ payload map ($ * $)"""
         feeder.join()
 
         peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576
-        print(f"\n[OK] Streaming input/output done ({chunk_count} chunks, {total_bytes/ 1048576:.1f} MB, {num_elements:,} elements)")
+        elapsed = time.monotonic() - start_time
+        mins, secs = divmod(elapsed, 60)
+        print(f"\n[OK] Streaming input/output done ({chunk_count} chunks, {total_bytes/ 1048576:.1f} MB, {num_elements:,} elements) - Time: {int(mins)}:{secs:06.3f}")
         print(f"Peak memory (max RSS): {peak_rss:.1f} MB")
         return True
     except Exception as e:
