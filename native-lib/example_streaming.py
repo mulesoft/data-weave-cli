@@ -13,11 +13,93 @@ import threading
 import json
 import time
 
+def example_streaming_input_output_callback():
+    print("\nTesting streaming input and output using callbacks (square numbers)...")
+    try:
+        start_time = time.monotonic()
+        num_elements = 1_000_000 * 50
+
+        script = """output application/json deferred=true
+---
+payload map ($ * $)"""
+
+        # -- input generator (called by native on a background thread) --
+        input_iter = iter(range(num_elements))
+        input_started = False
+        input_done = False
+
+        def read_callback(buf_size):
+            nonlocal input_started, input_done
+            if input_done:
+                return b""
+            parts = []
+            if not input_started:
+                parts.append(b"[")
+                input_started = True
+            remaining = buf_size - sum(len(p) for p in parts)
+            try:
+                while remaining > 0:
+                    i = next(input_iter)
+                    token = (b"," if i > 0 else b"") + str(i).encode("utf-8")
+                    if len(token) > remaining:
+                        # put it back via a wrapper – simpler: just include it and break
+                        parts.append(token)
+                        break
+                    parts.append(token)
+                    remaining -= len(token)
+            except StopIteration:
+                parts.append(b"]")
+                input_done = True
+            return b"".join(parts)
+
+        # -- output collector (called by native on the calling thread) --
+        chunk_count = 0
+        total_bytes = 0
+
+        def write_callback(data):
+            nonlocal chunk_count, total_bytes
+            chunk_count += 1
+            total_bytes += len(data)
+            if chunk_count % 5000 == 0:
+                usage = resource.getrusage(resource.RUSAGE_SELF)
+                current_rss = psutil.Process(os.getpid()).memory_info().rss
+                print(f"--- chunk {chunk_count}: {len(data)} bytes, total: {total_bytes / 1048576:.1f} MB, Max RSS: {usage.ru_maxrss / 1048576:.1f} MB, Current RSS: {current_rss / 1048576:.1f} MB ---")
+            return 0
+
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        current_rss = psutil.Process(os.getpid()).memory_info().rss
+        print(f">>> Before run_input_output_callback, Max RSS: {usage.ru_maxrss / 1048576:.1f} MB, Current RSS: {current_rss / 1048576:.1f} MB ---")
+
+        result = dataweave.run_input_output_callback(
+            script,
+            input_name="payload",
+            input_mime_type="application/json",
+            read_callback=read_callback,
+            write_callback=write_callback,
+            input_charset="utf-8",
+        )
+
+        if not result.get("success", False):
+            raise Exception(result.get("error", "Unknown error"))
+
+        peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1048576
+        elapsed = time.monotonic() - start_time
+        mins, secs = divmod(elapsed, 60)
+        print(f"\n[OK] Streaming input/output callback done ({chunk_count} chunks, {total_bytes / 1048576:.1f} MB, {num_elements:,} elements) - Time: {int(mins)}:{secs:06.3f}")
+        print(f"Peak memory (max RSS): {peak_rss:.1f} MB")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Streaming input/output callback failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def example_streaming_input_output():
     print("\nTesting streaming input and output (square numbers)...")
     try:
         start_time = time.monotonic()
-        num_elements = 1_000_000 * 10
+        num_elements = 1_000_000 * 50
         chunk_size = 1024 * 64
 
         input_stream = dataweave.open_input_stream("application/json", "utf-8")
@@ -135,7 +217,8 @@ def example_streaming_adding_chunks():
 
 
 def main():
-    example_streaming_input_output()
+    example_streaming_input_output_callback()
+#     example_streaming_input_output()
 #     example_streaming_output_larger_than_memory()
 #     example_streaming_adding_chunks()
 

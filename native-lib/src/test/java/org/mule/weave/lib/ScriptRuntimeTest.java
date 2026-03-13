@@ -470,6 +470,116 @@ class ScriptRuntimeTest {
         System.out.println("=".repeat(50));
     }
 
+    // ── Callback-based streaming pattern tests ──────────────────────────
+
+    @Test
+    void callbackOutputStreaming() throws IOException {
+        ScriptRuntime runtime = ScriptRuntime.getInstance();
+
+        System.out.println("Testing callback-based output streaming:");
+        System.out.println("=".repeat(50));
+
+        StreamSession session = runtime.runStreaming("output application/json\n---\n{items: (1 to 50) map {id: $}}", null);
+        assertFalse(session.isError());
+
+        // Simulate the write-callback pattern: read chunks and collect them
+        ByteArrayOutputStream collected = new ByteArrayOutputStream();
+        byte[] buf = new byte[64];
+        int callbackCount = 0;
+        int n;
+        while ((n = session.read(buf, buf.length)) > 0) {
+            // This is what the write callback would receive
+            collected.write(buf, 0, n);
+            callbackCount++;
+        }
+        String result = collected.toString(session.getCharset());
+        assertTrue(result.contains("\"id\": 1"), "Expected id 1 in result");
+        assertTrue(result.contains("\"id\": 50"), "Expected id 50 in result");
+        assertTrue(callbackCount > 0, "Expected at least one callback invocation");
+        StreamSession.close(session.register());
+
+        System.out.printf("Callback invoked %d times, total %d bytes%n", callbackCount, collected.size());
+        System.out.println("✓ Callback output streaming passed!");
+        System.out.println("=".repeat(50));
+    }
+
+    @Test
+    void callbackInputOutputStreaming() throws Exception {
+        ScriptRuntime runtime = ScriptRuntime.getInstance();
+
+        System.out.println("Testing callback-based input+output streaming:");
+        System.out.println("=".repeat(50));
+
+        // Simulate the read-callback pattern: a feeder thread pulls from a data source
+        // and pushes into an InputStreamSession, while the main thread reads the output.
+        InputStreamSession inputSession = new InputStreamSession("application/json", "UTF-8");
+        long inputHandle = inputSession.register();
+
+        String inputsJson = "{\"payload\": {\"streamHandle\": \"" + inputHandle + "\", \"mimeType\": \"application/json\"}}";
+
+        // Simulate read callback: feeds a JSON array in chunks
+        byte[] sourceData = "[10, 20, 30, 40, 50]".getBytes("UTF-8");
+        AtomicReference<Exception> feedError = new AtomicReference<>();
+
+        Thread feeder = new Thread(() -> {
+            try {
+                int chunkSize = 8;
+                for (int off = 0; off < sourceData.length; off += chunkSize) {
+                    int len = Math.min(chunkSize, sourceData.length - off);
+                    byte[] chunk = new byte[len];
+                    System.arraycopy(sourceData, off, chunk, 0, len);
+                    inputSession.write(chunk, len);
+                }
+                inputSession.closeWriter();
+            } catch (Exception e) {
+                feedError.set(e);
+            }
+        }, "test-read-callback-feeder");
+        feeder.start();
+
+        StreamSession session = runtime.runStreaming("output application/json\n---\npayload map ($ * 2)", inputsJson);
+        assertFalse(session.isError(), "Expected successful session but got: " + session.getError());
+
+        // Simulate write callback: collect output chunks
+        ByteArrayOutputStream collected = new ByteArrayOutputStream();
+        byte[] buf = new byte[32];
+        int callbackCount = 0;
+        int n;
+        while ((n = session.read(buf, buf.length)) > 0) {
+            collected.write(buf, 0, n);
+            callbackCount++;
+        }
+        String result = collected.toString(session.getCharset());
+        assertTrue(result.contains("20"), "Expected 20 in result (10*2)");
+        assertTrue(result.contains("100"), "Expected 100 in result (50*2)");
+
+        StreamSession.close(session.register());
+        InputStreamSession.close(inputHandle);
+        feeder.join(5000);
+        assertNull(feedError.get(), "Feeder thread threw: " + feedError.get());
+
+        System.out.printf("Read callback fed %d bytes, write callback invoked %d times, output: %s%n",
+                sourceData.length, callbackCount, result.trim());
+        System.out.println("✓ Callback input+output streaming passed!");
+        System.out.println("=".repeat(50));
+    }
+
+    @Test
+    void callbackOutputStreamingError() {
+        ScriptRuntime runtime = ScriptRuntime.getInstance();
+
+        System.out.println("Testing callback-based output streaming with error:");
+        System.out.println("=".repeat(50));
+
+        StreamSession session = runtime.runStreaming("invalid syntax here", null);
+        assertTrue(session.isError());
+        assertNotNull(session.getError());
+
+        System.out.println("Error correctly returned: " + session.getError());
+        System.out.println("✓ Callback output streaming error passed!");
+        System.out.println("=".repeat(50));
+    }
+
     static class Result {
         boolean success;
         String result;

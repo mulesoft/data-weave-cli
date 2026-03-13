@@ -304,6 +304,131 @@ def test_streaming_input_context_manager():
         traceback.print_exc()
         return False
 
+def test_callback_output_basic():
+    """Test callback-based output streaming"""
+    print("\nTesting callback output basic...")
+    try:
+        chunks = []
+
+        def on_write(data: bytes) -> int:
+            chunks.append(data)
+            return 0
+
+        result = dataweave.run_callback("2 + 2", on_write)
+        assert result.get("success") is True, f"Expected success, got: {result}"
+        full = b"".join(chunks)
+        text = full.decode(result.get("charset", "utf-8"))
+        assert text == "4", f"Expected '4', got '{text}'"
+        print(f"[OK] Callback output basic works (chunks={len(chunks)}, result='{text}')")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Callback output basic failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def test_callback_output_with_inputs():
+    """Test callback-based output streaming with inputs"""
+    print("\nTesting callback output with inputs...")
+    try:
+        chunks = []
+
+        def on_write(data: bytes) -> int:
+            chunks.append(data)
+            return 0
+
+        result = dataweave.run_callback("num1 + num2", on_write, inputs={"num1": 25, "num2": 17})
+        assert result.get("success") is True, f"Expected success, got: {result}"
+        full = b"".join(chunks)
+        text = full.decode(result.get("charset", "utf-8"))
+        assert text == "42", f"Expected '42', got '{text}'"
+        print(f"[OK] Callback output with inputs works (result='{text}')")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Callback output with inputs failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def test_callback_input_output():
+    """Test callback-based input and output streaming"""
+    print("\nTesting callback input+output...")
+    try:
+        import io as _io
+
+        source = _io.BytesIO(b'[10, 20, 30, 40, 50]')
+        output_chunks = []
+
+        def on_read(buf_size: int) -> bytes:
+            return source.read(buf_size)
+
+        def on_write(data: bytes) -> int:
+            output_chunks.append(data)
+            return 0
+
+        script = "output application/json\n---\npayload map ($ * 2)"
+        result = dataweave.run_input_output_callback(
+            script,
+            input_name="payload",
+            input_mime_type="application/json",
+            read_callback=on_read,
+            write_callback=on_write,
+        )
+        assert result.get("success") is True, f"Expected success, got: {result}"
+        full = b"".join(output_chunks)
+        text = full.decode(result.get("charset", "utf-8"))
+        assert "20" in text, f"Expected 20 in result (10*2), got: {text}"
+        assert "100" in text, f"Expected 100 in result (50*2), got: {text}"
+        print(f"[OK] Callback input+output works (chunks={len(output_chunks)}, result={text.strip()[:80]}...)")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Callback input+output failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def test_callback_input_output_large():
+    """Test callback-based input+output streaming with large data"""
+    print("\nTesting callback input+output large...")
+    try:
+        import io as _io
+
+        # Build a large JSON array
+        parts = [b"["]
+        for i in range(1, 1001):
+            if i > 1:
+                parts.append(b",")
+            parts.append(f'{{"id":{i}}}'.encode())
+        parts.append(b"]")
+        source = _io.BytesIO(b"".join(parts))
+        output_chunks = []
+
+        def on_read(buf_size: int) -> bytes:
+            return source.read(buf_size)
+
+        def on_write(data: bytes) -> int:
+            output_chunks.append(data)
+            return 0
+
+        result = dataweave.run_input_output_callback(
+            "output application/json\n---\nsizeOf(payload)",
+            input_name="payload",
+            input_mime_type="application/json",
+            read_callback=on_read,
+            write_callback=on_write,
+        )
+        assert result.get("success") is True, f"Expected success, got: {result}"
+        full = b"".join(output_chunks)
+        text = full.decode(result.get("charset", "utf-8"))
+        assert text == "1000", f"Expected '1000', got '{text}'"
+        print(f"[OK] Callback input+output large works (result='{text}')")
+        return True
+    except Exception as e:
+        print(f"[FAIL] Callback input+output large failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def main():
     """Run all tests"""
     print("="*70)
@@ -325,6 +450,10 @@ def main():
         results.append(test_streaming_input_basic())
         results.append(test_streaming_input_large())
         results.append(test_streaming_input_context_manager())
+        results.append(test_callback_output_basic())
+        results.append(test_callback_output_with_inputs())
+        results.append(test_callback_input_output())
+        results.append(test_callback_input_output_large())
         
         # Cleanup
         dataweave.cleanup()

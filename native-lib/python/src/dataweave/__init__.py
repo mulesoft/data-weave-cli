@@ -51,6 +51,14 @@ class DataWeaveLibraryNotFoundError(Exception):
 
 _DEFAULT_CHUNK_SIZE = 8192
 
+# ctypes callback signatures matching NativeCallbacks.WriteCallback / ReadCallback.
+# Buffer parameters use c_void_p (not c_char_p) because ctypes gives c_char_p
+# special treatment that prevents writing into the buffer.
+# int (*WriteCallback)(void *ctx, const char *buffer, int length)
+WRITE_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int)
+# int (*ReadCallback)(void *ctx, char *buffer, int bufferSize)
+READ_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int)
+
 
 _ENV_NATIVE_LIB = "DATAWEAVE_NATIVE_LIB"
 
@@ -553,6 +561,39 @@ class DataWeave:
         else:
             self._has_streaming_input = False
 
+        # Callback-based Streaming API
+        if hasattr(self._lib, "run_script_callback"):
+            self._lib.run_script_callback.argtypes = [
+                self._graal_isolatethread_t_ptr,
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+                WRITE_CALLBACK,
+                ctypes.c_void_p,
+            ]
+            self._lib.run_script_callback.restype = ctypes.c_void_p
+
+            self._has_callback_streaming = True
+        else:
+            self._has_callback_streaming = False
+
+        if hasattr(self._lib, "run_script_input_output_callback"):
+            self._lib.run_script_input_output_callback.argtypes = [
+                self._graal_isolatethread_t_ptr,
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+                READ_CALLBACK,
+                WRITE_CALLBACK,
+                ctypes.c_void_p,
+            ]
+            self._lib.run_script_input_output_callback.restype = ctypes.c_void_p
+
+            self._has_callback_input_output = True
+        else:
+            self._has_callback_input_output = False
+
     def _decode_and_free(self, ptr: Optional[int]) -> str:
         if not ptr:
             return ""
@@ -694,6 +735,149 @@ class DataWeave:
         except Exception as e:
             raise DataWeaveError(f"Failed to open streaming session: {e}")
 
+    def run_callback(
+        self,
+        script: str,
+        write_callback,
+        inputs: Optional[Dict[str, Any]] = None,
+    ) -> dict:
+        """Execute a DataWeave script and stream the output via a write callback.
+
+        Instead of the session-based ``run_stream`` API, the native side reads the
+        output internally and invokes *write_callback* for each chunk.
+
+        :param script: the DataWeave script source
+        :param write_callback: callable ``(data: bytes) -> int`` invoked with each
+            output chunk. Must return ``0`` on success or non-zero to abort.
+        :param inputs: optional input bindings (same format as :meth:`run`)
+        :return: a dict with ``success``, ``mimeType``, ``charset``, ``binary`` on
+            success, or ``success`` and ``error`` on failure
+        :raises DataWeaveError: if the runtime is not initialized or the callback API
+            is not available
+        """
+        if not self._initialized:
+            raise DataWeaveError("DataWeave runtime not initialized. Call initialize() first.")
+        if not self._has_callback_streaming:
+            raise DataWeaveError(
+                "Native library does not support callback streaming API (run_script_callback not found)."
+            )
+
+        if inputs is None:
+            inputs = {}
+
+        normalized_inputs = {}
+        for key, val in inputs.items():
+            if isinstance(val, DataWeaveInputStream):
+                normalized_inputs[key] = {
+                    "streamHandle": str(val.handle),
+                    "mimeType": val.mime_type,
+                }
+                if val.charset:
+                    normalized_inputs[key]["charset"] = val.charset
+            else:
+                normalized_inputs[key] = _normalize_input_value(val)
+        inputs_json = json.dumps(normalized_inputs)
+
+        @WRITE_CALLBACK
+        def _write_cb(_ctx, buf, length):
+            try:
+                data = ctypes.string_at(buf, length)
+                return write_callback(data)
+            except Exception:
+                return -1
+
+        try:
+            result_ptr = self._lib.run_script_callback(
+                self._thread,
+                script.encode("utf-8"),
+                inputs_json.encode("utf-8"),
+                _write_cb,
+                None,
+            )
+            raw = self._decode_and_free(result_ptr)
+            return json.loads(raw) if raw else {"success": False, "error": "Empty response"}
+        except Exception as e:
+            raise DataWeaveError(f"Failed to execute callback streaming: {e}")
+
+    def run_input_output_callback(
+        self,
+        script: str,
+        input_name: str,
+        input_mime_type: str,
+        read_callback,
+        write_callback,
+        input_charset: Optional[str] = None,
+        inputs: Optional[Dict[str, Any]] = None,
+    ) -> dict:
+        """Execute a DataWeave script with callback-driven input *and* output streaming.
+
+        The native side calls *read_callback* on a background thread to pull input
+        data for the binding named *input_name*, and calls *write_callback* on the
+        calling thread to push output chunks.
+
+        :param script: the DataWeave script source
+        :param input_name: the binding name for the callback-supplied input
+        :param input_mime_type: MIME type of the callback-supplied input
+        :param read_callback: callable ``(buf_size: int) -> bytes`` returning the
+            next chunk, empty bytes ``b""`` on EOF, or raising on error
+        :param write_callback: callable ``(data: bytes) -> int`` returning ``0`` on
+            success or non-zero to abort
+        :param input_charset: charset of the callback-supplied input (default UTF-8)
+        :param inputs: optional additional input bindings
+        :return: a dict with metadata on success, or error info on failure
+        :raises DataWeaveError: if the runtime is not initialized or the API is missing
+        """
+        if not self._initialized:
+            raise DataWeaveError("DataWeave runtime not initialized. Call initialize() first.")
+        if not self._has_callback_input_output:
+            raise DataWeaveError(
+                "Native library does not support callback input/output API "
+                "(run_script_input_output_callback not found)."
+            )
+
+        if inputs is None:
+            inputs = {}
+
+        normalized_inputs = {key: _normalize_input_value(val) for key, val in inputs.items()}
+        inputs_json = json.dumps(normalized_inputs)
+
+        @READ_CALLBACK
+        def _read_cb(_ctx, buf, buf_size):
+            try:
+                data = read_callback(buf_size)
+                if not data:
+                    return 0  # EOF
+                n = len(data)
+                ctypes.memmove(buf, data, n)
+                return n
+            except Exception:
+                return -1
+
+        @WRITE_CALLBACK
+        def _write_cb(_ctx, buf, length):
+            try:
+                data = ctypes.string_at(buf, length)
+                return write_callback(data)
+            except Exception:
+                return -1
+
+        try:
+            result_ptr = self._lib.run_script_input_output_callback(
+                self._thread,
+                script.encode("utf-8"),
+                inputs_json.encode("utf-8"),
+                input_name.encode("utf-8"),
+                input_mime_type.encode("utf-8"),
+                input_charset.encode("utf-8") if input_charset else None,
+                _read_cb,
+                _write_cb,
+                None,
+            )
+            raw = self._decode_and_free(result_ptr)
+            return json.loads(raw) if raw else {"success": False, "error": "Empty response"}
+        except Exception as e:
+            raise DataWeaveError(f"Failed to execute callback input/output streaming: {e}")
+
     def run(self, script: str, inputs: Optional[Dict[str, Any]] = None) -> ExecutionResult:
         if not self._initialized:
             raise DataWeaveError("DataWeave runtime not initialized. Call initialize() first.")
@@ -749,6 +933,26 @@ def open_input_stream(mime_type: str, charset: Optional[str] = None) -> DataWeav
     return _get_global_instance().open_input_stream(mime_type, charset)
 
 
+def run_callback(script: str, write_callback, inputs: Optional[Dict[str, Any]] = None) -> dict:
+    """Execute a script and stream output via a write callback. See :meth:`DataWeave.run_callback`."""
+    return _get_global_instance().run_callback(script, write_callback, inputs)
+
+
+def run_input_output_callback(
+    script: str,
+    input_name: str,
+    input_mime_type: str,
+    read_callback,
+    write_callback,
+    input_charset: Optional[str] = None,
+    inputs: Optional[Dict[str, Any]] = None,
+) -> dict:
+    """Execute a script with callback-driven input and output. See :meth:`DataWeave.run_input_output_callback`."""
+    return _get_global_instance().run_input_output_callback(
+        script, input_name, input_mime_type, read_callback, write_callback, input_charset, inputs,
+    )
+
+
 def cleanup():
     global _global_instance
     if _global_instance is not None:
@@ -763,7 +967,11 @@ __all__ = [
     "DataWeaveStream",
     "ExecutionResult",
     "InputValue",
+    "READ_CALLBACK",
+    "WRITE_CALLBACK",
     "open_input_stream",
+    "run_callback",
+    "run_input_output_callback",
     "run_script",
     "run_stream",
     "cleanup",
