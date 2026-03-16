@@ -61,6 +61,11 @@ jobs:
         run: ./gradlew --stacktrace --no-problems-report native-cli:distro
         shell: bash
 
+      # Install Python build dependencies (setuptools/wheel may be missing on Windows runners)
+      - name: Install Python build dependencies
+        run: python3 -m pip install --upgrade setuptools wheel
+        shell: bash
+
       # Generate native-lib python wheel
       - name: Create Native Lib Python Wheel
         run: ./gradlew --stacktrace --no-problems-report native-lib:buildPythonWheel
