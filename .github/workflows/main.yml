@@ -60,9 +60,21 @@ jobs:
         run: ./gradlew --stacktrace --no-problems-report native-cli:distro
         shell: bash
 
+      # Generate native-lib python wheel
+      - name: Create Native Lib Python Wheel
+        run: ./gradlew --stacktrace --no-problems-report native-lib:buildPythonWheel
+        shell: bash
+
       # Upload the artifact file
       - name: Upload generated script
         uses: actions/upload-artifact@v4
         with:
           name: dw-${{env.NATIVE_VERSION}}-${{runner.os}}
           path: native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.script_name }}.zip
+
+      # Upload the Python wheel
+      - name: Upload Python wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw-python-wheel-${{runner.os}}
+          path: native-lib/python/dist/dataweave_native-0.0.1-py3-*.whl
