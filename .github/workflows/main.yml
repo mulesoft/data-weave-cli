@@ -81,5 +81,16 @@ jobs:
       - name: Upload Python wheel
         uses: actions/upload-artifact@v4
         with:
-          name: dw-python-wheel-${{runner.os}}
+          name: dw-python-wheel-${{env.NATIVE_VERSION}}-${{runner.os}}
           path: native-lib/python/dist/dataweave_native-0.0.1-py3-*.whl
+
+      # Upload the native shared library + header together per OS
+      - name: Upload native shared library
+        uses: actions/upload-artifact@v4
+        with:
+          name: dwlib-${{env.NATIVE_VERSION}}-${{runner.os}}
+          path: |
+            native-lib/python/src/dataweave/native/dwlib.dylib
+            native-lib/python/src/dataweave/native/dwlib.so
+            native-lib/python/src/dataweave/native/dwlib.dll
+            native-lib/python/src/dataweave/native/dwlib.h
