@@ -46,14 +46,14 @@ jobs:
           ./gradlew --stacktrace --no-problems-report build
         shell: bash
       #Run regression tests
-#      - name: Run regression test 2.9.8
-#        run: |
-#          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.9.8 -DweaveSuiteVersion=2.9.8 native-cli-integration-tests:test
-#        shell: bash
-#      - name: Run regression test 2.10
-#        run: |
-#          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.10.0 -DweaveSuiteVersion=2.10.0 native-cli-integration-tests:test
-#        shell: bash
+      - name: Run regression test 2.9.8
+        run: |
+          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.9.8 -DweaveSuiteVersion=2.9.8 native-cli-integration-tests:test
+        shell: bash
+      - name: Run regression test 2.10
+        run: |
+          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.10.0 -DweaveSuiteVersion=2.10.0 native-cli-integration-tests:test
+        shell: bash
 
       # Generate distro
       - name: Create Distro

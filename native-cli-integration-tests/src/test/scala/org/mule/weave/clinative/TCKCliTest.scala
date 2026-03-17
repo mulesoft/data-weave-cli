@@ -346,12 +346,16 @@ class TCKCliTest extends AnyFunSpec with Matchers
       baseArray ++
         Array(
           "math-toRadians",
-          "try-handle-lazy-values-with-failures"
+          "try-handle-lazy-values-with-failures",
+          "weave_ast_example",
+          "weave_ast_module"
         )
     } else if (versionString == "2.10") {
       baseArray ++
         Array(
-          "try-handle-lazy-values-with-failures"
+          "try-handle-lazy-values-with-failures",
+          "weave_ast_example",
+          "weave_ast_module"
         )
     } else {
       baseArray
