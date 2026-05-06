@@ -20,3 +20,8 @@ out/
 
 # GraalVM
 .graalvm
+
+grimoires/
+
+.windsurf/
+.claude/

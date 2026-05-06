@@ -211,9 +211,3 @@ case class WeaveFailureResult(message: String) extends WeaveExecutionResult {
 
   override def result(): String = message
 }
-
-
-class CustomWeaveDataFormat(moduleManager: ModuleLoaderManager) extends WeaveDataFormat {
-  override def createModuleLoader(): ModuleLoaderManager = moduleManager
-}
-

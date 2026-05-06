@@ -1,3 +1,13 @@
+buildscript {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "org.graalvm.buildtools.native:org.graalvm.buildtools.native.gradle.plugin:0.11.2"
+    }
+}
+
 plugins {
     id "scala"
     id "maven-publish"
@@ -11,6 +21,8 @@ subprojects {
     apply plugin: 'maven-publish'
     apply plugin: 'scala'
 
+    apply plugin: 'org.graalvm.buildtools.native'
+
     group = 'org.mule.weave.native'
     version = nativeVersion
 
@@ -21,8 +33,8 @@ subprojects {
 
 
     compileJava {
-        sourceCompatibility = '11'
-        targetCompatibility = '11'
+        sourceCompatibility = '17'
+        targetCompatibility = '17'
     }
 
     repositories {

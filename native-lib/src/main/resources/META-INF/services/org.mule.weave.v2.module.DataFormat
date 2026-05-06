@@ -1,0 +1,9 @@
+org.mule.weave.v2.interpreted.module.WeaveDataFormat
+org.mule.weave.v2.module.core.json.JsonDataFormat
+org.mule.weave.v2.module.core.xml.XmlDataFormat
+org.mule.weave.v2.module.core.csv.CSVDataFormat
+org.mule.weave.v2.module.core.octetstream.OctetStreamDataFormat
+org.mule.weave.v2.module.core.textplain.TextPlainDataFormat
+org.mule.weave.v2.module.core.urlencoded.UrlEncodedDataFormat
+org.mule.weave.v2.module.core.multipart.MultiPartDataFormat
+org.mule.weave.v2.module.core.properties.PropertiesDataFormat
