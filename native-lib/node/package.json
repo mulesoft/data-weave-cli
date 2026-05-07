@@ -1,0 +1,40 @@
+{
+  "name": "@dataweave/native",
+  "version": "0.0.1",
+  "description": "Node.js bindings for the DataWeave native library",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "node-gyp rebuild && tsc",
+    "build:addon": "node-gyp rebuild",
+    "build:ts": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "pack": "npm pack"
+  },
+  "files": [
+    "dist/",
+    "native/",
+    "build/Release/dwlib_addon.node",
+    "src/addon.c",
+    "binding.gyp"
+  ],
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "gypfile": true,
+  "dependencies": {
+    "node-addon-api": "^8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "node-gyp": "^10",
+    "typescript": "^5.5",
+    "vitest": "^3.0"
+  }
+}
