@@ -19,11 +19,13 @@ The solution is a N-API native addon written in C that runs ALL GraalVM calls on
 | `node-ffi-napi` | ❌ | Same V8 signal handler conflict as koffi |
 
 Key technical constraints:
-- `graal_create_isolate` must run on a pthread with 16MB stack (not a V8/libuv thread)
-- All subsequent GraalVM calls must use `graal_attach_thread`/`graal_detach_thread` on dedicated pthreads
-- Streaming uses `napi_threadsafe_function` to bridge native pthread callbacks back to the JS event loop
+- `graal_create_isolate` must run on a dedicated thread with 16MB stack (not a V8/libuv worker thread)
+- All subsequent GraalVM calls must use `graal_attach_thread`/`graal_detach_thread` on dedicated threads
+- Threading uses libuv (`uv_thread_create_ex`, `uv_mutex`, `uv_cond`, `uv_dlopen`) for cross-platform Windows/Linux/macOS support — no POSIX-only APIs
+- Streaming uses `napi_threadsafe_function` to bridge native thread callbacks back to the JS event loop
 - Sentinel values are sent through the same tsfn queue as data chunks to guarantee delivery ordering (avoids race between `napi_async_work` completion and pending tsfn dispatches)
 - Reference counting on `initialize`/`cleanup` allows multiple `DataWeave` instances to share a single GraalVM isolate
+- The addon uses the raw C `<node_api.h>` header directly (not the `node-addon-api` C++ wrapper) to avoid MSVC `/std:c++17` conflicts on Windows
 
 ### Package Layout
 
@@ -34,7 +36,7 @@ native-lib/
     ├── tsconfig.json
     ├── binding.gyp          # node-gyp build config for native addon
     ├── src/
-    │   ├── addon.c          # N-API native addon (pthreads + GraalVM FFI)
+    │   ├── addon.c          # N-API native addon (libuv threads + GraalVM FFI)
     │   ├── index.ts         # Public API (module-level + class)
     │   ├── ffi.ts           # TypeScript wrapper loading .node addon
     │   ├── types.ts         # TypeScript interfaces & types
@@ -84,17 +86,18 @@ dw.cleanup();
 ## Implementation Status
 
 ### ✅ Phase 1: Core Package Structure
-- `package.json` with node-addon-api, node-gyp, vitest, typescript
+- `package.json` with node-gyp, vitest, typescript (no runtime dependencies)
 - `tsconfig.json` (CommonJS, ES2022, strict)
-- `binding.gyp` (C11, NAPI_VERSION=8, platform-specific flags)
+- `binding.gyp` (C11 on macOS/Linux, CompileAs=C on Windows, NAPI_VERSION=8)
 
 ### ✅ Phase 2: Native Addon (`src/addon.c`)
-- All GraalVM calls on dedicated pthreads
-- `initialize`: pthread with 16MB stack → `graal_create_isolate`
-- `runScript`: pthread with 2MB stack → `attach_thread` + `run_script` + `detach_thread`
-- `runScriptStreaming`: pthread + `napi_threadsafe_function` + sentinel for ordered delivery
-- `runScriptTransform`: bidirectional with read tsfn (blocking condvar) + write tsfn + sentinel
-- `cleanup`: pthread → `graal_tear_down_isolate`, ref-counted
+- All GraalVM calls on dedicated threads via libuv (`uv_thread_create_ex`)
+- `initialize`: thread with 16MB stack → `graal_create_isolate`
+- `runScript`: thread with 2MB stack → `attach_thread` + `run_script` + `detach_thread`
+- `runScriptStreaming`: thread + `napi_threadsafe_function` + sentinel for ordered delivery
+- `runScriptTransform`: bidirectional with read tsfn (blocking `uv_cond`) + write tsfn + sentinel
+- `cleanup`: thread → `graal_tear_down_isolate`, ref-counted
+- Library loading via `uv_dlopen`/`uv_dlsym` (cross-platform)
 
 ### ✅ Phase 3: TypeScript FFI wrapper (`src/ffi.ts`)
 - Loads `.node` addon via `require()`
@@ -122,8 +125,10 @@ dw.cleanup();
 - `clean` updated to remove node artifacts
 
 ### ✅ Phase 8: GitHub Actions CI
-- Setup Node.js 18
-- `./gradlew native-lib:buildNodePackage`
+- Initial `./gradlew build` runs with `-PskipNodeTests=true` (Node.js not yet available)
+- Setup Node.js 18 via `actions/setup-node@v4`
+- `./gradlew native-lib:buildNodePackage` (stage + compile addon + tsc + npm pack)
+- `./gradlew native-lib:nodeTest` (explicit test run after Node.js setup)
 - Upload `dataweave-native-0.0.1.tgz` per OS
 
 ## Technical Details
@@ -131,19 +136,19 @@ dw.cleanup();
 ### Threading Model
 
 ```
-JS Main Thread              Dedicated pthreads
-─────────────────          ──────────────────
-initialize() ──────────►   pthread(16MB stack)
-                               graal_create_isolate()
+JS Main Thread              Dedicated threads (via libuv)
+─────────────────          ──────────────────────────────
+initialize() ──────────►   uv_thread(16MB stack)
+                               uv_dlopen() + graal_create_isolate()
                            ◄── return
 
-runScript() ───────────►   pthread(2MB stack)
+runScript() ───────────►   uv_thread(2MB stack)
                                graal_attach_thread()
                                run_script()
                                graal_detach_thread()
                            ◄── return result
 
-runScriptStreaming() ──►   pthread(2MB stack)
+runScriptStreaming() ──►   uv_thread(2MB stack)
                                graal_attach_thread()
                                run_script_callback(write_cb)
                                  │
@@ -156,7 +161,7 @@ runScriptStreaming() ──►   pthread(2MB stack)
                              chunk → JS callback
                              sentinel → resolve promise
 
-cleanup() ─────────────►   pthread(2MB stack)
+cleanup() ─────────────►   uv_thread(2MB stack)
                                graal_tear_down_isolate()
                            ◄── return
 ```
@@ -173,8 +178,9 @@ Multiple `DataWeave` instances share a single GraalVM isolate. Each `initialize(
 
 | Risk | Mitigation |
 |------|------------|
-| V8/GraalVM signal handler conflict | All GraalVM calls on dedicated pthreads (verified working) |
+| V8/GraalVM signal handler conflict | All GraalVM calls on dedicated libuv threads (verified working) |
 | Thread stack overflow | 16MB for init, 2MB for calls (matches GraalVM requirements) |
 | Streaming ordering race | Sentinel through same tsfn queue (verified working) |
-| Windows support | `binding.gyp` + `node-gyp` handles MSVC; needs testing on CI |
+| Windows MSVC `/std:c++17` conflict | Removed `node-addon-api` C++ dep; use raw `node_api.h` C header + `CompileAs=1` (`/TC`) |
+| Cross-platform threading | libuv primitives (`uv_thread`, `uv_mutex`, `uv_cond`, `uv_dlopen`) — no POSIX deps |
 | node-gyp required at install | Package includes pre-built .node + source for rebuild |

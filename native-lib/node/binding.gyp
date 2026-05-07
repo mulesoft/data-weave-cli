@@ -12,13 +12,6 @@
         }],
         ["OS=='linux'", {
           "cflags": ["-std=c11"]
-        }],
-        ["OS=='win'", {
-          "msvs_settings": {
-            "VCCLCompilerTool": {
-              "CompileAs": "1"
-            }
-          }
         }]
       ]
     }
