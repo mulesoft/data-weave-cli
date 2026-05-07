@@ -28,9 +28,7 @@
     "node": ">=18"
   },
   "gypfile": true,
-  "dependencies": {
-    "node-addon-api": "^8.0"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^20",
     "node-gyp": "^10",
