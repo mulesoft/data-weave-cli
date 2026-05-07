@@ -11,7 +11,7 @@
           }
         }],
         ["OS=='linux'", {
-          "cflags": ["-std=c11"]
+          "cflags": ["-std=gnu11"]
         }]
       ]
     }
