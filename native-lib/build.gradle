@@ -104,8 +104,53 @@ tasks.register('pythonTest', Exec) {
   commandLine(pythonExe, 'tests/test_dataweave_module.py')
 }
 
+// --- Node.js native package tasks ---
+
+tasks.register('stageNodeNativeLib', Copy) {
+  dependsOn tasks.named('nativeCompile')
+  from("${buildDir}/native/nativeCompile") {
+    include('dwlib.*')
+  }
+  into("${projectDir}/node/native")
+}
+
+tasks.register('buildNodePackage', Exec) {
+  dependsOn tasks.named('stageNodeNativeLib')
+  workingDir("${projectDir}/node")
+  inputs.dir("${projectDir}/node/src")
+  inputs.dir("${projectDir}/node/native")
+  inputs.file("${projectDir}/node/package.json")
+  inputs.file("${projectDir}/node/binding.gyp")
+  inputs.file("${projectDir}/node/tsconfig.json")
+  outputs.dir("${projectDir}/node/dist")
+  outputs.file("${projectDir}/node/build/Release/dwlib_addon.node")
+  doFirst {
+    delete("${projectDir}/node/dist")
+  }
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    commandLine('cmd', '/c', 'npm install && npx node-gyp rebuild && npx tsc && npm pack')
+  } else {
+    commandLine('bash', '-c', 'npm install && npx node-gyp rebuild && npx tsc && npm pack')
+  }
+}
+
+tasks.register('nodeTest', Exec) {
+  if (project.findProperty('skipNodeTests')?.toString()?.toBoolean() == true) {
+    enabled = false
+  }
+
+  dependsOn tasks.named('stageNodeNativeLib')
+  workingDir("${projectDir}/node")
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    commandLine('cmd', '/c', 'npm install && npx node-gyp rebuild && npx tsc && npx vitest run')
+  } else {
+    commandLine('bash', '-c', 'npm install && npx node-gyp rebuild && npx tsc && npx vitest run')
+  }
+}
+
 tasks.named('test') {
   dependsOn tasks.named('pythonTest')
+  dependsOn tasks.named('nodeTest')
 }
 
 tasks.named('clean') {
@@ -113,4 +158,8 @@ tasks.named('clean') {
   delete("${projectDir}/python/build")
   delete("${projectDir}/python/src/dataweave/native")
   delete("${projectDir}/python/src/dataweave_native.egg-info")
+  delete("${projectDir}/node/dist")
+  delete("${projectDir}/node/build")
+  delete("${projectDir}/node/native")
+  delete("${projectDir}/node/node_modules")
 }

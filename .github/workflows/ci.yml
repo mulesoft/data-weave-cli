@@ -37,12 +37,38 @@ jobs:
       # Runs a single command using the runners shell
       - name: Run Build (Latest)
         run: |
-          ./gradlew --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT -PweaveTestSuiteVersion=2.11.0-SNAPSHOT -PweaveSuiteVersion=2.11.0-SNAPSHOT build
+          ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true -PweaveVersion=2.11.0-SNAPSHOT -PweaveTestSuiteVersion=2.11.0-SNAPSHOT -PweaveSuiteVersion=2.11.0-SNAPSHOT build
         shell: bash
 
       # Generate distro
       - name: Create Distro
         run: ./gradlew --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT -PweaveTestSuiteVersion=2.11.0-SNAPSHOT -PweaveSuiteVersion=2.11.0-SNAPSHOT native-cli:distro
+        shell: bash
+
+      # Install Python build dependencies (setuptools/wheel may be missing on Windows runners)
+      - name: Install Python build dependencies
+        run: python3 -m pip install --upgrade setuptools wheel
+        shell: bash
+
+      # Generate native-lib python wheel
+      - name: Create Native Lib Python Wheel
+        run: ./gradlew --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT native-lib:buildPythonWheel
+        shell: bash
+
+      # Setup Node.js for native-lib Node package
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      # Stage the native lib and build Node package (npm install, node-gyp, tsc, npm pack)
+      - name: Create Native Lib Node Package
+        run: ./gradlew --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT native-lib:buildNodePackage
+        shell: bash
+
+      # Run Node.js tests
+      - name: Run Node.js Tests
+        run: ./gradlew --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT native-lib:nodeTest
         shell: bash
 
       # Upload the artifact file
@@ -51,3 +77,28 @@ jobs:
         with:
           name: dw-${{env.NATIVE_VERSION}}-${{runner.os}}
           path: native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.script_name }}.zip
+
+      # Upload the Python wheel
+      - name: Upload Python wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw-python-wheel-${{env.NATIVE_VERSION}}-${{runner.os}}
+          path: native-lib/python/dist/dataweave_native-0.0.1-py3-*.whl
+
+      # Upload the Node.js package
+      - name: Upload Node package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw-node-package-${{env.NATIVE_VERSION}}-${{runner.os}}
+          path: native-lib/node/dataweave-native-0.0.1.tgz
+
+      # Upload the native shared library + header together per OS
+      - name: Upload native shared library
+        uses: actions/upload-artifact@v4
+        with:
+          name: dwlib-${{env.NATIVE_VERSION}}-${{runner.os}}
+          path: |
+            native-lib/python/src/dataweave/native/dwlib.dylib
+            native-lib/python/src/dataweave/native/dwlib.so
+            native-lib/python/src/dataweave/native/dwlib.dll
+            native-lib/python/src/dataweave/native/dwlib.h

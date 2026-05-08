@@ -43,7 +43,7 @@ jobs:
       # Runs a single command using the runners shell
       - name: Run Build
         run: |
-          ./gradlew --stacktrace --no-problems-report build
+          ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true build
         shell: bash
       #Run regression tests
       - name: Run regression test 2.9.8
@@ -70,6 +70,22 @@ jobs:
         run: ./gradlew --stacktrace --no-problems-report native-lib:buildPythonWheel
         shell: bash
 
+      # Setup Node.js for native-lib Node package
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      # Stage the native lib and build Node package (npm install, node-gyp, tsc, npm pack)
+      - name: Create Native Lib Node Package
+        run: ./gradlew --stacktrace --no-problems-report native-lib:buildNodePackage
+        shell: bash
+
+      # Run Node.js tests
+      - name: Run Node.js Tests
+        run: ./gradlew --stacktrace --no-problems-report native-lib:nodeTest
+        shell: bash
+
       # Upload the artifact file
       - name: Upload generated script
         uses: actions/upload-artifact@v4
@@ -83,6 +99,13 @@ jobs:
         with:
           name: dw-python-wheel-${{env.NATIVE_VERSION}}-${{runner.os}}
           path: native-lib/python/dist/dataweave_native-0.0.1-py3-*.whl
+
+      # Upload the Node.js package
+      - name: Upload Node package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw-node-package-${{env.NATIVE_VERSION}}-${{runner.os}}
+          path: native-lib/node/dataweave-native-0.0.1.tgz
 
       # Upload the native shared library + header together per OS
       - name: Upload native shared library
