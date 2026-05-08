@@ -201,53 +201,77 @@ export class DataWeave {
     const extraInputs = opts?.inputs ?? {};
     const inputsJson = Object.keys(extraInputs).length > 0 ? buildInputsJson(extraInputs) : "{}";
 
-    // Pre-buffer all input chunks (the read callback is synchronous from native side)
-    const inputBuffers: Buffer[] = [];
-    let inputDone = false;
+    const isAsync = Symbol.asyncIterator in (input as object);
 
-    const iter = Symbol.asyncIterator in (input as object)
-      ? (input as AsyncIterable<Buffer | Uint8Array>)[Symbol.asyncIterator]()
-      : (input as Iterable<Buffer | Uint8Array>)[Symbol.iterator]();
+    let readCb: (bufSize: number) => Buffer | null;
 
-    // Eagerly read all input (needed because read callback is sync)
-    const feedPromise = (async () => {
+    if (isAsync) {
+      // Async iterables must be pre-buffered because the native read callback
+      // is invoked synchronously on the JS main thread and cannot await.
+      const inputBuffers: Buffer[] = [];
+      const asyncIter = (input as AsyncIterable<Buffer | Uint8Array>)[Symbol.asyncIterator]();
       try {
         while (true) {
-          const { value, done: d } = await (iter as AsyncIterator<Buffer | Uint8Array>).next();
+          const { value, done: d } = await asyncIter.next();
           if (d) break;
           inputBuffers.push(Buffer.isBuffer(value) ? value : Buffer.from(value));
         }
       } catch { /* input error = EOF */ }
-      inputDone = true;
-    })();
 
-    // Wait for at least some input to be available
-    await feedPromise;
+      let bufIdx = 0;
+      let currentBuf: Buffer | null = null;
+      let readOffset = 0;
 
-    let readOffset = 0;
-    let currentBuf: Buffer | null = null;
-    let bufIdx = 0;
-
-    const readCb = (bufSize: number): Buffer | null => {
-      while (true) {
-        if (currentBuf && readOffset < currentBuf.length) {
-          const n = Math.min(currentBuf.length - readOffset, bufSize);
-          const slice = currentBuf.subarray(readOffset, readOffset + n);
-          readOffset += n;
-          if (readOffset >= currentBuf.length) {
-            currentBuf = null;
-            readOffset = 0;
+      readCb = (bufSize: number): Buffer | null => {
+        while (true) {
+          if (currentBuf && readOffset < currentBuf.length) {
+            const n = Math.min(currentBuf.length - readOffset, bufSize);
+            const slice = currentBuf.subarray(readOffset, readOffset + n);
+            readOffset += n;
+            if (readOffset >= currentBuf.length) {
+              currentBuf = null;
+              readOffset = 0;
+            }
+            return Buffer.from(slice);
           }
-          return Buffer.from(slice);
+          if (bufIdx < inputBuffers.length) {
+            currentBuf = inputBuffers[bufIdx++];
+            readOffset = 0;
+            continue;
+          }
+          return null;
         }
-        if (bufIdx < inputBuffers.length) {
-          currentBuf = inputBuffers[bufIdx++];
+      };
+    } else {
+      // Sync iterables are consumed on-demand — constant memory, no pre-buffering.
+      const syncIter = (input as Iterable<Buffer | Uint8Array>)[Symbol.iterator]();
+      let currentBuf: Buffer | null = null;
+      let readOffset = 0;
+      let iterDone = false;
+
+      readCb = (bufSize: number): Buffer | null => {
+        while (true) {
+          if (currentBuf && readOffset < currentBuf.length) {
+            const n = Math.min(currentBuf.length - readOffset, bufSize);
+            const slice = currentBuf.subarray(readOffset, readOffset + n);
+            readOffset += n;
+            if (readOffset >= currentBuf.length) {
+              currentBuf = null;
+              readOffset = 0;
+            }
+            return Buffer.from(slice);
+          }
+          if (iterDone) return null;
+          const { value, done: d } = syncIter.next();
+          if (d) {
+            iterDone = true;
+            return null;
+          }
+          currentBuf = Buffer.isBuffer(value) ? value : Buffer.from(value);
           readOffset = 0;
-          continue;
         }
-        return null; // EOF
-      }
-    };
+      };
+    }
 
     const chunks: Buffer[] = [];
     let resolveChunk: (() => void) | null = null;

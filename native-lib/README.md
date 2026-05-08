@@ -531,13 +531,38 @@ const output = Buffer.concat(chunks).toString("utf-8");
 
 ### 7) Input and output streaming (bidirectional)
 
-Use `runTransform` to stream both input and output — feed an `AsyncIterable<Buffer>` or `Iterable<Buffer>` in, receive an `AsyncGenerator<Buffer>` out. Ideal for processing large files or network streams with constant memory.
+Use `runTransform` to stream both input and output — feed an `Iterable<Buffer>` or `AsyncIterable<Buffer>` in, receive an `AsyncGenerator<Buffer>` out.
+
+**Important: sync vs async input and memory usage**
+
+The native read callback is invoked synchronously on the JS main thread, which means:
+
+- **Synchronous iterables** (arrays, generators) are consumed **on-demand** — only one chunk is held in memory at a time. This gives constant-memory streaming, comparable to the Python API.
+- **Async iterables** (e.g. `fs.createReadStream()`) **must be fully pre-buffered** into memory before the transform starts, because their `.next()` returns a Promise that cannot be awaited inside a synchronous callback.
+
+For large inputs, prefer a **synchronous generator** to get true streaming with minimal memory:
+
+```typescript
+import { readFileSync } from "fs";
+
+// Good: sync generator → constant memory (~150 MB for 50M elements)
+function* chunked(data: Buffer, size = 8192): Generator<Buffer> {
+  for (let i = 0; i < data.length; i += size) {
+    yield data.subarray(i, i + size);
+  }
+}
+const gen = runTransform("output csv --- payload", chunked(readFileSync("large.json")), {
+  mimeType: "application/json",
+});
+```
+
+Using an async readable stream still works but will buffer the entire input first:
 
 ```typescript
 import { createReadStream } from "fs";
 import { createWriteStream } from "fs";
 
-// Stream a file through DataWeave
+// Works but pre-buffers the full input into memory
 const input = createReadStream("large.json");
 const gen = runTransform("output application/csv --- payload", input, {
   mimeType: "application/json",
