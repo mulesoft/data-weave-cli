@@ -41,3 +41,16 @@ func TestRun_WithInputs(t *testing.T) {
 		t.Errorf("Expected '42', got '%s'", str)
 	}
 }
+
+func TestRun_ScriptError(t *testing.T) {
+	result, err := Run("invalid syntax here", nil)
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if result.Success {
+		t.Errorf("Expected script to fail")
+	}
+	if result.Error == "" {
+		t.Errorf("Expected error message, got empty string")
+	}
+}
