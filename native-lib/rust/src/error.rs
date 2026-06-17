@@ -17,6 +17,8 @@ pub enum Error {
     Utf8Response,
     /// No result available (script failed or result is empty).
     NoResult,
+    /// Channel communication error during streaming.
+    Channel(String),
 }
 
 impl fmt::Display for Error {
@@ -29,6 +31,7 @@ impl fmt::Display for Error {
             Error::Utf8(e) => write!(f, "UTF-8 decode error: {}", e),
             Error::Utf8Response => write!(f, "Native response is not valid UTF-8"),
             Error::NoResult => write!(f, "No result available"),
+            Error::Channel(msg) => write!(f, "Channel error: {}", msg),
         }
     }
 }

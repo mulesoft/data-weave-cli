@@ -359,6 +359,38 @@ output, _ := result.GetString()
 fmt.Println(output) // "42"
 ```
 
+### 3) Output streaming
+
+```go
+result := dataweave.RunStreaming("output application/json --- (1 to 10000)", nil)
+if result.Err != nil {
+    log.Fatal(result.Err)
+}
+for chunk := range result.Chunks {
+    os.Stdout.Write(chunk)
+}
+metadata := <-result.Metadata
+fmt.Printf("Done: %s, %s\n", metadata.MimeType, metadata.Charset)
+```
+
+### 4) Bidirectional streaming (input + output)
+
+```go
+file, _ := os.Open("large.json")
+defer file.Close()
+opts := dataweave.TransformOptions{
+    InputMimeType: "application/json",
+}
+result := dataweave.RunTransform("output application/csv --- payload", file, opts)
+if result.Err != nil {
+    log.Fatal(result.Err)
+}
+for chunk := range result.Chunks {
+    outFile.Write(chunk)
+}
+metadata := <-result.Metadata
+```
+
 See [go/README.md](go/README.md) for full documentation.
 
 ## Using the library (Rust examples)
@@ -366,7 +398,7 @@ See [go/README.md](go/README.md) for full documentation.
 All examples below assume:
 
 ```rust
-use dataweave::run;
+use dataweave::{run, run_streaming, run_transform, TransformOptions};
 ```
 
 ### 1) Simple script
@@ -394,6 +426,40 @@ inputs.insert("num2".to_string(), json!(17));
 let result = run("num1 + num2", Some(inputs)).expect("Failed to run script");
 let output = result.get_string().expect("Failed to get string");
 println!("{}", output); // "42"
+```
+
+### 3) Output streaming
+
+```rust
+let result = run_streaming("output application/json --- (1 to 10000)", None)
+    .expect("run_streaming failed");
+for chunk_result in &result {
+    let chunk = chunk_result.expect("chunk failed");
+    std::io::stdout().write_all(&chunk).unwrap();
+}
+let metadata = result.metadata().expect("no metadata");
+println!("Done: {:?}, {:?}", metadata.mime_type, metadata.charset);
+```
+
+### 4) Bidirectional streaming (input + output)
+
+```rust
+use std::fs::File;
+
+let file = File::open("large.json").expect("open file");
+let opts = TransformOptions {
+    input_name: "payload".to_string(),
+    input_mime_type: "application/json".to_string(),
+    input_charset: None,
+};
+let result = run_transform("output application/csv --- payload", file, opts)
+    .expect("run_transform failed");
+let mut out = File::create("output.csv").expect("create output");
+for chunk_result in &result {
+    let chunk = chunk_result.expect("chunk failed");
+    out.write_all(&chunk).unwrap();
+}
+let metadata = result.metadata().expect("no metadata");
 ```
 
 See [rust/README.md](rust/README.md) for full documentation.
