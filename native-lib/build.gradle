@@ -114,9 +114,20 @@ tasks.register('goTest', Exec) {
   commandLine('go', 'test', '-v')
 }
 
+tasks.register('rustTest', Exec) {
+  if (project.findProperty('skipRustTests')?.toString()?.toBoolean() == true) {
+    enabled = false
+  }
+
+  dependsOn tasks.named('nativeCompile')
+  workingDir("${projectDir}/rust")
+  commandLine('cargo', 'test', '--', '--test-threads=1')
+}
+
 tasks.named('test') {
   dependsOn tasks.named('pythonTest')
   dependsOn tasks.named('goTest')
+  dependsOn tasks.named('rustTest')
 }
 
 tasks.named('clean') {
