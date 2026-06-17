@@ -21,3 +21,10 @@ fn test_run_with_inputs() {
     let output = result.get_string().expect("get_string failed");
     assert_eq!(output, "42");
 }
+
+#[test]
+fn test_run_script_error() {
+    let result = run("invalid syntax here", None).expect("run failed");
+    assert!(!result.success, "Expected script to fail");
+    assert!(result.error.is_some(), "Expected error message");
+}
