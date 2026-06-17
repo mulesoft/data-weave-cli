@@ -104,8 +104,19 @@ tasks.register('pythonTest', Exec) {
   commandLine(pythonExe, 'tests/test_dataweave_module.py')
 }
 
+tasks.register('goTest', Exec) {
+  if (project.findProperty('skipGoTests')?.toString()?.toBoolean() == true) {
+    enabled = false
+  }
+
+  dependsOn tasks.named('nativeCompile')
+  workingDir("${projectDir}/go")
+  commandLine('go', 'test', '-v')
+}
+
 tasks.named('test') {
   dependsOn tasks.named('pythonTest')
+  dependsOn tasks.named('goTest')
 }
 
 tasks.named('clean') {
