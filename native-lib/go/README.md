@@ -94,13 +94,14 @@ go test -v
 
 ```bash
 go run examples/simple_demo.go
+go run examples/streaming_demo.go
 ```
 
 ## API Reference
 
 ### `Run(script string, inputs map[string]interface{}) (*ExecutionResult, error)`
 
-Executes a DataWeave script with the given inputs.
+Executes a DataWeave script with the given inputs (buffered mode).
 
 **Parameters:**
 - `script`: DataWeave script source code
@@ -109,6 +110,59 @@ Executes a DataWeave script with the given inputs.
 **Returns:**
 - `*ExecutionResult`: Execution result with output and metadata
 - `error`: FFI-level error (library not found, marshaling failure, etc.)
+
+### `RunStreaming(script string, inputs map[string]interface{}) *StreamResult`
+
+Executes a DataWeave script and streams the output via channels. Output chunks are delivered as they are produced by the native engine without buffering the entire result in memory.
+
+**Parameters:**
+- `script`: DataWeave script source code
+- `inputs`: Map of binding names to values (auto-encoded as JSON), or nil
+
+**Returns:**
+- `*StreamResult`: Contains `Chunks` channel (output data), `Metadata` channel (after streaming completes), and `Err` (FFI-level error)
+
+**Usage:**
+```go
+result := dataweave.RunStreaming("output application/json --- (1 to 10000)", nil)
+if result.Err != nil {
+    log.Fatal(result.Err)
+}
+for chunk := range result.Chunks {
+    os.Stdout.Write(chunk)
+}
+metadata := <-result.Metadata
+fmt.Printf("Done: %s, %s\n", metadata.MimeType, metadata.Charset)
+```
+
+### `RunTransform(script string, inputReader io.Reader, opts TransformOptions) *StreamResult`
+
+Executes a DataWeave script with streaming input and output. Input data is pulled from the reader and output chunks are delivered via channels. Ideal for processing large files with constant memory overhead.
+
+**Parameters:**
+- `script`: DataWeave script source code
+- `inputReader`: An `io.Reader` providing streaming input data
+- `opts`: `TransformOptions` with input name, MIME type, and charset
+
+**Returns:**
+- `*StreamResult`: Same as `RunStreaming`
+
+**Usage:**
+```go
+file, _ := os.Open("large.json")
+defer file.Close()
+opts := dataweave.TransformOptions{
+    InputMimeType: "application/json",
+}
+result := dataweave.RunTransform("output application/csv --- payload", file, opts)
+if result.Err != nil {
+    log.Fatal(result.Err)
+}
+for chunk := range result.Chunks {
+    outFile.Write(chunk)
+}
+metadata := <-result.Metadata
+```
 
 ### `ExecutionResult`
 
@@ -126,6 +180,55 @@ type ExecutionResult struct {
 **Methods:**
 - `GetBytes() ([]byte, error)` — decode result to bytes
 - `GetString() (string, error)` — decode result to UTF-8 string
+
+### `StreamResult`
+
+```go
+type StreamResult struct {
+    Chunks   <-chan []byte             // Read-only channel of output chunks
+    Metadata <-chan StreamingMetadata   // Metadata arrives after all chunks
+    Err      error                     // FFI-level error (nil on success)
+}
+```
+
+### `StreamingMetadata`
+
+```go
+type StreamingMetadata struct {
+    Success  bool
+    Error    string
+    MimeType string
+    Charset  string
+    Binary   bool
+}
+```
+
+### `TransformOptions`
+
+```go
+type TransformOptions struct {
+    InputName     string // Binding name (default "payload")
+    InputMimeType string // MIME type (required)
+    InputCharset  string // Charset (default "utf-8")
+}
+```
+
+## Threading Considerations
+
+- `RunStreaming` and `RunTransform` launch a goroutine internally to call the native FFI
+- Output chunks are delivered via a buffered channel (capacity 64)
+- Callbacks may be invoked on different OS threads by the native library
+- It is safe to call `RunStreaming`/`RunTransform` from multiple goroutines concurrently
+- Each `StreamResult` is independent and can be consumed by a single goroutine
+
+## When to Use Streaming vs Buffered
+
+| Use Case | Recommended API |
+|----------|----------------|
+| Small scripts, immediate result | `Run()` |
+| Large output, process as produced | `RunStreaming()` |
+| Large input and output, constant memory | `RunTransform()` |
+| File-to-file transformation | `RunTransform()` |
 
 ## Environment Variables
 
