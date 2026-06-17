@@ -25,3 +25,11 @@ grimoires/
 
 .windsurf/
 .claude/
+
+# Go
+native-lib/go/examples/simple_demo
+native-lib/go/examples/streaming_demo
+
+# Rust
+native-lib/rust/target/
+native-lib/rust/Cargo.lock
