@@ -321,3 +321,79 @@ result = dataweave.run_input_output_callback(
 print(result)            # StreamingResult(success=True, ...)
 print(b"".join(chunks))  # [1,4,9,16,25]
 ```
+
+## Using the library (Go examples)
+
+All examples below assume:
+
+```go
+import dataweave "github.com/mulesoft/data-weave-cli/native-lib/go"
+```
+
+### 1) Simple script
+
+```go
+result, err := dataweave.Run("2 + 2", nil)
+if err != nil {
+    log.Fatal(err)
+}
+if !result.Success {
+    log.Fatalf("Script error: %s", result.Error)
+}
+output, _ := result.GetString()
+fmt.Println(output) // "4"
+```
+
+### 2) Script with inputs
+
+```go
+inputs := map[string]interface{}{
+    "num1": 25,
+    "num2": 17,
+}
+result, err := dataweave.Run("num1 + num2", inputs)
+if err != nil {
+    log.Fatal(err)
+}
+output, _ := result.GetString()
+fmt.Println(output) // "42"
+```
+
+See [go/README.md](go/README.md) for full documentation.
+
+## Using the library (Rust examples)
+
+All examples below assume:
+
+```rust
+use dataweave::run;
+```
+
+### 1) Simple script
+
+```rust
+let result = run("2 + 2", None).expect("Failed to run script");
+if !result.success {
+    eprintln!("Script failed: {}", result.error.unwrap_or_default());
+    return;
+}
+let output = result.get_string().expect("Failed to get string");
+println!("{}", output); // "4"
+```
+
+### 2) Script with inputs
+
+```rust
+use serde_json::json;
+use std::collections::HashMap;
+
+let mut inputs = HashMap::new();
+inputs.insert("num1".to_string(), json!(25));
+inputs.insert("num2".to_string(), json!(17));
+
+let result = run("num1 + num2", Some(inputs)).expect("Failed to run script");
+let output = result.get_string().expect("Failed to get string");
+println!("{}", output); // "42"
+```
+
+See [rust/README.md](rust/README.md) for full documentation.
