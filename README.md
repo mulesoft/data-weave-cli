@@ -53,24 +53,16 @@ brew install dw
 
 ### Build and Install
 
-To build the project, you need to run gradlew with the graalVM distribution based on Java 11. You can download it
-at https://github.com/graalvm/graalvm-ce-builds/releases
-Set:
+**Quick start** (requires GraalVM with `native-image`):
 
 ```bash
-export GRAALVM_HOME=`pwd`/.graalvm/graalvm-ce-java11-22.3.0/Contents/Home
-export JAVA_HOME=`pwd`/.graalvm/graalvm-ce-java11-22.3.0/Contents/Home
+export JAVA_HOME=/path/to/graalvm
+./gradlew :native-cli:nativeCompile
 ```
 
-Execute the gradle task `nativeCompile`
+The `dw` binary is produced at `native-cli/build/native/nativeCompile/dw`.
 
-```bash
-./gradlew native-cli:nativeCompile
-```
-
-It takes several minutes so good time to take and refill your mate.
-
-Once it finishes you will find the `dw` binary in `native-cli/build/native/nativeCompile/dw`
+For full build instructions, prerequisites, and troubleshooting, see [BUILDING.md](BUILDING.md).
 
 ## How to Use It
 
