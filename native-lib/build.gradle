@@ -32,6 +32,11 @@ tasks.matching { it.name == 'nativeCompileClasspathJar' }.configureEach { t ->
   }
 }
 
+// Declare nativeCompile outputs so dependent tasks can declare proper inputs
+tasks.matching { it.name == 'nativeCompile' }.configureEach { t ->
+  t.outputs.dir("${buildDir}/native/nativeCompile")
+}
+
 // Configure GraalVM native-image to build a shared library
 graalvmNative {
 //  toolchainDetection = true
@@ -110,6 +115,7 @@ tasks.register('goTest', Exec) {
   }
 
   dependsOn tasks.named('nativeCompile')
+  inputs.dir("${buildDir}/native/nativeCompile")
   workingDir("${projectDir}/go")
   commandLine('go', 'test', '-v')
 }
@@ -120,6 +126,7 @@ tasks.register('rustTest', Exec) {
   }
 
   dependsOn tasks.named('nativeCompile')
+  inputs.dir("${buildDir}/native/nativeCompile")
   workingDir("${projectDir}/rust")
   commandLine('cargo', 'test', '--', '--test-threads=1')
 }
@@ -128,6 +135,10 @@ tasks.named('test') {
   dependsOn tasks.named('pythonTest')
   dependsOn tasks.named('goTest')
   dependsOn tasks.named('rustTest')
+}
+
+tasks.named('build') {
+  dependsOn tasks.named('test')
 }
 
 tasks.named('clean') {

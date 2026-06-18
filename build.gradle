@@ -59,4 +59,10 @@ subprojects {
     dependencies {
         implementation "org.scala-lang:scala-library:${scalaVersion}"
     }
+
+    // Ensure nativeCompile tasks declare their output directories for proper
+    // Gradle up-to-date checks and cross-project dependency resolution
+    tasks.matching { it.name == 'nativeCompile' }.configureEach { t ->
+        t.outputs.dir("${project.buildDir}/native/nativeCompile")
+    }
 }

@@ -32,10 +32,16 @@ The main purpose is to allow non-JVM consumers (most notably the Python package 
 
 ## Building with Gradle
 
-### Prerequisites
+For comprehensive build instructions, prerequisites, and troubleshooting, see [../BUILDING.md](../BUILDING.md).
 
-- A GraalVM distribution installed that includes `native-image`.
-- Enough memory for native-image (this build config uses `-J-Xmx6G`).
+### Quick Reference
+
+```bash
+./gradlew :native-lib:nativeCompile    # Build shared library
+./gradlew :native-lib:goTest           # Run Go tests
+./gradlew :native-lib:rustTest         # Run Rust tests
+./gradlew :native-lib:pythonTest       # Run Python tests
+```
 
 ### Build the shared library
 
