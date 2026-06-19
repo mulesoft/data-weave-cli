@@ -1,25 +1,26 @@
 package dataweave
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../build/native/nativeCompile
-#cgo darwin LDFLAGS: -L${SRCDIR}/../../build/native/nativeCompile -ldwlib
-#cgo linux LDFLAGS: -L${SRCDIR}/../../build/native/nativeCompile -ldwlib
-#cgo windows LDFLAGS: -L${SRCDIR}/../../build/native/nativeCompile -ldwlib
+#cgo CFLAGS: -I${SRCDIR}/../build/native/nativeCompile
+#cgo darwin LDFLAGS: -L${SRCDIR}/../build/native/nativeCompile -ldwlib
+#cgo linux LDFLAGS: -L${SRCDIR}/../build/native/nativeCompile -ldwlib
+#cgo windows LDFLAGS: -L${SRCDIR}/../build/native/nativeCompile -ldwlib
 
 #include <stdlib.h>
 #include <string.h>
+#include "graal_isolate.h"
 
 // Forward declarations for GraalVM entry points
-extern char* run_script(void* thread, const char* script, const char* inputsJson);
-extern void free_cstring(void* thread, char* pointer);
+extern char* run_script(graal_isolatethread_t* thread, const char* script, const char* inputsJson);
+extern void free_cstring(graal_isolatethread_t* thread, char* pointer);
 
 // Callback type definitions
 typedef int (*WriteCallback)(void* ctx, const char* buffer, int length);
 typedef int (*ReadCallback)(void* ctx, char* buffer, int bufferSize);
 
-extern char* run_script_callback(void* thread, const char* script,
+extern char* run_script_callback(graal_isolatethread_t* thread, const char* script,
                                   const char* inputsJson, WriteCallback cb, void* ctx);
-extern char* run_script_input_output_callback(void* thread, const char* script,
+extern char* run_script_input_output_callback(graal_isolatethread_t* thread, const char* script,
                                               const char* inputsJson,
                                               const char* inputName, const char* inputMimeType,
                                               const char* inputCharset,
@@ -36,9 +37,51 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"runtime"
 	"sync"
 	"unsafe"
 )
+
+// globalIsolate is the GraalVM isolate shared by all calls into the native library.
+// GraalVM Native Image requires every entry point to receive a thread attached to an
+// isolate; the Go binding owns one isolate for the process lifetime and attaches the
+// current OS thread on each call.
+var (
+	isolateOnce    sync.Once
+	globalIsolate  *C.graal_isolate_t
+	isolateInitErr error
+)
+
+func ensureIsolate() error {
+	isolateOnce.Do(func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		var isolate *C.graal_isolate_t
+		var thread *C.graal_isolatethread_t
+		if rc := C.graal_create_isolate(nil, &isolate, &thread); rc != 0 {
+			isolateInitErr = fmt.Errorf("graal_create_isolate failed: %d", int(rc))
+			return
+		}
+		globalIsolate = isolate
+		// Detach the bootstrap thread; subsequent calls attach the calling thread on demand.
+		C.graal_detach_thread(thread)
+	})
+	return isolateInitErr
+}
+
+// attachCurrentThread attaches the current OS thread to the global isolate and returns
+// the resulting GraalVM thread handle. Callers must runtime.LockOSThread() before
+// invoking it and graal_detach_thread + runtime.UnlockOSThread() when finished.
+func attachCurrentThread() (*C.graal_isolatethread_t, error) {
+	if err := ensureIsolate(); err != nil {
+		return nil, err
+	}
+	var thread *C.graal_isolatethread_t
+	if rc := C.graal_attach_thread(globalIsolate, &thread); rc != 0 {
+		return nil, fmt.Errorf("graal_attach_thread failed: %d", int(rc))
+	}
+	return thread, nil
+}
 
 // ExecutionResult represents the result of a DataWeave script execution.
 type ExecutionResult struct {
@@ -87,17 +130,26 @@ func Run(script string, inputs map[string]interface{}) (*ExecutionResult, error)
 		inputsJson = "{}"
 	}
 
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	thread, err := attachCurrentThread()
+	if err != nil {
+		return nil, err
+	}
+	defer C.graal_detach_thread(thread)
+
 	cScript := C.CString(script)
 	defer C.free(unsafe.Pointer(cScript))
 
 	cInputs := C.CString(inputsJson)
 	defer C.free(unsafe.Pointer(cInputs))
 
-	cResult := C.run_script(nil, cScript, cInputs)
+	cResult := C.run_script(thread, cScript, cInputs)
 	if cResult == nil {
 		return nil, fmt.Errorf("run_script returned NULL")
 	}
-	defer C.free_cstring(nil, cResult)
+	defer C.free_cstring(thread, cResult)
 
 	rawResult := C.GoString(cResult)
 	return parseExecutionResult(rawResult)
@@ -286,6 +338,16 @@ func RunStreaming(script string, inputs map[string]interface{}) *StreamResult {
 		defer close(chunkCh)
 		defer close(metaCh)
 
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+
+		thread, err := attachCurrentThread()
+		if err != nil {
+			metaCh <- StreamingMetadata{Success: false, Error: err.Error()}
+			return
+		}
+		defer C.graal_detach_thread(thread)
+
 		cScript := C.CString(script)
 		defer C.free(unsafe.Pointer(cScript))
 
@@ -293,7 +355,7 @@ func RunStreaming(script string, inputs map[string]interface{}) *StreamResult {
 		defer C.free(unsafe.Pointer(cInputs))
 
 		cResult := C.run_script_callback(
-			nil,
+			thread,
 			cScript,
 			cInputs,
 			C.WriteCallback(C.writeCallbackBridge),
@@ -303,7 +365,7 @@ func RunStreaming(script string, inputs map[string]interface{}) *StreamResult {
 		var rawResult string
 		if cResult != nil {
 			rawResult = C.GoString(cResult)
-			C.free_cstring(nil, cResult)
+			C.free_cstring(thread, cResult)
 		}
 
 		metaCh <- parseStreamingMetadata(rawResult)
@@ -342,6 +404,16 @@ func RunTransform(script string, inputReader io.Reader, opts TransformOptions) *
 		defer close(chunkCh)
 		defer close(metaCh)
 
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+
+		thread, err := attachCurrentThread()
+		if err != nil {
+			metaCh <- StreamingMetadata{Success: false, Error: err.Error()}
+			return
+		}
+		defer C.graal_detach_thread(thread)
+
 		cScript := C.CString(script)
 		defer C.free(unsafe.Pointer(cScript))
 
@@ -358,7 +430,7 @@ func RunTransform(script string, inputReader io.Reader, opts TransformOptions) *
 		defer C.free(unsafe.Pointer(cInputCharset))
 
 		cResult := C.run_script_input_output_callback(
-			nil,
+			thread,
 			cScript,
 			cInputs,
 			cInputName,
@@ -372,7 +444,7 @@ func RunTransform(script string, inputReader io.Reader, opts TransformOptions) *
 		var rawResult string
 		if cResult != nil {
 			rawResult = C.GoString(cResult)
-			C.free_cstring(nil, cResult)
+			C.free_cstring(thread, cResult)
 		}
 
 		metaCh <- parseStreamingMetadata(rawResult)

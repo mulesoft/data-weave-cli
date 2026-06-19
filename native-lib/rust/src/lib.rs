@@ -6,24 +6,45 @@ use std::ffi::{CStr, CString};
 use std::io::Read;
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::thread;
 
 mod error;
 pub use error::{Error, Result};
 
+// Opaque GraalVM types (mirrors graal_isolate.h)
+#[repr(C)]
+struct GraalIsolate {
+    _private: [u8; 0],
+}
+#[repr(C)]
+struct GraalIsolateThread {
+    _private: [u8; 0],
+}
+
 // External C functions from the native library
 extern "C" {
+    fn graal_create_isolate(
+        params: *mut c_void,
+        isolate: *mut *mut GraalIsolate,
+        thread: *mut *mut GraalIsolateThread,
+    ) -> c_int;
+    fn graal_attach_thread(
+        isolate: *mut GraalIsolate,
+        thread: *mut *mut GraalIsolateThread,
+    ) -> c_int;
+    fn graal_detach_thread(thread: *mut GraalIsolateThread) -> c_int;
+
     fn run_script(
-        thread: *mut libc::c_void,
+        thread: *mut GraalIsolateThread,
         script: *const c_char,
         inputs_json: *const c_char,
     ) -> *mut c_char;
 
-    fn free_cstring(thread: *mut libc::c_void, pointer: *mut c_char);
+    fn free_cstring(thread: *mut GraalIsolateThread, pointer: *mut c_char);
 
     fn run_script_callback(
-        thread: *mut c_void,
+        thread: *mut GraalIsolateThread,
         script: *const c_char,
         inputs_json: *const c_char,
         callback: extern "C" fn(*mut c_void, *const c_char, c_int) -> c_int,
@@ -31,7 +52,7 @@ extern "C" {
     ) -> *mut c_char;
 
     fn run_script_input_output_callback(
-        thread: *mut c_void,
+        thread: *mut GraalIsolateThread,
         script: *const c_char,
         inputs_json: *const c_char,
         input_name: *const c_char,
@@ -41,6 +62,74 @@ extern "C" {
         write_callback: extern "C" fn(*mut c_void, *const c_char, c_int) -> c_int,
         ctx: *mut c_void,
     ) -> *mut c_char;
+}
+
+// Process-wide GraalVM isolate. Created lazily on first call; subsequent calls attach
+// the current OS thread to it. Pointer is shared across threads but only mutated once.
+static ISOLATE_INIT: Once = Once::new();
+static mut ISOLATE_PTR: *mut GraalIsolate = std::ptr::null_mut();
+static mut ISOLATE_INIT_RC: c_int = 0;
+
+fn ensure_isolate() -> Result<*mut GraalIsolate> {
+    ISOLATE_INIT.call_once(|| unsafe {
+        let mut isolate: *mut GraalIsolate = std::ptr::null_mut();
+        let mut thread: *mut GraalIsolateThread = std::ptr::null_mut();
+        let rc = graal_create_isolate(std::ptr::null_mut(), &mut isolate, &mut thread);
+        if rc == 0 {
+            ISOLATE_PTR = isolate;
+            // Detach the bootstrap thread; per-call code attaches its own thread.
+            graal_detach_thread(thread);
+        } else {
+            ISOLATE_INIT_RC = rc;
+        }
+    });
+    unsafe {
+        if ISOLATE_PTR.is_null() {
+            Err(Error::NullPointer)
+        } else {
+            Ok(ISOLATE_PTR)
+        }
+    }
+}
+
+/// Wraps a raw pointer so it can be moved into a spawned thread.
+/// SAFETY: the caller is responsible for ensuring the pointer remains valid for the
+/// thread's lifetime. We use this to ferry callback-context pointers across threads.
+struct SendPtr<T>(*mut T);
+unsafe impl<T> Send for SendPtr<T> {}
+impl<T> SendPtr<T> {
+    fn as_raw(&self) -> *mut T {
+        self.0
+    }
+}
+
+/// RAII guard that attaches the current thread on construction and detaches on drop.
+struct AttachedThread {
+    thread: *mut GraalIsolateThread,
+}
+
+impl AttachedThread {
+    fn new() -> Result<Self> {
+        let isolate = ensure_isolate()?;
+        let mut thread: *mut GraalIsolateThread = std::ptr::null_mut();
+        let rc = unsafe { graal_attach_thread(isolate, &mut thread) };
+        if rc != 0 || thread.is_null() {
+            return Err(Error::NullPointer);
+        }
+        Ok(AttachedThread { thread })
+    }
+
+    fn as_ptr(&self) -> *mut GraalIsolateThread {
+        self.thread
+    }
+}
+
+impl Drop for AttachedThread {
+    fn drop(&mut self) {
+        unsafe {
+            graal_detach_thread(self.thread);
+        }
+    }
 }
 
 /// Result of a DataWeave script execution.
@@ -97,15 +186,17 @@ pub fn run(script: &str, inputs: Option<HashMap<String, Value>>) -> Result<Execu
     let c_script = CString::new(script).map_err(|_| Error::NulByte)?;
     let c_inputs = CString::new(inputs_json).map_err(|_| Error::NulByte)?;
 
+    let attached = AttachedThread::new()?;
+    let thread = attached.as_ptr();
     unsafe {
-        let result_ptr = run_script(std::ptr::null_mut(), c_script.as_ptr(), c_inputs.as_ptr());
+        let result_ptr = run_script(thread, c_script.as_ptr(), c_inputs.as_ptr());
         if result_ptr.is_null() {
             return Err(Error::NullPointer);
         }
 
         let c_str = CStr::from_ptr(result_ptr);
         let raw_result = c_str.to_str().map_err(|_| Error::Utf8Response)?.to_string();
-        free_cstring(std::ptr::null_mut(), result_ptr);
+        free_cstring(thread, result_ptr);
 
         parse_execution_result(&raw_result)
     }
@@ -116,17 +207,15 @@ fn encode_inputs(inputs: Option<HashMap<String, Value>>) -> Result<String> {
     let mut encoded = serde_json::Map::new();
     if let Some(inputs_map) = inputs {
         for (name, value) in inputs_map {
+            let is_string = matches!(value, Value::String(_));
             let content = match value {
                 Value::String(s) => BASE64.encode(s.as_bytes()),
-                _ => {
-                    let json_str = serde_json::to_string(&value).map_err(Error::Json)?;
+                other => {
+                    let json_str = serde_json::to_string(&other).map_err(Error::Json)?;
                     BASE64.encode(json_str.as_bytes())
                 }
             };
-            let mime_type = match value {
-                Value::String(_) => "text/plain",
-                _ => "application/json",
-            };
+            let mime_type = if is_string { "text/plain" } else { "application/json" };
             encoded.insert(
                 name,
                 json!({
@@ -177,6 +266,11 @@ impl Default for TransformOptions {
 pub struct StreamResult {
     receiver: mpsc::Receiver<Vec<u8>>,
     metadata: Arc<Mutex<Option<StreamingMetadata>>>,
+    /// Handle to the FFI worker thread. Joined on `metadata()` to ensure the
+    /// worker has finished populating `metadata` before we read it. The
+    /// channel close (which ends iteration) happens just before metadata is
+    /// written, so without joining there's a race.
+    join: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl Iterator for StreamResult {
@@ -191,9 +285,12 @@ impl Iterator for StreamResult {
 }
 
 impl StreamResult {
-    /// Access metadata after iteration completes.
-    /// Returns None if iteration has not completed.
+    /// Access metadata after iteration completes. Joins the FFI worker thread
+    /// on first call to ensure metadata has been populated.
     pub fn metadata(&self) -> Option<StreamingMetadata> {
+        if let Some(handle) = self.join.lock().unwrap().take() {
+            let _ = handle.join();
+        }
         self.metadata.lock().unwrap().clone()
     }
 }
@@ -321,12 +418,28 @@ pub fn run_streaming(script: &str, inputs: Option<HashMap<String, Value>>) -> Re
 
     // The callback context must live long enough for the FFI thread
     let ctx = Box::new(WriteCallbackContext { sender });
-    let ctx_ptr = Box::into_raw(ctx);
+    let ctx_send = SendPtr(Box::into_raw(ctx));
 
-    thread::spawn(move || {
+    let join = thread::spawn(move || {
+        let ctx_ptr = ctx_send.as_raw();
+        let attached = match AttachedThread::new() {
+            Ok(a) => a,
+            Err(e) => {
+                *metadata_clone.lock().unwrap() = Some(StreamingMetadata {
+                    success: false,
+                    error: Some(format!("Failed to attach thread to isolate: {:?}", e)),
+                    mime_type: None,
+                    charset: None,
+                    binary: false,
+                });
+                unsafe { let _ = Box::from_raw(ctx_ptr); }
+                return;
+            }
+        };
+        let graal_thread = attached.as_ptr();
         unsafe {
             let result_ptr = run_script_callback(
-                std::ptr::null_mut(),
+                graal_thread,
                 c_script.as_ptr(),
                 c_inputs.as_ptr(),
                 write_callback_streaming,
@@ -341,7 +454,7 @@ pub fn run_streaming(script: &str, inputs: Option<HashMap<String, Value>>) -> Re
             } else {
                 let c_str = CStr::from_ptr(result_ptr);
                 let result = c_str.to_str().unwrap_or("").to_string();
-                free_cstring(std::ptr::null_mut(), result_ptr);
+                free_cstring(graal_thread, result_ptr);
                 result
             };
 
@@ -350,7 +463,7 @@ pub fn run_streaming(script: &str, inputs: Option<HashMap<String, Value>>) -> Re
         }
     });
 
-    Ok(StreamResult { receiver, metadata })
+    Ok(StreamResult { receiver, metadata, join: Mutex::new(Some(join)) })
 }
 
 /// Execute a DataWeave script with streaming input and output.
@@ -390,12 +503,28 @@ pub fn run_transform<R: Read + Send + 'static>(
         sender,
         reader: Mutex::new(Box::new(input_reader)),
     });
-    let ctx_ptr = Box::into_raw(ctx);
+    let ctx_send = SendPtr(Box::into_raw(ctx));
 
-    thread::spawn(move || {
+    let join = thread::spawn(move || {
+        let ctx_ptr = ctx_send.as_raw();
+        let attached = match AttachedThread::new() {
+            Ok(a) => a,
+            Err(e) => {
+                *metadata_clone.lock().unwrap() = Some(StreamingMetadata {
+                    success: false,
+                    error: Some(format!("Failed to attach thread to isolate: {:?}", e)),
+                    mime_type: None,
+                    charset: None,
+                    binary: false,
+                });
+                unsafe { let _ = Box::from_raw(ctx_ptr); }
+                return;
+            }
+        };
+        let graal_thread = attached.as_ptr();
         unsafe {
             let result_ptr = run_script_input_output_callback(
-                std::ptr::null_mut(),
+                graal_thread,
                 c_script.as_ptr(),
                 c_inputs.as_ptr(),
                 c_input_name.as_ptr(),
@@ -414,7 +543,7 @@ pub fn run_transform<R: Read + Send + 'static>(
             } else {
                 let c_str = CStr::from_ptr(result_ptr);
                 let result = c_str.to_str().unwrap_or("").to_string();
-                free_cstring(std::ptr::null_mut(), result_ptr);
+                free_cstring(graal_thread, result_ptr);
                 result
             };
 
@@ -423,5 +552,5 @@ pub fn run_transform<R: Read + Send + 'static>(
         }
     });
 
-    Ok(StreamResult { receiver, metadata })
+    Ok(StreamResult { receiver, metadata, join: Mutex::new(Some(join)) })
 }

@@ -2,7 +2,7 @@ use std::env;
 
 fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let lib_dir = format!("{}/../../build/native/nativeCompile", manifest_dir);
+    let lib_dir = format!("{}/../build/native/nativeCompile", manifest_dir);
 
     println!("cargo:rustc-link-search=native={}", lib_dir);
     println!("cargo:rustc-link-lib=dylib=dwlib");
