@@ -31,7 +31,7 @@
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^20",
-    "node-gyp": "^10",
+    "node-gyp": "^13",
     "typescript": "^5.5",
     "vitest": "^3.0"
   }
