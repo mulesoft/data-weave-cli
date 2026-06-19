@@ -37,6 +37,29 @@ tasks.matching { it.name == 'nativeCompile' }.configureEach { t ->
   t.outputs.dir("${buildDir}/native/nativeCompile")
 }
 
+// GraalVM native-image emits the shared library as `dwlib.{dylib,so,dll}` (no `lib` prefix),
+// but Go cgo and Rust build scripts use `-ldwlib`, which looks up `libdwlib.{dylib,so}`.
+// Stage `libdwlib.*` symlinks next to the originals so both naming conventions resolve.
+tasks.register('symlinkNativeLibForLinking') {
+  dependsOn tasks.named('nativeCompile')
+  def nativeDir = file("${buildDir}/native/nativeCompile")
+  inputs.dir(nativeDir)
+  outputs.upToDateWhen {
+    nativeDir.listFiles()?.findAll { it.name.startsWith('dwlib.') }?.every { src ->
+      def link = new File(src.parentFile, "lib${src.name}")
+      link.exists()
+    } ?: false
+  }
+  doLast {
+    nativeDir.listFiles()?.findAll { it.name.startsWith('dwlib.') && !it.name.endsWith('.h') }?.each { src ->
+      def link = new File(src.parentFile, "lib${src.name}")
+      if (!link.exists()) {
+        java.nio.file.Files.createSymbolicLink(link.toPath(), src.toPath().fileName)
+      }
+    }
+  }
+}
+
 // Configure GraalVM native-image to build a shared library
 graalvmNative {
 //  toolchainDetection = true
@@ -109,15 +132,37 @@ tasks.register('pythonTest', Exec) {
   commandLine(pythonExe, 'tests/test_dataweave_module.py')
 }
 
+// Resolve a tool absolute path so the Exec tasks work even if the Gradle daemon
+// was launched without /opt/homebrew/bin or ~/.cargo/bin on PATH.
+def resolveTool = { String tool, List<String> extraDirs ->
+  def envProp = project.findProperty("${tool}Exe")?.toString()
+  if (envProp) return envProp
+  def envVar = System.getenv("${tool.toUpperCase()}_EXE")
+  if (envVar) return envVar
+  List<String> candidates = []
+  def pathEnv = System.getenv('PATH') ?: ''
+  candidates.addAll(Arrays.asList(pathEnv.split(File.pathSeparator)) as List<String>)
+  candidates.addAll(extraDirs)
+  for (String dir : candidates) {
+    if (!dir) continue
+    File f = new File(dir, tool)
+    if (f.canExecute()) return f.absolutePath
+  }
+  return tool // fall back to bare name; will fail clearly if missing
+}
+
+def goExe = resolveTool('go', ['/opt/homebrew/bin', '/usr/local/bin', "${System.getenv('HOME')}/go/bin"])
+def cargoExe = resolveTool('cargo', ["${System.getenv('HOME')}/.cargo/bin", '/opt/homebrew/bin', '/usr/local/bin'])
+
 tasks.register('goTest', Exec) {
   if (project.findProperty('skipGoTests')?.toString()?.toBoolean() == true) {
     enabled = false
   }
 
-  dependsOn tasks.named('nativeCompile')
+  dependsOn tasks.named('symlinkNativeLibForLinking')
   inputs.dir("${buildDir}/native/nativeCompile")
   workingDir("${projectDir}/go")
-  commandLine('go', 'test', '-v')
+  commandLine(goExe, 'test', '-v')
 }
 
 tasks.register('rustTest', Exec) {
@@ -125,10 +170,10 @@ tasks.register('rustTest', Exec) {
     enabled = false
   }
 
-  dependsOn tasks.named('nativeCompile')
+  dependsOn tasks.named('symlinkNativeLibForLinking')
   inputs.dir("${buildDir}/native/nativeCompile")
   workingDir("${projectDir}/rust")
-  commandLine('cargo', 'test', '--', '--test-threads=1')
+  commandLine(cargoExe, 'test', '--', '--test-threads=1')
 }
 
 tasks.named('test') {

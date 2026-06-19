@@ -139,9 +139,10 @@ fn test_run_transform_large_input() {
         input_mime_type: "application/json".to_string(),
         input_charset: None,
     };
+    let json_bytes = json_str.into_bytes();
     let mut result = run_transform(
         "output application/json --- sizeOf(payload)",
-        json_str.as_bytes(),
+        std::io::Cursor::new(json_bytes),
         opts,
     ).expect("run_transform failed");
     let mut chunks = Vec::new();
