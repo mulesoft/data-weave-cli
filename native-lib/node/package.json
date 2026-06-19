@@ -33,6 +33,6 @@
     "@types/node": "^20",
     "node-gyp": "^10",
     "typescript": "^5.5",
-    "vitest": "^3.0"
+    "vitest": "^3.2"
   }
 }
