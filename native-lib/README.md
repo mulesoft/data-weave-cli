@@ -321,3 +321,325 @@ result = dataweave.run_input_output_callback(
 print(result)            # StreamingResult(success=True, ...)
 print(b"".join(chunks))  # [1,4,9,16,25]
 ```
+
+---
+
+## Installing for use in a Node.js project
+
+### Option A: Install the produced tarball (recommended)
+
+After `:native-lib:buildNodePackage`:
+
+```bash
+npm install native-lib/node/dataweave-native-0.0.1.tgz
+```
+
+This tarball includes the pre-built native addon and the `dwlib.*` shared library.
+
+### Option B: Development install (link)
+
+1. Stage the native library:
+
+```bash
+./gradlew :native-lib:stageNodeNativeLib
+```
+
+2. Build the Node package:
+
+```bash
+cd native-lib/node
+npm install
+npx node-gyp rebuild
+npx tsc
+```
+
+3. Link into your project:
+
+```bash
+npm link native-lib/node
+```
+
+### Option C: Use an externally-built library via an environment variable
+
+Set `DATAWEAVE_NATIVE_LIB=/absolute/path/to/dwlib.(dylib|so|dll)` before running your application.
+
+The module also searches:
+1. `<package>/native/dwlib.*`
+2. `<repo>/native-lib/build/native/nativeCompile/dwlib.*` (dev fallback)
+3. Current working directory
+
+### Building with Gradle
+
+```bash
+# Stage native library into node/native/
+./gradlew :native-lib:stageNodeNativeLib
+
+# Build the full .tgz package (stage + compile addon + tsc + npm pack)
+./gradlew :native-lib:buildNodePackage
+
+# Run Node.js tests
+./gradlew :native-lib:nodeTest
+
+# Skip Node tests in CI: -PskipNodeTests=true
+```
+
+### Requirements
+
+- Node.js >= 18
+- A C compiler (for `node-gyp` to build the native addon)
+- The `dwlib` shared library (staged by Gradle or pointed to via env var)
+
+## Using the library (Node.js examples)
+
+All examples below assume:
+
+```typescript
+import { run, runStreaming, runTransform, cleanup } from "@dataweave/native";
+```
+
+### 1) Simple script
+
+```typescript
+const result = run("2 + 2");
+console.log(result.getString()); // "4"
+```
+
+### 2) Script with inputs (auto-detected types)
+
+Inputs can be plain JS values. The module auto-encodes them as JSON.
+
+```typescript
+const result = run("num1 + num2", { num1: 25, num2: 17 });
+console.log(result.getString()); // "42"
+```
+
+### 3) Script with inputs (explicit mime type, charset, properties)
+
+Use an explicit input object when you need full control over how DataWeave interprets bytes.
+
+```typescript
+import { readFileSync } from "fs";
+
+const xmlBytes = readFileSync("person.xml");
+
+const result = run("payload.person", {
+  payload: {
+    content: xmlBytes,
+    mimeType: "application/xml",
+    charset: "UTF-16",
+    properties: {
+      nullValueOn: "empty",
+      maxAttributeSize: 256,
+    },
+  },
+});
+
+if (result.success) {
+  console.log(result.getString());
+} else {
+  console.error(result.error);
+}
+```
+
+### 4) Explicit instance lifecycle
+
+The module-level API (`run(...)`) uses a shared singleton. Use the `DataWeave` class directly when you need explicit control over isolate lifecycle:
+
+```typescript
+import { DataWeave } from "@dataweave/native";
+
+const dw = new DataWeave();
+dw.initialize();
+
+const r1 = dw.run("2 + 2");
+const r2 = dw.run("x + y", { x: 10, y: 32 });
+
+console.log(r1.getString()); // "4"
+console.log(r2.getString()); // "42"
+
+dw.cleanup();
+```
+
+### 5) Error handling
+
+There are two error classes:
+
+- `DataWeaveError` — library/isolate-level failures (library not found, initialization failed).
+- `DataWeaveScriptError` — script compilation or runtime error (subclass of `DataWeaveError`). Carries the full result on `.result`.
+
+**Option A: Use `raiseOnError: true` for try/catch (recommended)**
+
+```typescript
+import { run, DataWeaveScriptError } from "@dataweave/native";
+
+try {
+  const result = run("invalid syntax here", {}, { raiseOnError: true });
+  console.log(result.getString());
+} catch (e) {
+  if (e instanceof DataWeaveScriptError) {
+    console.error(`Script error: ${e.result.error}`);
+  } else {
+    throw e;
+  }
+}
+```
+
+**Option B: Check `result.success` manually (default)**
+
+```typescript
+const result = run("invalid syntax here");
+
+if (!result.success) {
+  console.error(`Error: ${result.error}`);
+} else {
+  console.log(result.getString());
+}
+```
+
+### 6) Output streaming
+
+Use `runStreaming` to execute a script and receive output chunks as they are produced, without buffering the entire result in memory. Returns an `AsyncGenerator<Buffer, StreamingResult>`.
+
+```typescript
+const gen = runStreaming(
+  'output application/json --- (1 to 10000) map {id: $, name: "item_" ++ $}'
+);
+
+let result = await gen.next();
+while (!result.done) {
+  process.stdout.write(result.value);
+  result = await gen.next();
+}
+
+const metadata = result.value; // StreamingResult
+console.log(`\nDone: ${metadata.mimeType}, ${metadata.charset}`);
+```
+
+Or with `for await`:
+
+```typescript
+const gen = runStreaming("output application/csv --- payload", {
+  payload: [1, 2, 3],
+});
+
+const chunks: Buffer[] = [];
+for await (const chunk of gen) {
+  chunks.push(chunk);
+}
+const output = Buffer.concat(chunks).toString("utf-8");
+```
+
+### 7) Input and output streaming (bidirectional)
+
+Use `runTransform` to stream both input and output — feed an `Iterable<Buffer>` or `AsyncIterable<Buffer>` in, receive an `AsyncGenerator<Buffer>` out.
+
+**Important: sync vs async input and memory usage**
+
+The native read callback is invoked synchronously on the JS main thread, which means:
+
+- **Synchronous iterables** (arrays, generators) are consumed **on-demand** — only one chunk is held in memory at a time. This gives constant-memory streaming, comparable to the Python API.
+- **Async iterables** (e.g. `fs.createReadStream()`) **must be fully pre-buffered** into memory before the transform starts, because their `.next()` returns a Promise that cannot be awaited inside a synchronous callback.
+
+For large inputs, prefer a **synchronous generator** to get true streaming with minimal memory:
+
+```typescript
+import { readFileSync } from "fs";
+
+// Good: sync generator → constant memory (~150 MB for 50M elements)
+function* chunked(data: Buffer, size = 8192): Generator<Buffer> {
+  for (let i = 0; i < data.length; i += size) {
+    yield data.subarray(i, i + size);
+  }
+}
+const gen = runTransform("output csv --- payload", chunked(readFileSync("large.json")), {
+  mimeType: "application/json",
+});
+```
+
+Using an async readable stream still works but will buffer the entire input first:
+
+```typescript
+import { createReadStream } from "fs";
+import { createWriteStream } from "fs";
+
+// Works but pre-buffers the full input into memory
+const input = createReadStream("large.json");
+const gen = runTransform("output application/csv --- payload", input, {
+  mimeType: "application/json",
+});
+
+const out = createWriteStream("output.csv");
+for await (const chunk of gen) {
+  out.write(chunk);
+}
+out.end();
+```
+
+Works with any iterable — arrays, generators, streams:
+
+```typescript
+// From an in-memory array
+const input = [Buffer.from("[1,2,3,4,5]")];
+const gen = runTransform(
+  "output application/json --- payload map ($ * $)",
+  input,
+  { mimeType: "application/json" }
+);
+
+const chunks: Buffer[] = [];
+for await (const chunk of gen) {
+  chunks.push(chunk);
+}
+console.log(Buffer.concat(chunks).toString()); // [1,4,9,16,25]
+```
+
+```typescript
+// From a generator producing chunks
+function* chunked(data: Buffer, size = 4096): Generator<Buffer> {
+  for (let i = 0; i < data.length; i += size) {
+    yield data.subarray(i, i + size);
+  }
+}
+
+const largeJson = Buffer.from(JSON.stringify(Array.from({ length: 1000 }, (_, i) => ({ id: i }))));
+const gen = runTransform(
+  "output application/json --- sizeOf(payload)",
+  chunked(largeJson),
+  { mimeType: "application/json" }
+);
+
+for await (const chunk of gen) {
+  process.stdout.write(chunk); // "1000"
+}
+```
+
+### 8) Transform with additional inputs
+
+Pass extra named inputs alongside the streamed input:
+
+```typescript
+const input = [Buffer.from('[{"price": 100}, {"price": 200}]')];
+const gen = runTransform(
+  "output application/json --- payload map ($.price * rate)",
+  input,
+  {
+    mimeType: "application/json",
+    inputs: { rate: 1.5 },
+  }
+);
+
+for await (const chunk of gen) {
+  process.stdout.write(chunk); // [150.0, 300.0]
+}
+```
+
+### 9) Cleanup
+
+The module registers a `process.on('exit')` handler to clean up automatically. For explicit control:
+
+```typescript
+import { cleanup } from "@dataweave/native";
+
+// When done with all DataWeave operations
+cleanup();
+```
