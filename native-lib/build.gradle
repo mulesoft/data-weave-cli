@@ -32,34 +32,6 @@ tasks.matching { it.name == 'nativeCompileClasspathJar' }.configureEach { t ->
   }
 }
 
-// Declare nativeCompile outputs so dependent tasks can declare proper inputs
-tasks.matching { it.name == 'nativeCompile' }.configureEach { t ->
-  t.outputs.dir("${buildDir}/native/nativeCompile")
-}
-
-// GraalVM native-image emits the shared library as `dwlib.{dylib,so,dll}` (no `lib` prefix),
-// but Go cgo and Rust build scripts use `-ldwlib`, which looks up `libdwlib.{dylib,so}`.
-// Stage `libdwlib.*` symlinks next to the originals so both naming conventions resolve.
-tasks.register('symlinkNativeLibForLinking') {
-  dependsOn tasks.named('nativeCompile')
-  def nativeDir = file("${buildDir}/native/nativeCompile")
-  inputs.dir(nativeDir)
-  outputs.upToDateWhen {
-    nativeDir.listFiles()?.findAll { it.name.startsWith('dwlib.') }?.every { src ->
-      def link = new File(src.parentFile, "lib${src.name}")
-      link.exists()
-    } ?: false
-  }
-  doLast {
-    nativeDir.listFiles()?.findAll { it.name.startsWith('dwlib.') && !it.name.endsWith('.h') }?.each { src ->
-      def link = new File(src.parentFile, "lib${src.name}")
-      if (!link.exists()) {
-        java.nio.file.Files.createSymbolicLink(link.toPath(), src.toPath().fileName)
-      }
-    }
-  }
-}
-
 // Configure GraalVM native-image to build a shared library
 graalvmNative {
 //  toolchainDetection = true
@@ -85,7 +57,6 @@ graalvmNative {
       buildArgs.add("-H:CompilationExpirationPeriod=0")
       buildArgs.add("-H:+AddAllCharsets")
       buildArgs.add("-H:+IncludeAllLocales")
-      // Note: -H:-SetFileDescriptorLimit removed (deprecated in newer GraalVM versions)
       // Pass project directory as system property for header path resolution
       buildArgs.add("-Dproject.root=${projectDir}")
     }
@@ -133,100 +104,53 @@ tasks.register('pythonTest', Exec) {
   commandLine(pythonExe, 'tests/test_dataweave_module.py')
 }
 
-// Resolve a tool absolute path so the Exec tasks work even if the Gradle daemon
-// was launched without /opt/homebrew/bin or ~/.cargo/bin on PATH.
-def resolveTool = { String tool, List<String> extraDirs ->
-  def envProp = project.findProperty("${tool}Exe")?.toString()
-  if (envProp) return envProp
-  def envVar = System.getenv("${tool.toUpperCase()}_EXE")
-  if (envVar) return envVar
-  List<String> candidates = []
-  def pathEnv = System.getenv('PATH') ?: ''
-  candidates.addAll(Arrays.asList(pathEnv.split(File.pathSeparator)) as List<String>)
-  candidates.addAll(extraDirs)
-  for (String dir : candidates) {
-    if (!dir) continue
-    File f = new File(dir, tool)
-    if (f.canExecute()) return f.absolutePath
+// --- Node.js native package tasks ---
+
+tasks.register('stageNodeNativeLib', Copy) {
+  dependsOn tasks.named('nativeCompile')
+  from("${buildDir}/native/nativeCompile") {
+    include('dwlib.*')
   }
-  return tool // fall back to bare name; will fail clearly if missing
+  into("${projectDir}/node/native")
 }
 
-def goExe = resolveTool('go', ['/opt/homebrew/bin', '/usr/local/bin', "${System.getenv('HOME')}/go/bin"])
-def cargoExe = resolveTool('cargo', ["${System.getenv('HOME')}/.cargo/bin", '/opt/homebrew/bin', '/usr/local/bin'])
-
-tasks.register('goTest', Exec) {
-  if (project.findProperty('skipGoTests')?.toString()?.toBoolean() == true) {
-    enabled = false
-  }
-
-  dependsOn tasks.named('symlinkNativeLibForLinking')
-  inputs.dir("${buildDir}/native/nativeCompile")
-  inputs.files(fileTree("${projectDir}/go").include("**/*.go", "go.mod", "go.sum"))
-  outputs.file("${buildDir}/test-results/go/test.out")
-  workingDir("${projectDir}/go")
+tasks.register('buildNodePackage', Exec) {
+  dependsOn tasks.named('stageNodeNativeLib')
+  workingDir("${projectDir}/node")
+  inputs.dir("${projectDir}/node/src")
+  inputs.dir("${projectDir}/node/native")
+  inputs.file("${projectDir}/node/package.json")
+  inputs.file("${projectDir}/node/binding.gyp")
+  inputs.file("${projectDir}/node/tsconfig.json")
+  outputs.dir("${projectDir}/node/dist")
+  outputs.file("${projectDir}/node/build/Release/dwlib_addon.node")
   doFirst {
-    file("${buildDir}/test-results/go").mkdirs()
+    delete("${projectDir}/node/dist")
   }
-  commandLine(goExe, 'test', '-v')
-  doLast {
-    // Write test result marker
-    file("${buildDir}/test-results/go/test.out").text = "Tests completed at ${new Date()}"
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    commandLine('cmd', '/c', 'npm install && npx node-gyp rebuild && npx tsc && npm pack')
+  } else {
+    commandLine('bash', '-c', 'npm install && npx node-gyp rebuild && npx tsc && npm pack')
   }
 }
 
-tasks.register('goTestRace', Exec) {
-  if (project.findProperty('skipGoTests')?.toString()?.toBoolean() == true) {
+tasks.register('nodeTest', Exec) {
+  if (project.findProperty('skipNodeTests')?.toString()?.toBoolean() == true) {
     enabled = false
   }
 
-  dependsOn tasks.named('symlinkNativeLibForLinking')
-  inputs.dir("${buildDir}/native/nativeCompile")
-  inputs.files(fileTree("${projectDir}/go").include("**/*.go", "go.mod", "go.sum"))
-  outputs.file("${buildDir}/test-results/go/test-race.out")
-  workingDir("${projectDir}/go")
-  doFirst {
-    file("${buildDir}/test-results/go").mkdirs()
-  }
-  commandLine(goExe, 'test', '-race', '-v')
-  doLast {
-    // Write test result marker
-    file("${buildDir}/test-results/go/test-race.out").text = "Race tests completed at ${new Date()}"
-  }
-}
-
-tasks.register('rustTest', Exec) {
-  if (project.findProperty('skipRustTests')?.toString()?.toBoolean() == true) {
-    enabled = false
-  }
-
-  dependsOn tasks.named('symlinkNativeLibForLinking')
-  inputs.dir("${buildDir}/native/nativeCompile")
-  inputs.files(fileTree("${projectDir}/rust/src").include("**/*.rs"))
-  inputs.files(fileTree("${projectDir}/rust/tests").include("**/*.rs"))
-  inputs.files(fileTree("${projectDir}/rust/examples").include("**/*.rs"))
-  inputs.file("${projectDir}/rust/Cargo.toml")
-  inputs.file("${projectDir}/rust/build.rs")
-  outputs.file("${buildDir}/test-results/rust/test.out")
-  workingDir("${projectDir}/rust")
-  doFirst {
-    file("${buildDir}/test-results/rust").mkdirs()
-  }
-  commandLine(cargoExe, 'test', '--', '--test-threads=1')
-  doLast {
-    // Write test result marker
-    file("${buildDir}/test-results/rust/test.out").text = "Tests completed at ${new Date()}"
+  dependsOn tasks.named('stageNodeNativeLib')
+  workingDir("${projectDir}/node")
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    commandLine('cmd', '/c', 'npm install && npx node-gyp rebuild && npx tsc && npx vitest run')
+  } else {
+    commandLine('bash', '-c', 'npm install && npx node-gyp rebuild && npx tsc && npx vitest run')
   }
 }
 
 tasks.named('test') {
   dependsOn tasks.named('pythonTest')
-  dependsOn tasks.named('goTest')
-  dependsOn tasks.named('rustTest')
-}
-
-tasks.named('build') {
-  dependsOn tasks.named('test')
+  dependsOn tasks.named('nodeTest')
 }
 
 tasks.named('clean') {
@@ -234,7 +158,8 @@ tasks.named('clean') {
   delete("${projectDir}/python/build")
   delete("${projectDir}/python/src/dataweave/native")
   delete("${projectDir}/python/src/dataweave_native.egg-info")
-  delete("${projectDir}/go/*.test")
-  delete("${projectDir}/rust/target")
-  delete("${buildDir}/test-results")
+  delete("${projectDir}/node/dist")
+  delete("${projectDir}/node/build")
+  delete("${projectDir}/node/native")
+  delete("${projectDir}/node/node_modules")
 }

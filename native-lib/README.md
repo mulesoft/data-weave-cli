@@ -4,24 +4,7 @@
 
 `native-lib` builds a **GraalVM native shared library** that embeds the MuleSoft **DataWeave runtime** and exposes a small C-compatible API.
 
-The main purpose is to allow non-JVM consumers to execute DataWeave scripts **without running a JVM**, while still using the official DataWeave runtime.
-
-## Language Bindings
-
-This module provides native language bindings for:
-
-- **Python** (`python/`) - ctypes-based FFI, included in wheels
-- **Node.js** (`node/`) - Node-API (N-API) C addon + TypeScript wrapper
-- **Rust** (`rust/`) - Safe Rust abstractions with modular FFI layer
-- **Go** (`go/`) - CGO bindings with channel-based streaming
-- **C** (`c/`) - Direct C API for low-level integration
-
-All bindings share the same underlying GraalVM native library (`dwlib.dylib`/`.so`/`.dll`) and support:
-- Buffered execution
-- Output streaming (constant memory for large outputs)
-- Bidirectional streaming (input + output streams)
-
-See each subdirectory's README for language-specific documentation and examples.
+The main purpose is to allow non-JVM consumers (most notably the Python package in `native-lib/python`) to execute DataWeave scripts **without running a JVM**, while still using the official DataWeave runtime.
 
 ## Architecture (GraalVM + FFI)
 
@@ -49,16 +32,10 @@ See each subdirectory's README for language-specific documentation and examples.
 
 ## Building with Gradle
 
-For comprehensive build instructions, prerequisites, and troubleshooting, see [../BUILDING.md](../BUILDING.md).
+### Prerequisites
 
-### Quick Reference
-
-```bash
-./gradlew :native-lib:nativeCompile    # Build shared library
-./gradlew :native-lib:goTest           # Run Go tests
-./gradlew :native-lib:rustTest         # Run Rust tests
-./gradlew :native-lib:pythonTest       # Run Python tests
-```
+- A GraalVM distribution installed that includes `native-image`.
+- Enough memory for native-image (this build config uses `-J-Xmx6G`).
 
 ### Build the shared library
 
@@ -345,144 +322,324 @@ print(result)            # StreamingResult(success=True, ...)
 print(b"".join(chunks))  # [1,4,9,16,25]
 ```
 
-## Using the library (Go examples)
+---
+
+## Installing for use in a Node.js project
+
+### Option A: Install the produced tarball (recommended)
+
+After `:native-lib:buildNodePackage`:
+
+```bash
+npm install native-lib/node/dataweave-native-0.0.1.tgz
+```
+
+This tarball includes the pre-built native addon and the `dwlib.*` shared library.
+
+### Option B: Development install (link)
+
+1. Stage the native library:
+
+```bash
+./gradlew :native-lib:stageNodeNativeLib
+```
+
+2. Build the Node package:
+
+```bash
+cd native-lib/node
+npm install
+npx node-gyp rebuild
+npx tsc
+```
+
+3. Link into your project:
+
+```bash
+npm link native-lib/node
+```
+
+### Option C: Use an externally-built library via an environment variable
+
+Set `DATAWEAVE_NATIVE_LIB=/absolute/path/to/dwlib.(dylib|so|dll)` before running your application.
+
+The module also searches:
+1. `<package>/native/dwlib.*`
+2. `<repo>/native-lib/build/native/nativeCompile/dwlib.*` (dev fallback)
+3. Current working directory
+
+### Building with Gradle
+
+```bash
+# Stage native library into node/native/
+./gradlew :native-lib:stageNodeNativeLib
+
+# Build the full .tgz package (stage + compile addon + tsc + npm pack)
+./gradlew :native-lib:buildNodePackage
+
+# Run Node.js tests
+./gradlew :native-lib:nodeTest
+
+# Skip Node tests in CI: -PskipNodeTests=true
+```
+
+### Requirements
+
+- Node.js >= 18
+- A C compiler (for `node-gyp` to build the native addon)
+- The `dwlib` shared library (staged by Gradle or pointed to via env var)
+
+## Using the library (Node.js examples)
 
 All examples below assume:
 
-```go
-import dataweave "github.com/mulesoft/data-weave-cli/native-lib/go"
+```typescript
+import { run, runStreaming, runTransform, cleanup } from "@dataweave/native";
 ```
 
 ### 1) Simple script
 
-```go
-result, err := dataweave.Run("2 + 2", nil)
-if err != nil {
-    log.Fatal(err)
-}
-if !result.Success {
-    log.Fatalf("Script error: %s", result.Error)
-}
-output, _ := result.GetString()
-fmt.Println(output) // "4"
+```typescript
+const result = run("2 + 2");
+console.log(result.getString()); // "4"
 ```
 
-### 2) Script with inputs
+### 2) Script with inputs (auto-detected types)
 
-```go
-inputs := map[string]interface{}{
-    "num1": 25,
-    "num2": 17,
-}
-result, err := dataweave.Run("num1 + num2", inputs)
-if err != nil {
-    log.Fatal(err)
-}
-output, _ := result.GetString()
-fmt.Println(output) // "42"
+Inputs can be plain JS values. The module auto-encodes them as JSON.
+
+```typescript
+const result = run("num1 + num2", { num1: 25, num2: 17 });
+console.log(result.getString()); // "42"
 ```
 
-### 3) Output streaming
+### 3) Script with inputs (explicit mime type, charset, properties)
 
-```go
-result := dataweave.RunStreaming("output application/json --- (1 to 10000)", nil)
-if result.Err != nil {
-    log.Fatal(result.Err)
+Use an explicit input object when you need full control over how DataWeave interprets bytes.
+
+```typescript
+import { readFileSync } from "fs";
+
+const xmlBytes = readFileSync("person.xml");
+
+const result = run("payload.person", {
+  payload: {
+    content: xmlBytes,
+    mimeType: "application/xml",
+    charset: "UTF-16",
+    properties: {
+      nullValueOn: "empty",
+      maxAttributeSize: 256,
+    },
+  },
+});
+
+if (result.success) {
+  console.log(result.getString());
+} else {
+  console.error(result.error);
 }
-for chunk := range result.Chunks {
-    os.Stdout.Write(chunk)
-}
-metadata := <-result.Metadata
-fmt.Printf("Done: %s, %s\n", metadata.MimeType, metadata.Charset)
 ```
 
-### 4) Bidirectional streaming (input + output)
+### 4) Explicit instance lifecycle
 
-```go
-file, _ := os.Open("large.json")
-defer file.Close()
-opts := dataweave.TransformOptions{
-    InputMimeType: "application/json",
-}
-result := dataweave.RunTransform("output application/csv --- payload", file, opts)
-if result.Err != nil {
-    log.Fatal(result.Err)
-}
-for chunk := range result.Chunks {
-    outFile.Write(chunk)
-}
-metadata := <-result.Metadata
+The module-level API (`run(...)`) uses a shared singleton. Use the `DataWeave` class directly when you need explicit control over isolate lifecycle:
+
+```typescript
+import { DataWeave } from "@dataweave/native";
+
+const dw = new DataWeave();
+dw.initialize();
+
+const r1 = dw.run("2 + 2");
+const r2 = dw.run("x + y", { x: 10, y: 32 });
+
+console.log(r1.getString()); // "4"
+console.log(r2.getString()); // "42"
+
+dw.cleanup();
 ```
 
-See [go/README.md](go/README.md) for full documentation.
+### 5) Error handling
 
-## Using the library (Rust examples)
+There are two error classes:
 
-All examples below assume:
+- `DataWeaveError` — library/isolate-level failures (library not found, initialization failed).
+- `DataWeaveScriptError` — script compilation or runtime error (subclass of `DataWeaveError`). Carries the full result on `.result`.
 
-```rust
-use dataweave::{run, run_streaming, run_transform, TransformOptions};
-```
+**Option A: Use `raiseOnError: true` for try/catch (recommended)**
 
-### 1) Simple script
+```typescript
+import { run, DataWeaveScriptError } from "@dataweave/native";
 
-```rust
-let result = run("2 + 2", None).expect("Failed to run script");
-if !result.success {
-    eprintln!("Script failed: {}", result.error.unwrap_or_default());
-    return;
+try {
+  const result = run("invalid syntax here", {}, { raiseOnError: true });
+  console.log(result.getString());
+} catch (e) {
+  if (e instanceof DataWeaveScriptError) {
+    console.error(`Script error: ${e.result.error}`);
+  } else {
+    throw e;
+  }
 }
-let output = result.get_string().expect("Failed to get string");
-println!("{}", output); // "4"
 ```
 
-### 2) Script with inputs
+**Option B: Check `result.success` manually (default)**
 
-```rust
-use serde_json::json;
-use std::collections::HashMap;
+```typescript
+const result = run("invalid syntax here");
 
-let mut inputs = HashMap::new();
-inputs.insert("num1".to_string(), json!(25));
-inputs.insert("num2".to_string(), json!(17));
-
-let result = run("num1 + num2", Some(inputs)).expect("Failed to run script");
-let output = result.get_string().expect("Failed to get string");
-println!("{}", output); // "42"
-```
-
-### 3) Output streaming
-
-```rust
-let result = run_streaming("output application/json --- (1 to 10000)", None)
-    .expect("run_streaming failed");
-for chunk_result in &result {
-    let chunk = chunk_result.expect("chunk failed");
-    std::io::stdout().write_all(&chunk).unwrap();
+if (!result.success) {
+  console.error(`Error: ${result.error}`);
+} else {
+  console.log(result.getString());
 }
-let metadata = result.metadata().expect("no metadata");
-println!("Done: {:?}, {:?}", metadata.mime_type, metadata.charset);
 ```
 
-### 4) Bidirectional streaming (input + output)
+### 6) Output streaming
 
-```rust
-use std::fs::File;
+Use `runStreaming` to execute a script and receive output chunks as they are produced, without buffering the entire result in memory. Returns an `AsyncGenerator<Buffer, StreamingResult>`.
 
-let file = File::open("large.json").expect("open file");
-let opts = TransformOptions {
-    input_name: "payload".to_string(),
-    input_mime_type: "application/json".to_string(),
-    input_charset: None,
-};
-let result = run_transform("output application/csv --- payload", file, opts)
-    .expect("run_transform failed");
-let mut out = File::create("output.csv").expect("create output");
-for chunk_result in &result {
-    let chunk = chunk_result.expect("chunk failed");
-    out.write_all(&chunk).unwrap();
+```typescript
+const gen = runStreaming(
+  'output application/json --- (1 to 10000) map {id: $, name: "item_" ++ $}'
+);
+
+let result = await gen.next();
+while (!result.done) {
+  process.stdout.write(result.value);
+  result = await gen.next();
 }
-let metadata = result.metadata().expect("no metadata");
+
+const metadata = result.value; // StreamingResult
+console.log(`\nDone: ${metadata.mimeType}, ${metadata.charset}`);
 ```
 
-See [rust/README.md](rust/README.md) for full documentation.
+Or with `for await`:
+
+```typescript
+const gen = runStreaming("output application/csv --- payload", {
+  payload: [1, 2, 3],
+});
+
+const chunks: Buffer[] = [];
+for await (const chunk of gen) {
+  chunks.push(chunk);
+}
+const output = Buffer.concat(chunks).toString("utf-8");
+```
+
+### 7) Input and output streaming (bidirectional)
+
+Use `runTransform` to stream both input and output — feed an `Iterable<Buffer>` or `AsyncIterable<Buffer>` in, receive an `AsyncGenerator<Buffer>` out.
+
+**Important: sync vs async input and memory usage**
+
+The native read callback is invoked synchronously on the JS main thread, which means:
+
+- **Synchronous iterables** (arrays, generators) are consumed **on-demand** — only one chunk is held in memory at a time. This gives constant-memory streaming, comparable to the Python API.
+- **Async iterables** (e.g. `fs.createReadStream()`) **must be fully pre-buffered** into memory before the transform starts, because their `.next()` returns a Promise that cannot be awaited inside a synchronous callback.
+
+For large inputs, prefer a **synchronous generator** to get true streaming with minimal memory:
+
+```typescript
+import { readFileSync } from "fs";
+
+// Good: sync generator → constant memory (~150 MB for 50M elements)
+function* chunked(data: Buffer, size = 8192): Generator<Buffer> {
+  for (let i = 0; i < data.length; i += size) {
+    yield data.subarray(i, i + size);
+  }
+}
+const gen = runTransform("output csv --- payload", chunked(readFileSync("large.json")), {
+  mimeType: "application/json",
+});
+```
+
+Using an async readable stream still works but will buffer the entire input first:
+
+```typescript
+import { createReadStream } from "fs";
+import { createWriteStream } from "fs";
+
+// Works but pre-buffers the full input into memory
+const input = createReadStream("large.json");
+const gen = runTransform("output application/csv --- payload", input, {
+  mimeType: "application/json",
+});
+
+const out = createWriteStream("output.csv");
+for await (const chunk of gen) {
+  out.write(chunk);
+}
+out.end();
+```
+
+Works with any iterable — arrays, generators, streams:
+
+```typescript
+// From an in-memory array
+const input = [Buffer.from("[1,2,3,4,5]")];
+const gen = runTransform(
+  "output application/json --- payload map ($ * $)",
+  input,
+  { mimeType: "application/json" }
+);
+
+const chunks: Buffer[] = [];
+for await (const chunk of gen) {
+  chunks.push(chunk);
+}
+console.log(Buffer.concat(chunks).toString()); // [1,4,9,16,25]
+```
+
+```typescript
+// From a generator producing chunks
+function* chunked(data: Buffer, size = 4096): Generator<Buffer> {
+  for (let i = 0; i < data.length; i += size) {
+    yield data.subarray(i, i + size);
+  }
+}
+
+const largeJson = Buffer.from(JSON.stringify(Array.from({ length: 1000 }, (_, i) => ({ id: i }))));
+const gen = runTransform(
+  "output application/json --- sizeOf(payload)",
+  chunked(largeJson),
+  { mimeType: "application/json" }
+);
+
+for await (const chunk of gen) {
+  process.stdout.write(chunk); // "1000"
+}
+```
+
+### 8) Transform with additional inputs
+
+Pass extra named inputs alongside the streamed input:
+
+```typescript
+const input = [Buffer.from('[{"price": 100}, {"price": 200}]')];
+const gen = runTransform(
+  "output application/json --- payload map ($.price * rate)",
+  input,
+  {
+    mimeType: "application/json",
+    inputs: { rate: 1.5 },
+  }
+);
+
+for await (const chunk of gen) {
+  process.stdout.write(chunk); // [150.0, 300.0]
+}
+```
+
+### 9) Cleanup
+
+The module registers a `process.on('exit')` handler to clean up automatically. For explicit control:
+
+```typescript
+import { cleanup } from "@dataweave/native";
+
+// When done with all DataWeave operations
+cleanup();
+```
