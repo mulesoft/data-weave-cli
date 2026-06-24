@@ -161,8 +161,17 @@ tasks.register('goTest', Exec) {
 
   dependsOn tasks.named('symlinkNativeLibForLinking')
   inputs.dir("${buildDir}/native/nativeCompile")
+  inputs.files(fileTree("${projectDir}/go").include("**/*.go", "go.mod", "go.sum"))
+  outputs.file("${buildDir}/test-results/go/test.out")
   workingDir("${projectDir}/go")
+  doFirst {
+    file("${buildDir}/test-results/go").mkdirs()
+  }
   commandLine(goExe, 'test', '-v')
+  doLast {
+    // Write test result marker
+    file("${buildDir}/test-results/go/test.out").text = "Tests completed at ${new Date()}"
+  }
 }
 
 tasks.register('rustTest', Exec) {
@@ -172,8 +181,21 @@ tasks.register('rustTest', Exec) {
 
   dependsOn tasks.named('symlinkNativeLibForLinking')
   inputs.dir("${buildDir}/native/nativeCompile")
+  inputs.files(fileTree("${projectDir}/rust/src").include("**/*.rs"))
+  inputs.files(fileTree("${projectDir}/rust/tests").include("**/*.rs"))
+  inputs.files(fileTree("${projectDir}/rust/examples").include("**/*.rs"))
+  inputs.file("${projectDir}/rust/Cargo.toml")
+  inputs.file("${projectDir}/rust/build.rs")
+  outputs.file("${buildDir}/test-results/rust/test.out")
   workingDir("${projectDir}/rust")
+  doFirst {
+    file("${buildDir}/test-results/rust").mkdirs()
+  }
   commandLine(cargoExe, 'test', '--', '--test-threads=1')
+  doLast {
+    // Write test result marker
+    file("${buildDir}/test-results/rust/test.out").text = "Tests completed at ${new Date()}"
+  }
 }
 
 tasks.named('test') {
@@ -191,4 +213,7 @@ tasks.named('clean') {
   delete("${projectDir}/python/build")
   delete("${projectDir}/python/src/dataweave/native")
   delete("${projectDir}/python/src/dataweave_native.egg-info")
+  delete("${projectDir}/go/*.test")
+  delete("${projectDir}/rust/target")
+  delete("${buildDir}/test-results")
 }
