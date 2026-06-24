@@ -95,6 +95,135 @@ fn test_run_streaming_large_dataset() {
     assert!(chunk_count > 0, "Expected at least one chunk");
 }
 
+// --- Concurrent Execution Tests ---
+
+#[test]
+fn test_run_concurrent() {
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    const NUM_THREADS: usize = 20;
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = vec![];
+
+    for id in 0..NUM_THREADS {
+        let errors_clone = errors.clone();
+        let handle = thread::spawn(move || {
+            let mut inputs = HashMap::new();
+            inputs.insert("id".to_string(), json!(id));
+
+            match run("id * 2", Some(inputs)) {
+                Ok(result) => {
+                    if !result.success {
+                        errors_clone.lock().unwrap().push(
+                            format!("thread {}: script failed: {}", id, result.error.unwrap_or_default())
+                        );
+                        return;
+                    }
+                    match result.get_string() {
+                        Ok(output) => {
+                            let expected = (id * 2).to_string();
+                            if output != expected {
+                                errors_clone.lock().unwrap().push(
+                                    format!("thread {}: expected '{}', got '{}'", id, expected, output)
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            errors_clone.lock().unwrap().push(
+                                format!("thread {}: get_string failed: {:?}", id, e)
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    errors_clone.lock().unwrap().push(
+                        format!("thread {}: run failed: {:?}", id, e)
+                    );
+                }
+            }
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let errors = errors.lock().unwrap();
+    for err in errors.iter() {
+        eprintln!("{}", err);
+    }
+    assert!(errors.is_empty(), "Concurrent execution had {} errors", errors.len());
+}
+
+#[test]
+fn test_run_streaming_concurrent() {
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    const NUM_THREADS: usize = 10;
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = vec![];
+
+    for id in 0..NUM_THREADS {
+        let errors_clone = errors.clone();
+        let handle = thread::spawn(move || {
+            match run_streaming("output application/json --- (1 to 100)", None) {
+                Ok(mut result) => {
+                    let mut total_bytes = 0;
+                    for chunk_result in result.by_ref() {
+                        match chunk_result {
+                            Ok(chunk) => total_bytes += chunk.len(),
+                            Err(e) => {
+                                errors_clone.lock().unwrap().push(
+                                    format!("thread {}: chunk read failed: {:?}", id, e)
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    match result.metadata() {
+                        Some(metadata) => {
+                            if !metadata.success {
+                                errors_clone.lock().unwrap().push(
+                                    format!("thread {}: script failed: {}", id, metadata.error.unwrap_or_default())
+                                );
+                            }
+                            if total_bytes == 0 {
+                                errors_clone.lock().unwrap().push(
+                                    format!("thread {}: expected non-zero output", id)
+                                );
+                            }
+                        }
+                        None => {
+                            errors_clone.lock().unwrap().push(
+                                format!("thread {}: no metadata", id)
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    errors_clone.lock().unwrap().push(
+                        format!("thread {}: run_streaming failed: {:?}", id, e)
+                    );
+                }
+            }
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let errors = errors.lock().unwrap();
+    for err in errors.iter() {
+        eprintln!("{}", err);
+    }
+    assert!(errors.is_empty(), "Concurrent streaming had {} errors", errors.len());
+}
+
 // --- Bidirectional Streaming Tests ---
 
 #[test]

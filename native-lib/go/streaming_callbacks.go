@@ -4,7 +4,10 @@ package dataweave
 #include <string.h>
 */
 import "C"
-import "unsafe"
+import (
+	"io"
+	"unsafe"
+)
 
 //export writeCallbackBridge
 func writeCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, length C.int) C.int {
@@ -44,7 +47,7 @@ func readCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, bufSize C.int) C.int
 	}
 	if err != nil {
 		// io.EOF signals normal end-of-stream
-		if err.Error() == "EOF" {
+		if err == io.EOF {
 			return 0
 		}
 		return -1

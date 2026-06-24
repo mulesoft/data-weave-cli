@@ -2,8 +2,10 @@ package dataweave
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -142,6 +144,86 @@ func TestRunStreaming_LargeDataset(t *testing.T) {
 	// Large datasets should produce multiple chunks
 	if chunkCount == 0 {
 		t.Errorf("Expected at least one chunk")
+	}
+}
+
+// --- Concurrent Execution Tests ---
+
+func TestRun_Concurrent(t *testing.T) {
+	const numGoroutines = 20
+	var wg sync.WaitGroup
+	errors := make(chan error, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			inputs := map[string]interface{}{
+				"id": id,
+			}
+			result, err := Run("id * 2", inputs)
+			if err != nil {
+				errors <- fmt.Errorf("goroutine %d: Run failed: %v", id, err)
+				return
+			}
+			if !result.Success {
+				errors <- fmt.Errorf("goroutine %d: script failed: %s", id, result.Error)
+				return
+			}
+			str, err := result.GetString()
+			if err != nil {
+				errors <- fmt.Errorf("goroutine %d: GetString failed: %v", id, err)
+				return
+			}
+			expected := fmt.Sprintf("%d", id*2)
+			if str != expected {
+				errors <- fmt.Errorf("goroutine %d: expected '%s', got '%s'", id, expected, str)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	for err := range errors {
+		t.Error(err)
+	}
+}
+
+func TestRunStreaming_Concurrent(t *testing.T) {
+	const numGoroutines = 10
+	var wg sync.WaitGroup
+	errors := make(chan error, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			result := RunStreaming("output application/json --- (1 to 100)", nil)
+			if result.Err != nil {
+				errors <- fmt.Errorf("goroutine %d: RunStreaming failed: %v", id, result.Err)
+				return
+			}
+			var totalBytes int
+			for chunk := range result.Chunks {
+				totalBytes += len(chunk)
+			}
+			metadata := <-result.Metadata
+			if !metadata.Success {
+				errors <- fmt.Errorf("goroutine %d: script failed: %s", id, metadata.Error)
+				return
+			}
+			if totalBytes == 0 {
+				errors <- fmt.Errorf("goroutine %d: expected non-zero output", id)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errors)
+
+	for err := range errors {
+		t.Error(err)
 	}
 }
 
