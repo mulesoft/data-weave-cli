@@ -2,7 +2,8 @@
 
 **Branch**: `feat/native-bindings-merged`  
 **Date**: 2026-06-26  
-**Status**: ✅ **ALL BUILDS AND TESTS PASSING**
+**Status**: ✅ **ALL BUILDS AND TESTS PASSING**  
+**GraalVM Compatibility**: Fixed for GraalVM 24.x+ (removed deprecated SetFileDescriptorLimit flag)
 
 ## Summary
 
@@ -236,6 +237,15 @@ All bindings support three execution modes optimized for different use cases:
 2. **No benchmark suite**: Performance characteristics documented but not measured
 3. **CI integration pending**: Tests run locally but not yet in `.github/workflows/`
 4. **No published packages**: Rust crate, Go module, and C library not yet released
+
+## Build Fixes Applied
+
+### GraalVM 24.x Compatibility
+
+**Issue**: The `-H:-SetFileDescriptorLimit` flag was removed in GraalVM 24.x  
+**Error**: `Could not find option 'SetFileDescriptorLimit' from 'user'`  
+**Fix**: Removed the deprecated flag from `native-lib/build.gradle` (commit `3192794`)  
+**Impact**: None - flag was only suppressing a harmless macOS warning
 
 ## Validation Checklist
 
