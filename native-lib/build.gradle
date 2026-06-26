@@ -85,7 +85,7 @@ graalvmNative {
       buildArgs.add("-H:CompilationExpirationPeriod=0")
       buildArgs.add("-H:+AddAllCharsets")
       buildArgs.add("-H:+IncludeAllLocales")
-      buildArgs.add("-H:-SetFileDescriptorLimit")  // Suppress macOS setrlimit warning (harmless errno 22)
+      // Note: -H:-SetFileDescriptorLimit removed (deprecated in newer GraalVM versions)
       // Pass project directory as system property for header path resolution
       buildArgs.add("-Dproject.root=${projectDir}")
     }
