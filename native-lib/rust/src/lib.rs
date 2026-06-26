@@ -92,11 +92,41 @@ fn ensure_isolate() -> Result<*mut GraalIsolate> {
     }
 }
 
-/// Wraps a raw pointer so it can be moved into a spawned thread.
-/// SAFETY: the caller is responsible for ensuring the pointer remains valid for the
-/// thread's lifetime. We use this to ferry callback-context pointers across threads.
+/// Wraps a raw pointer to allow transfer across thread boundaries.
+///
+/// # Safety Invariants
+///
+/// The caller MUST ensure:
+/// 1. **Lifetime:** The pointer remains valid for the spawned thread's entire lifetime
+/// 2. **Exclusive Access:** The pointed-to data is not accessed concurrently from other threads
+/// 3. **Proper Cleanup:** The pointer is freed on the thread that received it, after FFI completes
+///
+/// This type is used to pass callback context pointers from the main thread to the FFI
+/// worker thread. The context Box is created before spawning and freed after the FFI
+/// call completes, ensuring validity throughout:
+///
+/// ```text
+/// Main Thread              FFI Worker Thread
+/// -----------              -----------------
+/// Box::new(ctx)
+///   ↓
+/// SendPtr(ptr) -------→    Receives ptr
+///   ↓                      Uses ptr in callbacks
+/// spawn()                    ↓
+///   ↓                      Box::from_raw(ptr)  // Frees
+///   ↓                      Thread exits
+/// join()
+/// ```
+///
+/// # Why This is Sound
+///
+/// - The main thread creates the Box and immediately transfers ownership to SendPtr
+/// - SendPtr is moved (not copied) to the worker thread
+/// - Only the worker thread dereferences the pointer
+/// - The worker thread frees the Box after FFI completes
+/// - No data races possible because ownership is exclusive at each step
 struct SendPtr<T>(*mut T);
-unsafe impl<T> Send for SendPtr<T> {}
+unsafe impl<T: Sync> Send for SendPtr<T> {}
 impl<T> SendPtr<T> {
     fn as_raw(&self) -> *mut T {
         self.0
