@@ -4,7 +4,24 @@
 
 `native-lib` builds a **GraalVM native shared library** that embeds the MuleSoft **DataWeave runtime** and exposes a small C-compatible API.
 
-The main purpose is to allow non-JVM consumers (most notably the Python package in `native-lib/python`) to execute DataWeave scripts **without running a JVM**, while still using the official DataWeave runtime.
+The main purpose is to allow non-JVM consumers to execute DataWeave scripts **without running a JVM**, while still using the official DataWeave runtime.
+
+## Language Bindings
+
+This module provides native language bindings for:
+
+- **Python** (`python/`) - ctypes-based FFI, included in wheels
+- **Node.js** (`node/`) - Node-API (N-API) C addon + TypeScript wrapper
+- **Rust** (`rust/`) - Safe Rust abstractions with modular FFI layer
+- **Go** (`go/`) - CGO bindings with channel-based streaming
+- **C** (`c/`) - Direct C API for low-level integration
+
+All bindings share the same underlying GraalVM native library (`dwlib.dylib`/`.so`/`.dll`) and support:
+- Buffered execution
+- Output streaming (constant memory for large outputs)
+- Bidirectional streaming (input + output streams)
+
+See each subdirectory's README for language-specific documentation and examples.
 
 ## Architecture (GraalVM + FFI)
 
