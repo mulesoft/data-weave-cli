@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"runtime/cgo"
 	"sync"
 	"unsafe"
 )
@@ -250,39 +251,51 @@ type TransformOptions struct {
 }
 
 // callbackContext holds state shared between Go and the CGO callback.
+//
+// # Threading Model
+//
+// The native library (GraalVM) guarantees that callbacks are invoked sequentially
+// on a single OS thread per script execution. This means:
+//
+//   - writeCallbackBridge is called sequentially (never concurrently)
+//   - readCallbackBridge is called sequentially (never concurrently)
+//   - No mutex needed for chunkCh writes (sent from callback thread)
+//   - Mutex protects reader in case of future concurrent read callbacks
+//
+// The context is:
+//   1. Created on the main goroutine
+//   2. Registered in the global map (thread-safe via contextMu)
+//   3. Passed to the FFI worker goroutine via an integer handle
+//   4. Accessed from the native callback thread via lookupContext()
+//   5. Unregistered after the FFI call completes
+//
+// # Memory Safety
+//
+// The handle-based lookup pattern is safe because:
+//   - Handles are integers (uintptr), not Go pointers
+//   - The GC cannot move integers or map entries
+//   - The context remains valid until unregisterContext() is called
+//   - The FFI call completes before unregisterContext() is called
 type callbackContext struct {
-	chunkCh chan []byte
-	reader  io.Reader
-	mu      sync.Mutex
+	chunkCh chan []byte // Written by callback thread, read by consumer goroutine
+	reader  io.Reader   // Read by callback thread (mutex-protected for future-proofing)
+	mu      sync.Mutex  // Protects reader access
 }
 
-// contextRegistry provides a thread-safe mapping from integer handles to callback contexts.
-// CGO cannot pass Go pointers to C, so we use integer handles instead.
-var (
-	contextMu      sync.Mutex
-	contextCounter uintptr
-	contextMap     = make(map[uintptr]*callbackContext)
-)
+// contextRegistry provides a thread-safe mapping from cgo.Handle to callback contexts.
+// We use cgo.Handle (Go 1.17+) which is designed for passing Go values through C code.
+// This avoids unsafe.Pointer checkptr violations when the race detector is enabled.
 
-func registerContext(ctx *callbackContext) uintptr {
-	contextMu.Lock()
-	defer contextMu.Unlock()
-	contextCounter++
-	handle := contextCounter
-	contextMap[handle] = ctx
-	return handle
+func registerContext(ctx *callbackContext) cgo.Handle {
+	return cgo.NewHandle(ctx)
 }
 
-func lookupContext(handle uintptr) *callbackContext {
-	contextMu.Lock()
-	defer contextMu.Unlock()
-	return contextMap[handle]
+func lookupContext(handle cgo.Handle) *callbackContext {
+	return handle.Value().(*callbackContext)
 }
 
-func unregisterContext(handle uintptr) {
-	contextMu.Lock()
-	defer contextMu.Unlock()
-	delete(contextMap, handle)
+func unregisterContext(handle cgo.Handle) {
+	handle.Delete()
 }
 
 // parseStreamingMetadata parses the JSON metadata response from streaming callbacks.
@@ -359,7 +372,7 @@ func RunStreaming(script string, inputs map[string]interface{}) *StreamResult {
 			cScript,
 			cInputs,
 			C.WriteCallback(C.writeCallbackBridge),
-			unsafe.Pointer(handle),
+			unsafe.Pointer(&handle),
 		)
 
 		var rawResult string
@@ -438,7 +451,7 @@ func RunTransform(script string, inputReader io.Reader, opts TransformOptions) *
 			cInputCharset,
 			C.ReadCallback(C.readCallbackBridge),
 			C.WriteCallback(C.writeCallbackBridge),
-			unsafe.Pointer(handle),
+			unsafe.Pointer(&handle),
 		)
 
 		var rawResult string

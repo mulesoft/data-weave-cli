@@ -5,13 +5,17 @@ package dataweave
 */
 import "C"
 import (
+	"errors"
 	"io"
+	"runtime/cgo"
 	"unsafe"
 )
 
 //export writeCallbackBridge
 func writeCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, length C.int) C.int {
-	handle := uintptr(ctxPtr)
+	// Safe: ctxPtr is a pointer to a cgo.Handle, which is designed for
+	// passing Go values through C code. This avoids checkptr violations.
+	handle := *(*cgo.Handle)(ctxPtr)
 	ctx := lookupContext(handle)
 	if ctx == nil {
 		return -1
@@ -26,7 +30,8 @@ func writeCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, length C.int) C.int
 
 //export readCallbackBridge
 func readCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, bufSize C.int) C.int {
-	handle := uintptr(ctxPtr)
+	// Safe: ctxPtr is a pointer to a cgo.Handle.
+	handle := *(*cgo.Handle)(ctxPtr)
 	ctx := lookupContext(handle)
 	if ctx == nil {
 		return -1
@@ -47,7 +52,7 @@ func readCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, bufSize C.int) C.int
 	}
 	if err != nil {
 		// io.EOF signals normal end-of-stream
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return 0
 		}
 		return -1
