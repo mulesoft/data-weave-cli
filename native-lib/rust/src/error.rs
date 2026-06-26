@@ -1,41 +1,51 @@
-use std::fmt;
+//! Error types for DataWeave FFI operations.
+//!
+//! Uses `thiserror` for ergonomic derive-based error definitions.
+
+use thiserror::Error;
 
 /// Error type for DataWeave FFI operations.
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum Error {
     /// The native library returned a null pointer.
+    #[error("Native library returned NULL")]
     NullPointer,
+
     /// Input string contains a null byte.
+    #[error("Input contains null byte")]
     NulByte,
+
     /// Failed to decode base64 result.
-    Base64(base64::DecodeError),
+    #[error("Base64 decode error: {0}")]
+    Base64(#[from] base64::DecodeError),
+
     /// Failed to parse JSON.
-    Json(serde_json::Error),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
     /// Failed to decode UTF-8.
-    Utf8(std::string::FromUtf8Error),
+    #[error("UTF-8 decode error: {0}")]
+    Utf8(#[from] std::string::FromUtf8Error),
+
     /// Response from native library is not valid UTF-8.
+    #[error("Native response is not valid UTF-8")]
     Utf8Response,
+
     /// No result available (script failed or result is empty).
+    #[error("No result available")]
     NoResult,
+
     /// Channel communication error during streaming.
+    #[error("Channel error: {0}")]
     Channel(String),
-}
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::NullPointer => write!(f, "Native library returned NULL"),
-            Error::NulByte => write!(f, "Input contains null byte"),
-            Error::Base64(e) => write!(f, "Base64 decode error: {}", e),
-            Error::Json(e) => write!(f, "JSON error: {}", e),
-            Error::Utf8(e) => write!(f, "UTF-8 decode error: {}", e),
-            Error::Utf8Response => write!(f, "Native response is not valid UTF-8"),
-            Error::NoResult => write!(f, "No result available"),
-            Error::Channel(msg) => write!(f, "Channel error: {}", msg),
-        }
-    }
-}
+    /// IO error during streaming operations.
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 
-impl std::error::Error for Error {}
+    /// Stream execution error.
+    #[error("Stream error: {0}")]
+    Stream(String),
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
