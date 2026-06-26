@@ -1,0 +1,41 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# Test outputs
+tests/output.json
+tests/transformed.csv
+tests/large_output.json
+examples/output.json
+examples/transformed.csv
+examples/large_output.json
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# CMake (note: a hand-rolled Makefile IS shipped — see ! exception below)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!Makefile
+!CMakeLists.txt
+!cmake/
+
+# Executables
+test_dataweave
+simple
+streaming
+
+# OS files
+.DS_Store
+Thumbs.db
