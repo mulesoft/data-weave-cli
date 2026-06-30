@@ -1,5 +1,8 @@
 # DataWeave CLI
 
+![Build Status](https://github.com/mulesoft-labs/data-weave-cli/workflows/Build%20Native%20CLI/badge.svg)
+[![License](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](LICENSE.txt)
+
 **DataWeave CLI** is a command-line interface that allows `querying`, `filtering`, and `mapping` structured data from different data sources like `JSON`, `XML`, `CSV`, `YML` to other data formats. It also allows to easily create data in such formats, all through the DataWeave language. For example:
 
 `dw run 'output json --- { message: ["Hello", "world"] joinBy " "}'`
@@ -63,6 +66,70 @@ export JAVA_HOME=/path/to/graalvm
 The `dw` binary is produced at `native-cli/build/native/nativeCompile/dw`.
 
 For full build instructions, prerequisites, and troubleshooting, see [BUILDING.md](BUILDING.md).
+
+## Language Bindings
+
+The DataWeave runtime is also available as native library bindings for multiple programming languages, enabling you to embed DataWeave transformations directly in your applications:
+
+| Language | Version | Documentation | Package |
+|----------|---------|---------------|---------|
+| **Python** | 1.0.0 | [README](native-lib/python/README.md) | `pip install dataweave-native` |
+| **Node.js** | 1.0.0 | [README](native-lib/node/README.md) | `npm install @dataweave/native` |
+| **Go** | 1.0.0 | [README](native-lib/go/README.md) | `go get github.com/mulesoft-labs/data-weave-cli/native-lib/go/dataweave` |
+| **Rust** | 1.0.0 | [README](native-lib/rust/README.md) | `cargo add dataweave` |
+| **C** | 1.0.0 | [README](native-lib/c/README.md) | See [C README](native-lib/c/README.md) for build instructions |
+
+### Features
+
+All language bindings support:
+- ✅ **Buffered execution** - Complete in-memory processing
+- ✅ **Streaming output** - Process large outputs without loading into memory
+- ✅ **Bidirectional streaming** - Stream both input and output for constant memory usage
+- ✅ **Multiple formats** - JSON, XML, CSV, YAML, and more
+- ✅ **Thread-safe** - Safe for concurrent use
+- ✅ **Cross-platform** - Linux, macOS, Windows
+
+### Quick Example
+
+**Python:**
+```python
+import dataweave
+result = dataweave.run('output json --- { message: "Hello" }')
+print(result.getString())
+```
+
+**Node.js:**
+```javascript
+import { run } from '@dataweave/native';
+const result = run('output json --- { message: "Hello" }');
+console.log(result.getString());
+```
+
+**Go:**
+```go
+import "github.com/mulesoft-labs/data-weave-cli/native-lib/go/dataweave"
+result, _ := dataweave.Run(`output json --- { message: "Hello" }`, nil)
+fmt.Println(result.GetString())
+```
+
+**Rust:**
+```rust
+use dataweave::run;
+let result = run(r#"output json --- { message: "Hello" }"#, None)?;
+println!("{}", result.get_string()?);
+```
+
+**C:**
+```c
+dw_result_t* result = dw_run("output json --- { message: \"Hello\" }", "{}");
+printf("%s\n", dw_result_get_string(result));
+dw_result_free(result);
+```
+
+For comprehensive examples and API documentation, see:
+- [API Quick Reference](native-lib/demos/API_QUICK_REFERENCE.md) - Compare APIs across all bindings
+- [Native Library Architecture](native-lib/ARCHITECTURE.md) - Understand the FFI design
+- [Comprehensive Demos](native-lib/demos/) - Full examples for each language
 
 ## How to Use It
 
