@@ -239,6 +239,96 @@ tasks.named('test') {
   dependsOn tasks.named('cTest')
 }
 
+// --- Release artifact packaging tasks ---
+
+tasks.register('packageGo', Tar) {
+  dependsOn tasks.named('nativeCompile')
+  from("${projectDir}/go") {
+    exclude('dataweave_test')
+    exclude('*.test')
+    exclude('.git*')
+  }
+  archiveBaseName = 'dw-go'
+  archiveVersion = project.findProperty('nativeBindingsVersion') ?: '1.0.0'
+  archiveExtension = 'tar.gz'
+  destinationDirectory = file("${buildDir}/packages")
+  compression = Compression.GZIP
+
+  doFirst {
+    file("${buildDir}/packages").mkdirs()
+  }
+}
+
+tasks.register('packageRust', Exec) {
+  dependsOn tasks.named('nativeCompile')
+  workingDir("${projectDir}/rust")
+
+  doFirst {
+    file("${buildDir}/packages").mkdirs()
+  }
+
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    commandLine('cmd', '/c', 'cargo package --allow-dirty')
+  } else {
+    commandLine('bash', '-c', 'cargo package --allow-dirty')
+  }
+
+  doLast {
+    copy {
+      from("${projectDir}/rust/target/package")
+      into("${buildDir}/packages")
+      include('*.crate')
+    }
+  }
+}
+
+tasks.register('packageC', Tar) {
+  dependsOn tasks.named('nativeCompile')
+
+  // Include the native library
+  from("${buildDir}/native/nativeCompile") {
+    include('dwlib.*')
+    into('lib')
+  }
+
+  // Include the C header
+  from("${projectDir}/c/include") {
+    include('dataweave.h')
+    into('include')
+  }
+
+  // Include README and docs
+  from("${projectDir}/c") {
+    include('README.md')
+  }
+
+  def version = project.findProperty('nativeBindingsVersion') ?: '1.0.0'
+  def osName = System.getProperty('os.name').toLowerCase().replace(' ', '-')
+  def osArch = System.getProperty('os.arch')
+
+  archiveBaseName = 'libdataweave'
+  archiveVersion = version
+  archiveClassifier = "${osName}-${osArch}"
+  archiveExtension = 'tar.gz'
+  destinationDirectory = file("${buildDir}/packages")
+  compression = Compression.GZIP
+
+  doFirst {
+    file("${buildDir}/packages").mkdirs()
+  }
+}
+
+tasks.register('packageAllBindings') {
+  dependsOn tasks.named('buildPythonWheel')
+  dependsOn tasks.named('buildNodePackage')
+  dependsOn tasks.named('packageGo')
+  dependsOn tasks.named('packageRust')
+  dependsOn tasks.named('packageC')
+
+  description = 'Package all language binding release artifacts'
+  group = 'distribution'
+}
+
 tasks.named('clean') {
   delete("${projectDir}/python/dist")
   delete("${projectDir}/python/build")

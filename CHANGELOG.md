@@ -17,15 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Streaming API support across all bindings
 - Bidirectional streaming (input + output) for large data transformations
 - Comprehensive test suites for all language bindings
-- CI/CD automation for all bindings (Linux, Windows, macOS)
-- Release artifacts for all bindings (wheels, npm packages, Go modules, crates, C libraries)
+- CI/CD automation for all bindings (Linux, Windows)
+- **Release artifacts for all bindings**:
+  - Python: Wheel packages (`.whl`)
+  - Node.js: NPM tarballs (`.tgz`)
+  - Go: Module tarballs (`.tar.gz`)
+  - Rust: Crate packages (`.crate`)
+  - C: Library + header tarballs (`.tar.gz`)
 - Comprehensive documentation and examples for each binding
 - Production-ready error handling and thread safety
+- Gradle packaging tasks: `packageGo`, `packageRust`, `packageC`, `packageAllBindings`
 
 ### Changed
 - Unified versioning across all native bindings (now v1.0.0)
 - Improved CI test coverage to include all language bindings
 - Enhanced build system with Gradle tasks for all bindings
+- Updated release workflow to package and upload all binding artifacts
 
 ### Fixed
 - Native library loading on various platforms

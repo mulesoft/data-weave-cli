@@ -77,6 +77,35 @@ jobs:
         run: ./gradlew --stacktrace --no-problems-report native-lib:nodeTest -PnativeVersion=${{env.NATIVE_VERSION}}
         shell: bash
 
+      # Setup Go for Go module packaging
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      # Package Go module
+      - name: Package Go module
+        run: ./gradlew --stacktrace --no-problems-report native-lib:packageGo -PnativeVersion=${{env.NATIVE_VERSION}}
+        shell: bash
+
+      # Setup Rust for Rust crate packaging
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Package Rust crate
+      - name: Package Rust crate
+        run: ./gradlew --stacktrace --no-problems-report native-lib:packageRust -PnativeVersion=${{env.NATIVE_VERSION}}
+        shell: bash
+
+      # Setup CMake for C library packaging
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      # Package C library
+      - name: Package C library
+        run: ./gradlew --stacktrace --no-problems-report native-lib:packageC -PnativeVersion=${{env.NATIVE_VERSION}}
+        shell: bash
+
       # Upload the artifact file
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
@@ -106,6 +135,39 @@ jobs:
           asset_name: dw-node-package-${{env.NATIVE_VERSION}}-${{runner.os}}.tgz
           tag: ${{ github.ref }}
           overwrite: true
+
+      # Upload the Go module
+      - name: Upload Go module to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: native-lib/build/packages/dw-go-*.tar.gz
+          asset_name: dw-go-module-${{env.NATIVE_VERSION}}.tar.gz
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true
+
+      # Upload the Rust crate
+      - name: Upload Rust crate to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: native-lib/build/packages/*.crate
+          asset_name: dw-rust-crate-${{env.NATIVE_VERSION}}-${{runner.os}}.crate
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true
+
+      # Upload the C library
+      - name: Upload C library to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: native-lib/build/packages/libdataweave-*.tar.gz
+          asset_name: dw-c-library-${{env.NATIVE_VERSION}}-${{runner.os}}.tar.gz
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true
 
       # Upload the native shared library
       - name: Upload native shared library to release (Linux)
