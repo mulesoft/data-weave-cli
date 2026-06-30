@@ -160,6 +160,7 @@ tasks.register('goTest', Exec) {
   environment('CGO_ENABLED', '1')
   environment('DYLD_LIBRARY_PATH', "${buildDir}/native/nativeCompile")
   environment('LD_LIBRARY_PATH', "${buildDir}/native/nativeCompile")
+  environment('CGO_LDFLAGS', "-L${buildDir}/native/nativeCompile -ldwlib")
   environment('PATH', "${buildDir}/native/nativeCompile" + File.pathSeparator + System.getenv('PATH'))
 
   if (System.getProperty('os.name').toLowerCase().contains('windows')) {
