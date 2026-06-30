@@ -277,9 +277,10 @@ type TransformOptions struct {
 //   - The context remains valid until unregisterContext() is called
 //   - The FFI call completes before unregisterContext() is called
 type callbackContext struct {
-	chunkCh chan []byte // Written by callback thread, read by consumer goroutine
-	reader  io.Reader   // Read by callback thread (mutex-protected for future-proofing)
-	mu      sync.Mutex  // Protects reader access
+	chunkCh chan []byte   // Written by callback thread, read by consumer goroutine
+	doneCh  chan struct{} // Signals consumer abandonment to prevent FFI worker hang
+	reader  io.Reader     // Read by callback thread (mutex-protected for future-proofing)
+	mu      sync.Mutex    // Protects reader access
 }
 
 // contextRegistry provides a thread-safe mapping from cgo.Handle to callback contexts.
@@ -291,7 +292,17 @@ func registerContext(ctx *callbackContext) cgo.Handle {
 }
 
 func lookupContext(handle cgo.Handle) *callbackContext {
-	return handle.Value().(*callbackContext)
+	// Don't panic on bad handle - return nil instead
+	// This prevents crashes when callback is invoked with invalid context
+	val := handle.Value()
+	if val == nil {
+		return nil
+	}
+	ctx, ok := val.(*callbackContext)
+	if !ok {
+		return nil
+	}
+	return ctx
 }
 
 func unregisterContext(handle cgo.Handle) {
@@ -343,7 +354,11 @@ func RunStreaming(script string, inputs map[string]interface{}) *StreamResult {
 	chunkCh := make(chan []byte, 64)
 	metaCh := make(chan StreamingMetadata, 1)
 
-	ctx := &callbackContext{chunkCh: chunkCh}
+	doneCh := make(chan struct{})
+	ctx := &callbackContext{
+		chunkCh: chunkCh,
+		doneCh:  doneCh,
+	}
 	handle := registerContext(ctx)
 
 	go func() {
@@ -372,7 +387,7 @@ func RunStreaming(script string, inputs map[string]interface{}) *StreamResult {
 			cScript,
 			cInputs,
 			C.WriteCallback(C.writeCallbackBridge),
-			unsafe.Pointer(&handle),
+			unsafe.Pointer(uintptr(handle)),
 		)
 
 		var rawResult string
@@ -406,8 +421,10 @@ func RunTransform(script string, inputReader io.Reader, opts TransformOptions) *
 	chunkCh := make(chan []byte, 64)
 	metaCh := make(chan StreamingMetadata, 1)
 
+	doneCh := make(chan struct{})
 	ctx := &callbackContext{
 		chunkCh: chunkCh,
+		doneCh:  doneCh,
 		reader:  inputReader,
 	}
 	handle := registerContext(ctx)
@@ -451,7 +468,7 @@ func RunTransform(script string, inputReader io.Reader, opts TransformOptions) *
 			cInputCharset,
 			C.ReadCallback(C.readCallbackBridge),
 			C.WriteCallback(C.writeCallbackBridge),
-			unsafe.Pointer(&handle),
+			unsafe.Pointer(uintptr(handle)),
 		)
 
 		var rawResult string

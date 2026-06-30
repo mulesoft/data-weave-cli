@@ -68,10 +68,12 @@ extern "C" {
 // --- Isolate lifecycle ---
 
 /// Process-wide GraalVM isolate. Created lazily on first call; subsequent calls attach
-/// the current OS thread to it. Pointer is shared across threads but only mutated once.
+/// the current OS thread to it. Uses AtomicPtr for thread-safe access.
+use std::sync::atomic::{AtomicPtr, AtomicI32, Ordering};
+
 static ISOLATE_INIT: Once = Once::new();
-static mut ISOLATE_PTR: *mut GraalIsolate = std::ptr::null_mut();
-static mut ISOLATE_INIT_RC: c_int = 0;
+static ISOLATE_PTR: AtomicPtr<GraalIsolate> = AtomicPtr::new(std::ptr::null_mut());
+static ISOLATE_INIT_RC: AtomicI32 = AtomicI32::new(0);
 
 /// Ensures the process-wide GraalVM isolate is created. Returns a pointer to it.
 pub(crate) fn ensure_isolate() -> Result<*mut GraalIsolate> {
@@ -80,19 +82,23 @@ pub(crate) fn ensure_isolate() -> Result<*mut GraalIsolate> {
         let mut thread: *mut GraalIsolateThread = std::ptr::null_mut();
         let rc = graal_create_isolate(std::ptr::null_mut(), &mut isolate, &mut thread);
         if rc == 0 {
-            ISOLATE_PTR = isolate;
+            ISOLATE_PTR.store(isolate, Ordering::Release);
             // Detach the bootstrap thread; per-call code attaches its own thread.
             graal_detach_thread(thread);
         } else {
-            ISOLATE_INIT_RC = rc;
+            ISOLATE_INIT_RC.store(rc, Ordering::Release);
         }
     });
-    unsafe {
-        if ISOLATE_PTR.is_null() {
-            Err(Error::NullPointer)
-        } else {
-            Ok(ISOLATE_PTR)
+
+    let ptr = ISOLATE_PTR.load(Ordering::Acquire);
+    if ptr.is_null() {
+        let rc = ISOLATE_INIT_RC.load(Ordering::Acquire);
+        if rc != 0 {
+            return Err(Error::IsolateCreationFailed(rc));
         }
+        Err(Error::NullPointer)
+    } else {
+        Ok(ptr)
     }
 }
 

@@ -11,6 +11,10 @@ pub enum Error {
     #[error("Native library returned NULL")]
     NullPointer,
 
+    /// Failed to create GraalVM isolate.
+    #[error("Failed to create GraalVM isolate (error code {0})")]
+    IsolateCreationFailed(i32),
+
     /// Input string contains a null byte.
     #[error("Input contains null byte")]
     NulByte,

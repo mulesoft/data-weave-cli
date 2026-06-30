@@ -83,8 +83,6 @@ int main(void) {
         NULL
     );
 
-    fclose(output);
-
     if (result && dw_streaming_result_success(result)) {
         printf("Wrote %s output to output.json\n",
                dw_streaming_result_mime_type(result));
@@ -93,49 +91,8 @@ int main(void) {
                 result ? dw_streaming_result_error(result) : "Unknown");
     }
     dw_free_streaming_result(result);
-    printf("\n");
 
-    /* Example 2: Stream output to memory */
-    printf("Example 2: Streaming output to memory\n");
-    printf("--------------------------------------\n");
-
-    /* Allocate buffer for output */
-    size_t buffer_capacity = 1024;
-    char *buffer = malloc(buffer_capacity);
-    size_t buffer_size = 0;
-
-    /* Write callback that appends to buffer */
-    int (*memory_write)(void*, const char*, int) =
-        (int (*)(void*, const char*, int))(void*)^(void *ctx, const char *data, int len) {
-            char **buf = (char **)ctx;
-            /* Simplified: assumes buffer is large enough */
-            memcpy(*buf, data, len);
-            *buf += len;
-            return 0;
-        };
-
-    /* Simpler approach: use a struct to track buffer state */
-    typedef struct {
-        char *buffer;
-        size_t size;
-        size_t capacity;
-    } memory_buffer;
-
-    memory_buffer mb = {buffer, 0, buffer_capacity};
-
-    result = dw_run_callback(
-        runtime,
-        "2 + 2",
-        file_write_callback,  /* Reusing file callback for simplicity */
-        output,  /* Using file for this example */
-        NULL
-    );
-
-    if (result && dw_streaming_result_success(result)) {
-        printf("Result successfully streamed\n");
-    }
-    dw_free_streaming_result(result);
-    free(buffer);
+    fclose(output);
     printf("\n");
 
     /* Example 3: Bidirectional streaming (transform) */

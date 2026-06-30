@@ -13,25 +13,36 @@ import (
 
 //export writeCallbackBridge
 func writeCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, length C.int) C.int {
-	// Safe: ctxPtr is a pointer to a cgo.Handle, which is designed for
-	// passing Go values through C code. This avoids checkptr violations.
-	handle := *(*cgo.Handle)(ctxPtr)
+	// Safe: ctxPtr is the handle value itself (passed as uintptr then converted to unsafe.Pointer)
+	// Cast it back to cgo.Handle by converting through uintptr
+	handle := cgo.Handle(uintptr(ctxPtr))
 	ctx := lookupContext(handle)
 	if ctx == nil {
+		return -1
+	}
+
+	// Validate length to prevent C.GoBytes panic
+	if length < 0 {
 		return -1
 	}
 
 	// Copy bytes from C buffer to Go slice before sending
 	goBytes := C.GoBytes(unsafe.Pointer(buf), length)
 
-	ctx.chunkCh <- goBytes
-	return 0
+	// Use select with done channel to avoid blocking forever if consumer abandons
+	select {
+	case ctx.chunkCh <- goBytes:
+		return 0
+	case <-ctx.doneCh:
+		return -1
+	}
 }
 
 //export readCallbackBridge
 func readCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, bufSize C.int) C.int {
-	// Safe: ctxPtr is a pointer to a cgo.Handle.
-	handle := *(*cgo.Handle)(ctxPtr)
+	// Safe: ctxPtr is the handle value itself (passed as uintptr then converted to unsafe.Pointer)
+	// Cast it back to cgo.Handle by converting through uintptr
+	handle := cgo.Handle(uintptr(ctxPtr))
 	ctx := lookupContext(handle)
 	if ctx == nil {
 		return -1
@@ -45,17 +56,22 @@ func readCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, bufSize C.int) C.int
 	defer ctx.mu.Unlock()
 
 	goSlice := make([]byte, int(bufSize))
-	n, err := ctx.reader.Read(goSlice)
-	if n > 0 {
-		C.memcpy(unsafe.Pointer(buf), unsafe.Pointer(&goSlice[0]), C.size_t(n))
-		return C.int(n)
-	}
-	if err != nil {
-		// io.EOF signals normal end-of-stream
-		if errors.Is(err, io.EOF) {
-			return 0
+
+	// Loop until we get n > 0 or a real error/EOF
+	// io.Reader is allowed to return (0, nil) which should not be treated as EOF
+	for {
+		n, err := ctx.reader.Read(goSlice)
+		if n > 0 {
+			C.memcpy(unsafe.Pointer(buf), unsafe.Pointer(&goSlice[0]), C.size_t(n))
+			return C.int(n)
 		}
-		return -1
+		if err != nil {
+			// io.EOF signals normal end-of-stream
+			if errors.Is(err, io.EOF) {
+				return 0
+			}
+			return -1
+		}
+		// n == 0 && err == nil: loop and try again
 	}
-	return 0
 }

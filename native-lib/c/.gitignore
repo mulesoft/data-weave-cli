@@ -6,13 +6,10 @@ build/
 *.dylib
 *.dll
 
-# Test outputs
-tests/output.json
-tests/transformed.csv
-tests/large_output.json
-examples/output.json
-examples/transformed.csv
-examples/large_output.json
+# Test outputs - ignore at root and in subdirectories
+*.json
+*.csv
+!CMakeLists.txt
 
 # IDE files
 .vscode/
