@@ -92,8 +92,19 @@ if(BUILD_TESTS)
     )
 
     # Set environment for tests
+    # Use DWLIB_PATH if provided (from Gradle), otherwise try to find it
+    if(DEFINED DWLIB_PATH)
+        # Use absolute path to ensure it resolves from any working directory
+        get_filename_component(DWLIB_LOCATION_ABS "${DWLIB_PATH}/dwlib${CMAKE_SHARED_LIBRARY_SUFFIX}" ABSOLUTE)
+        set(DWLIB_LOCATION "${DWLIB_LOCATION_ABS}")
+    else()
+        # Default path relative to native-lib/c (make it absolute)
+        get_filename_component(DWLIB_LOCATION_ABS "${CMAKE_SOURCE_DIR}/../build/native/nativeCompile/dwlib${CMAKE_SHARED_LIBRARY_SUFFIX}" ABSOLUTE)
+        set(DWLIB_LOCATION "${DWLIB_LOCATION_ABS}")
+    endif()
+
     set_tests_properties(dataweave_tests PROPERTIES
-        ENVIRONMENT "DATAWEAVE_NATIVE_LIB=${CMAKE_SOURCE_DIR}/../../build/native/nativeCompile/dwlib${CMAKE_SHARED_LIBRARY_SUFFIX}"
+        ENVIRONMENT "DATAWEAVE_NATIVE_LIB=${DWLIB_LOCATION}"
     )
 endif()
 
