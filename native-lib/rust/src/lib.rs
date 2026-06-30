@@ -64,7 +64,7 @@ use streaming::{run_streaming_impl, run_transform_impl};
 /// - The worker thread frees the Box after FFI completes
 /// - No data races possible because ownership is exclusive at each step
 pub(crate) struct SendPtr<T>(pub(crate) *mut T);
-unsafe impl<T: Sync> Send for SendPtr<T> {}
+unsafe impl<T: Send> Send for SendPtr<T> {}
 impl<T> SendPtr<T> {
     pub(crate) fn as_raw(&self) -> *mut T {
         self.0

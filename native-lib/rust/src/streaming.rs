@@ -97,18 +97,25 @@ pub(crate) extern "C" fn write_callback_streaming(
     buf: *const c_char,
     length: c_int,
 ) -> c_int {
-    if ctx.is_null() || buf.is_null() || length <= 0 {
-        return -1;
-    }
-    unsafe {
-        let sender = &(*(ctx as *const WriteCallbackContext)).sender;
-        let slice = std::slice::from_raw_parts(buf as *const u8, length as usize);
-        let chunk = slice.to_vec();
-        match sender.send(chunk) {
-            Ok(_) => 0,
-            Err(_) => -1,
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    // Catch panics to prevent unwinding into C caller (undefined behavior)
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if ctx.is_null() || buf.is_null() || length <= 0 {
+            return -1;
         }
-    }
+        unsafe {
+            let sender = &(*(ctx as *const WriteCallbackContext)).sender;
+            let slice = std::slice::from_raw_parts(buf as *const u8, length as usize);
+            let chunk = slice.to_vec();
+            match sender.send(chunk) {
+                Ok(_) => 0,
+                Err(_) => -1,
+            }
+        }
+    }));
+
+    result.unwrap_or(-1)
 }
 
 /// Write callback for bidirectional streaming (same logic, different context type).
@@ -117,18 +124,25 @@ pub(crate) extern "C" fn write_callback_transform(
     buf: *const c_char,
     length: c_int,
 ) -> c_int {
-    if ctx.is_null() || buf.is_null() || length <= 0 {
-        return -1;
-    }
-    unsafe {
-        let rw_ctx = &(*(ctx as *const ReadWriteCallbackContext));
-        let slice = std::slice::from_raw_parts(buf as *const u8, length as usize);
-        let chunk = slice.to_vec();
-        match rw_ctx.sender.send(chunk) {
-            Ok(_) => 0,
-            Err(_) => -1,
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    // Catch panics to prevent unwinding into C caller (undefined behavior)
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if ctx.is_null() || buf.is_null() || length <= 0 {
+            return -1;
         }
-    }
+        unsafe {
+            let rw_ctx = &(*(ctx as *const ReadWriteCallbackContext));
+            let slice = std::slice::from_raw_parts(buf as *const u8, length as usize);
+            let chunk = slice.to_vec();
+            match rw_ctx.sender.send(chunk) {
+                Ok(_) => 0,
+                Err(_) => -1,
+            }
+        }
+    }));
+
+    result.unwrap_or(-1)
 }
 
 /// Read callback invoked by the native library to pull input data.
@@ -139,25 +153,32 @@ pub(crate) extern "C" fn read_callback_transform(
     buf: *mut c_char,
     buf_size: c_int,
 ) -> c_int {
-    if ctx.is_null() || buf.is_null() || buf_size <= 0 {
-        return -1;
-    }
-    unsafe {
-        let rw_ctx = &(*(ctx as *const ReadWriteCallbackContext));
-        let mut reader_guard = match rw_ctx.reader.lock() {
-            Ok(guard) => guard,
-            Err(_) => return -1,
-        };
-        let mut temp_buf = vec![0u8; buf_size as usize];
-        match reader_guard.read(&mut temp_buf) {
-            Ok(0) => 0, // EOF
-            Ok(n) => {
-                std::ptr::copy_nonoverlapping(temp_buf.as_ptr(), buf as *mut u8, n);
-                n as c_int
-            }
-            Err(_) => -1,
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    // Catch panics to prevent unwinding into C caller (undefined behavior)
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if ctx.is_null() || buf.is_null() || buf_size <= 0 {
+            return -1;
         }
-    }
+        unsafe {
+            let rw_ctx = &(*(ctx as *const ReadWriteCallbackContext));
+            let mut reader_guard = match rw_ctx.reader.lock() {
+                Ok(guard) => guard,
+                Err(_) => return -1,
+            };
+            let mut temp_buf = vec![0u8; buf_size as usize];
+            match reader_guard.read(&mut temp_buf) {
+                Ok(0) => 0, // EOF
+                Ok(n) => {
+                    std::ptr::copy_nonoverlapping(temp_buf.as_ptr(), buf as *mut u8, n);
+                    n as c_int
+                }
+                Err(_) => -1,
+            }
+        }
+    }));
+
+    result.unwrap_or(-1)
 }
 
 // --- Metadata parsing ---

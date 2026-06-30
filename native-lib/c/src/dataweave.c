@@ -112,6 +112,7 @@ static const char *find_library_path(void) {
 
     if (env_path && env_path[0]) {
         strncpy(path_buffer, env_path, sizeof(path_buffer) - 1);
+        path_buffer[sizeof(path_buffer) - 1] = '\0';
         return path_buffer;
     }
 
@@ -129,6 +130,7 @@ static const char *find_library_path(void) {
         if (f) {
             fclose(f);
             strncpy(path_buffer, names[i], sizeof(path_buffer) - 1);
+            path_buffer[sizeof(path_buffer) - 1] = '\0';
             return path_buffer;
         }
     }
@@ -138,8 +140,17 @@ static const char *find_library_path(void) {
 
 /* Base64 encoding */
 char *dw_base64_encode(const unsigned char *data, size_t size) {
-    if (!data || size == 0) {
+    if (!data) {
         return NULL;
+    }
+
+    /* Empty input is valid - return empty string, not NULL (to distinguish from OOM) */
+    if (size == 0) {
+        char *empty = malloc(1);
+        if (empty) {
+            empty[0] = '\0';
+        }
+        return empty;
     }
 
     size_t output_len = 4 * ((size + 2) / 3);
@@ -677,10 +688,36 @@ dw_stream *dw_run_streaming(dw_runtime *runtime, const char *script, const char 
     pthread_mutex_init(&stream->mutex, NULL);
     pthread_cond_init(&stream->cond, NULL);
 
-    /* Note: Actual streaming implementation would need callback integration
-     * This is a simplified version - full implementation would collect chunks
-     * via callback and make them available through dw_stream_next()
-     */
+    /* Allocate worker context */
+    stream_worker_context *worker_ctx = malloc(sizeof(stream_worker_context));
+    if (!worker_ctx) {
+        pthread_mutex_destroy(&stream->mutex);
+        pthread_cond_destroy(&stream->cond);
+        free(stream);
+        set_error("Failed to allocate worker context");
+        return NULL;
+    }
+
+    worker_ctx->runtime = runtime;
+    worker_ctx->stream = stream;
+    worker_ctx->script = script;
+    worker_ctx->inputs_json = inputs_json;
+
+    /* Create worker thread to execute script and stream chunks */
+    pthread_t worker_thread;
+    int rc = pthread_create(&worker_thread, NULL, stream_worker_thread, worker_ctx);
+    if (rc != 0) {
+        free(worker_ctx);
+        pthread_mutex_destroy(&stream->mutex);
+        pthread_cond_destroy(&stream->cond);
+        free(stream);
+        snprintf(error_buffer, sizeof(error_buffer),
+                 "Failed to create worker thread (error %d)", rc);
+        return NULL;
+    }
+
+    /* Detach thread so it cleans up automatically */
+    pthread_detach(worker_thread);
 
     return stream;
 }
@@ -863,19 +900,28 @@ char *dw_create_input_string(const char *name, const char *content, const char *
     char *encoded = dw_base64_encode((const unsigned char *)content, strlen(content));
     if (!encoded) return NULL;
 
-    const char *mime = mime_type ? mime_type : "text/plain";
-
-    char *result = malloc(strlen(name) + strlen(encoded) + strlen(mime) + 200);
-    if (!result) {
+    char *escaped_name = json_escape_string(name);
+    if (!escaped_name) {
         free(encoded);
         return NULL;
     }
 
+    const char *mime = mime_type ? mime_type : "text/plain";
+
+    /* Note: escaped_name already includes quotes */
+    char *result = malloc(strlen(escaped_name) + strlen(encoded) + strlen(mime) + 200);
+    if (!result) {
+        free(encoded);
+        free(escaped_name);
+        return NULL;
+    }
+
     sprintf(result,
-            "{\"%s\":{\"content\":\"%s\",\"mimeType\":\"%s\",\"charset\":\"UTF-8\"}}",
-            name, encoded, mime);
+            "{%s:{\"content\":\"%s\",\"mimeType\":\"%s\",\"charset\":\"UTF-8\"}}",
+            escaped_name, encoded, mime);
 
     free(encoded);
+    free(escaped_name);
     return result;
 }
 
@@ -891,19 +937,28 @@ char *dw_create_input_bytes(
     char *encoded = dw_base64_encode(data, size);
     if (!encoded) return NULL;
 
-    const char *mime = mime_type ? mime_type : "application/octet-stream";
-    const char *cs = charset ? charset : "UTF-8";
-
-    char *result = malloc(strlen(name) + strlen(encoded) + strlen(mime) + strlen(cs) + 200);
-    if (!result) {
+    char *escaped_name = json_escape_string(name);
+    if (!escaped_name) {
         free(encoded);
         return NULL;
     }
 
+    const char *mime = mime_type ? mime_type : "application/octet-stream";
+    const char *cs = charset ? charset : "UTF-8";
+
+    /* Note: escaped_name already includes quotes */
+    char *result = malloc(strlen(escaped_name) + strlen(encoded) + strlen(mime) + strlen(cs) + 200);
+    if (!result) {
+        free(encoded);
+        free(escaped_name);
+        return NULL;
+    }
+
     sprintf(result,
-            "{\"%s\":{\"content\":\"%s\",\"mimeType\":\"%s\",\"charset\":\"%s\"}}",
-            name, encoded, mime, cs);
+            "{%s:{\"content\":\"%s\",\"mimeType\":\"%s\",\"charset\":\"%s\"}}",
+            escaped_name, encoded, mime, cs);
 
     free(encoded);
+    free(escaped_name);
     return result;
 }
