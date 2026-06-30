@@ -43,15 +43,33 @@ cd "$PROJECT_ROOT"
 echo "Project root: $PROJECT_ROOT"
 echo ""
 
+# Set Java to GraalVM if available via SDKMAN
+if [ -d "$HOME/.sdkman/candidates/java/24.0.2-graal" ]; then
+  export JAVA_HOME="$HOME/.sdkman/candidates/java/24.0.2-graal"
+  export PATH="$JAVA_HOME/bin:$PATH"
+  echo "Using GraalVM 24.0.2 from SDKMAN"
+elif [ -d "$HOME/.sdkman/candidates/java" ]; then
+  # Find any GraalVM 24.x version
+  for dir in $HOME/.sdkman/candidates/java/24.*-graal; do
+    if [ -d "$dir" ]; then
+      export JAVA_HOME="$dir"
+      export PATH="$JAVA_HOME/bin:$PATH"
+      echo "Using GraalVM from SDKMAN: $(basename $dir)"
+      break
+    fi
+  done
+fi
+echo ""
+
 # Step 1: Check prerequisites
 echo "=== Step 1: Checking Prerequisites ==="
 echo ""
 
 # Java/GraalVM
 if command -v java &> /dev/null; then
-  java_version=$(java -version 2>&1 | grep -i version | head -1 || echo "unknown")
-  if echo "$java_version" | grep -qi "graalvm"; then
-    print_status "PASS" "Java/GraalVM found"
+  java_version=$(java -version 2>&1 | head -3 | tr '\n' ' ')
+  if echo "$java_version" | grep -qi "graalvm\|oracle graalvm"; then
+    print_status "PASS" "Java/GraalVM found: $(echo "$java_version" | grep -o 'version "[^"]*"' | head -1)"
   else
     print_status "FAIL" "Java found but not GraalVM: $java_version"
   fi
