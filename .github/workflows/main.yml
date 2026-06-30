@@ -137,6 +137,39 @@ jobs:
           name: dw-node-package-${{env.NATIVE_VERSION}}-${{runner.os}}
           path: native-lib/node/dataweave-native-0.0.1.tgz
 
+      # Package and upload Go module
+      - name: Package Go module
+        run: ./gradlew --stacktrace --no-problems-report native-lib:packageGo
+        shell: bash
+
+      - name: Upload Go module
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw-go-module-${{env.NATIVE_VERSION}}-${{runner.os}}
+          path: native-lib/build/packages/dw-go-*.tar.gz
+
+      # Package and upload Rust crate
+      - name: Package Rust crate
+        run: ./gradlew --stacktrace --no-problems-report native-lib:packageRust
+        shell: bash
+
+      - name: Upload Rust crate
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw-rust-crate-${{env.NATIVE_VERSION}}-${{runner.os}}
+          path: native-lib/build/packages/*.crate
+
+      # Package and upload C library
+      - name: Package C library
+        run: ./gradlew --stacktrace --no-problems-report native-lib:packageC
+        shell: bash
+
+      - name: Upload C library
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw-c-library-${{env.NATIVE_VERSION}}-${{runner.os}}
+          path: native-lib/build/packages/libdataweave-*.tar.gz
+
       # Upload the native shared library + header together per OS
       - name: Upload native shared library
         uses: actions/upload-artifact@v4
