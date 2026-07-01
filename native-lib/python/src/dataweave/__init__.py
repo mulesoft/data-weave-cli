@@ -52,6 +52,10 @@ from queue import Queue
 from threading import Thread
 from typing import Any, Callable, Dict, Generator, Iterable, Optional, Union
 
+# Bound for streaming output queues: limits memory under slow/stalled consumers
+# by exerting backpressure onto the native producer.
+_OUTPUT_QUEUE_MAXSIZE = 512
+
 
 class DataWeaveError(Exception):
     pass
@@ -567,14 +571,18 @@ class DataWeave:
         inputs_json = json.dumps(normalized_inputs)
 
         _SENTINEL = object()
-        q: Queue = Queue()
+        q: Queue = Queue(maxsize=_OUTPUT_QUEUE_MAXSIZE)
 
         @WRITE_CALLBACK
         def _write_cb(_ctx, buf, length):
             try:
-                q.put(ctypes.string_at(buf, length))
+                # With maxsize set, put() blocks when the queue is full, exerting
+                # backpressure onto the native producer. Timeout prevents indefinite
+                # blocking if the consumer abandons the generator.
+                q.put(ctypes.string_at(buf, length), timeout=30)
                 return 0
             except Exception:
+                # Timeout or other failure: signal the native side to abort.
                 return -1
 
         def _run_native():
@@ -710,14 +718,18 @@ class DataWeave:
         inputs_json = json.dumps(normalized_inputs)
 
         _SENTINEL = object()
-        q: Queue = Queue()
+        q: Queue = Queue(maxsize=_OUTPUT_QUEUE_MAXSIZE)
 
         @WRITE_CALLBACK
         def _write_cb(_ctx, buf, length):
             try:
-                q.put(ctypes.string_at(buf, length))
+                # With maxsize set, put() blocks when the queue is full, exerting
+                # backpressure onto the native producer. Timeout prevents indefinite
+                # blocking if the consumer abandons the generator.
+                q.put(ctypes.string_at(buf, length), timeout=30)
                 return 0
             except Exception:
+                # Timeout or other failure: signal the native side to abort.
                 return -1
 
         input_iter = iter(input_stream)
