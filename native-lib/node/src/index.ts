@@ -149,24 +149,26 @@ export class DataWeave {
     const inputsJson = buildInputsJson(inputs ?? {});
 
     const chunks: Buffer[] = [];
-    let resolveChunk: (() => void) | null = null;
+    const pendingResolves: Array<() => void> = [];
     let done = false;
     let metaRaw: string | null = null;
 
     const chunkCb = (chunk: Buffer) => {
       chunks.push(chunk);
-      if (resolveChunk) {
-        resolveChunk();
-        resolveChunk = null;
+      // Resolve one waiting consumer if any
+      const resolve = pendingResolves.shift();
+      if (resolve) {
+        resolve();
       }
     };
 
     const metaPromise = ffi.runScriptStreaming(script, inputsJson, chunkCb).then((raw) => {
       metaRaw = raw;
       done = true;
-      if (resolveChunk) {
-        resolveChunk();
-        resolveChunk = null;
+      // Wake all waiting consumers
+      while (pendingResolves.length > 0) {
+        const resolve = pendingResolves.shift();
+        if (resolve) resolve();
       }
     });
 
@@ -176,7 +178,7 @@ export class DataWeave {
         continue;
       }
       if (done) break;
-      await new Promise<void>((resolve) => { resolveChunk = resolve; });
+      await new Promise<void>((resolve) => { pendingResolves.push(resolve); });
     }
 
     // Drain remaining chunks
@@ -208,7 +210,7 @@ export class DataWeave {
     if (isAsync) {
       // Async iterables must be pre-buffered because the native read callback
       // is invoked synchronously on the JS main thread and cannot await.
-      const inputBuffers: Buffer[] = [];
+      const inputBuffers: (Buffer | null)[] = [];
       const asyncIter = (input as AsyncIterable<Buffer | Uint8Array>)[Symbol.asyncIterator]();
       try {
         while (true) {
@@ -235,7 +237,9 @@ export class DataWeave {
             return Buffer.from(slice);
           }
           if (bufIdx < inputBuffers.length) {
-            currentBuf = inputBuffers[bufIdx++];
+            currentBuf = inputBuffers[bufIdx];
+            inputBuffers[bufIdx] = null; // Release memory as we consume
+            bufIdx++;
             readOffset = 0;
             continue;
           }
@@ -274,15 +278,16 @@ export class DataWeave {
     }
 
     const chunks: Buffer[] = [];
-    let resolveChunk: (() => void) | null = null;
+    const pendingResolves: Array<() => void> = [];
     let done = false;
     let metaRaw: string | null = null;
 
     const writeCb = (chunk: Buffer) => {
       chunks.push(chunk);
-      if (resolveChunk) {
-        resolveChunk();
-        resolveChunk = null;
+      // Resolve one waiting consumer if any
+      const resolve = pendingResolves.shift();
+      if (resolve) {
+        resolve();
       }
     };
 
@@ -291,9 +296,10 @@ export class DataWeave {
     ).then((raw) => {
       metaRaw = raw;
       done = true;
-      if (resolveChunk) {
-        resolveChunk();
-        resolveChunk = null;
+      // Wake all waiting consumers
+      while (pendingResolves.length > 0) {
+        const resolve = pendingResolves.shift();
+        if (resolve) resolve();
       }
     });
 
@@ -303,7 +309,7 @@ export class DataWeave {
         continue;
       }
       if (done) break;
-      await new Promise<void>((resolve) => { resolveChunk = resolve; });
+      await new Promise<void>((resolve) => { pendingResolves.push(resolve); });
     }
 
     while (chunks.length > 0) {

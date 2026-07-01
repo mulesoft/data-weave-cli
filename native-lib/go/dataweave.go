@@ -48,26 +48,42 @@ import (
 // isolate; the Go binding owns one isolate for the process lifetime and attaches the
 // current OS thread on each call.
 var (
-	isolateOnce    sync.Once
+	isolateMu      sync.Mutex
 	globalIsolate  *C.graal_isolate_t
 	isolateInitErr error
+	isolateInited  bool
 )
 
 func ensureIsolate() error {
-	isolateOnce.Do(func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		var isolate *C.graal_isolate_t
-		var thread *C.graal_isolatethread_t
-		if rc := C.graal_create_isolate(nil, &isolate, &thread); rc != 0 {
-			isolateInitErr = fmt.Errorf("graal_create_isolate failed: %d", int(rc))
-			return
-		}
-		globalIsolate = isolate
-		// Detach the bootstrap thread; subsequent calls attach the calling thread on demand.
-		C.graal_detach_thread(thread)
-	})
-	return isolateInitErr
+	isolateMu.Lock()
+	defer isolateMu.Unlock()
+
+	// If already successfully initialized, return
+	if isolateInited && globalIsolate != nil {
+		return nil
+	}
+
+	// If previously failed and not reinitializing, return cached error
+	if isolateInitErr != nil {
+		return isolateInitErr
+	}
+
+	// Try to create isolate
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	var isolate *C.graal_isolate_t
+	var thread *C.graal_isolatethread_t
+	if rc := C.graal_create_isolate(nil, &isolate, &thread); rc != 0 {
+		isolateInitErr = fmt.Errorf("graal_create_isolate failed: %d", int(rc))
+		return isolateInitErr
+	}
+
+	globalIsolate = isolate
+	isolateInited = true
+	// Detach the bootstrap thread; subsequent calls attach the calling thread on demand.
+	C.graal_detach_thread(thread)
+	return nil
 }
 
 // attachCurrentThread attaches the current OS thread to the global isolate and returns
@@ -351,7 +367,9 @@ func RunStreaming(script string, inputs map[string]interface{}) *StreamResult {
 		inputsJson = "{}"
 	}
 
-	chunkCh := make(chan []byte, 64)
+	// Use larger buffer to prevent blocking the native callback
+	// 512 chunks should handle most scenarios without blocking
+	chunkCh := make(chan []byte, 512)
 	metaCh := make(chan StreamingMetadata, 1)
 
 	doneCh := make(chan struct{})
@@ -418,7 +436,9 @@ func RunTransform(script string, inputReader io.Reader, opts TransformOptions) *
 	var inputsJson string
 	inputsJson = "{}"
 
-	chunkCh := make(chan []byte, 64)
+	// Use larger buffer to prevent blocking the native callback
+	// 512 chunks should handle most scenarios without blocking
+	chunkCh := make(chan []byte, 512)
 	metaCh := make(chan StreamingMetadata, 1)
 
 	doneCh := make(chan struct{})

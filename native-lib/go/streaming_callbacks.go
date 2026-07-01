@@ -13,6 +13,13 @@ import (
 
 //export writeCallbackBridge
 func writeCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, length C.int) C.int {
+	// Defer-recover to catch panics and prevent unwinding into C
+	defer func() {
+		if r := recover(); r != nil {
+			// Log or ignore panic, cannot unwind into C
+		}
+	}()
+
 	// Safe: ctxPtr is the handle value itself (passed as uintptr then converted to unsafe.Pointer)
 	// Cast it back to cgo.Handle by converting through uintptr
 	handle := cgo.Handle(uintptr(ctxPtr))
@@ -40,6 +47,13 @@ func writeCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, length C.int) C.int
 
 //export readCallbackBridge
 func readCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, bufSize C.int) C.int {
+	// Defer-recover to catch panics and prevent unwinding into C
+	defer func() {
+		if r := recover(); r != nil {
+			// Log or ignore panic, cannot unwind into C
+		}
+	}()
+
 	// Safe: ctxPtr is the handle value itself (passed as uintptr then converted to unsafe.Pointer)
 	// Cast it back to cgo.Handle by converting through uintptr
 	handle := cgo.Handle(uintptr(ctxPtr))
