@@ -406,6 +406,11 @@ dw_execution_result *dw_run(dw_runtime *runtime, const char *script, const char 
         return NULL;
     }
 
+    if (script[0] == '\0') {
+        set_error("Script is empty");
+        return NULL;
+    }
+
     const char *inputs = inputs_json ? inputs_json : "{}";
 
     char *response = runtime->run_script(runtime->thread, script, inputs);
@@ -598,6 +603,11 @@ dw_streaming_result *dw_run_callback(
         runtime->free_cstring(runtime->thread, response);
     }
 
+    /* Validate result success to detect callback errors */
+    if (result && !result->success && result->error) {
+        set_error("%s", result->error);
+    }
+
     return result;
 }
 
@@ -608,6 +618,41 @@ typedef struct {
     const char *script;
     const char *inputs_json;
 } stream_worker_context;
+
+/* Write callback for stream worker thread */
+static int stream_write_callback(void *ctx, const char *buffer, int length) {
+    dw_stream *stream = (dw_stream *)ctx;
+
+    /* Allocate new chunk node */
+    chunk_node *node = malloc(sizeof(chunk_node));
+    if (!node) {
+        return -1;
+    }
+
+    node->data = malloc(length);
+    if (!node->data) {
+        free(node);
+        return -1;
+    }
+
+    memcpy(node->data, buffer, length);
+    node->size = length;
+    node->next = NULL;
+
+    /* Add to stream's linked list */
+    pthread_mutex_lock(&stream->mutex);
+    if (!stream->head) {
+        stream->head = node;
+        stream->tail = node;
+    } else {
+        stream->tail->next = node;
+        stream->tail = node;
+    }
+    pthread_cond_signal(&stream->cond);
+    pthread_mutex_unlock(&stream->mutex);
+
+    return 0;
+}
 
 static void *stream_worker_thread(void *arg) {
     stream_worker_context *ctx = (stream_worker_context *)arg;
@@ -634,7 +679,7 @@ static void *stream_worker_thread(void *arg) {
         worker_thread,
         ctx->script,
         ctx->inputs_json,
-        NULL,  /* Callback handled inline */
+        stream_write_callback,
         stream
     );
 
@@ -729,15 +774,17 @@ int dw_stream_next(dw_stream *stream, const unsigned char **out_buffer, size_t *
 
     pthread_mutex_lock(&stream->mutex);
 
-    if (!stream->current && !stream->head) {
+    /* Loop to re-check conditions after waking from wait */
+    while (!stream->current && !stream->head) {
         if (stream->finished) {
             pthread_mutex_unlock(&stream->mutex);
             return 0;  /* EOF */
         }
 
-        /* Wait for data */
+        /* Wait for data or completion */
         pthread_cond_wait(&stream->cond, &stream->mutex);
 
+        /* Re-check after waking: stream may have finished with no data */
         if (!stream->head && stream->finished) {
             pthread_mutex_unlock(&stream->mutex);
             return 0;  /* EOF */
@@ -909,14 +956,15 @@ char *dw_create_input_string(const char *name, const char *content, const char *
     const char *mime = mime_type ? mime_type : "text/plain";
 
     /* Note: escaped_name already includes quotes */
-    char *result = malloc(strlen(escaped_name) + strlen(encoded) + strlen(mime) + 200);
+    size_t result_size = strlen(escaped_name) + strlen(encoded) + strlen(mime) + 200;
+    char *result = malloc(result_size);
     if (!result) {
         free(encoded);
         free(escaped_name);
         return NULL;
     }
 
-    sprintf(result,
+    snprintf(result, result_size,
             "{%s:{\"content\":\"%s\",\"mimeType\":\"%s\",\"charset\":\"UTF-8\"}}",
             escaped_name, encoded, mime);
 
@@ -947,14 +995,15 @@ char *dw_create_input_bytes(
     const char *cs = charset ? charset : "UTF-8";
 
     /* Note: escaped_name already includes quotes */
-    char *result = malloc(strlen(escaped_name) + strlen(encoded) + strlen(mime) + strlen(cs) + 200);
+    size_t result_size = strlen(escaped_name) + strlen(encoded) + strlen(mime) + strlen(cs) + 200;
+    char *result = malloc(result_size);
     if (!result) {
         free(encoded);
         free(escaped_name);
         return NULL;
     }
 
-    sprintf(result,
+    snprintf(result, result_size,
             "{%s:{\"content\":\"%s\",\"mimeType\":\"%s\",\"charset\":\"%s\"}}",
             escaped_name, encoded, mime, cs);
 

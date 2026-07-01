@@ -606,7 +606,7 @@ class DataWeave:
                 self._lib.graal_detach_thread(worker_thread)
                 q.put(_SENTINEL)
 
-        worker = Thread(target=_run_native, name="dw-streaming-worker", daemon=True)
+        worker = Thread(target=_run_native, name="dw-streaming-worker", daemon=False)
         worker.start()
 
         meta = None
@@ -619,7 +619,9 @@ class DataWeave:
             else:
                 yield item
 
-        worker.join()
+        worker.join(timeout=30)
+        if worker.is_alive():
+            raise DataWeaveError("Worker thread timeout after 30 seconds")
 
         if meta is None:
             meta = {"success": False, "error": "No metadata received from native call"}
@@ -764,7 +766,7 @@ class DataWeave:
                 self._lib.graal_detach_thread(worker_thread)
                 q.put(_SENTINEL)
 
-        worker = Thread(target=_run_native, name="dw-transform-worker", daemon=True)
+        worker = Thread(target=_run_native, name="dw-transform-worker", daemon=False)
         worker.start()
 
         meta = None
@@ -777,7 +779,9 @@ class DataWeave:
             else:
                 yield item
 
-        worker.join()
+        worker.join(timeout=30)
+        if worker.is_alive():
+            raise DataWeaveError("Worker thread timeout after 30 seconds")
 
         if meta is None:
             meta = {"success": False, "error": "No metadata received from native call"}

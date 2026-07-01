@@ -392,7 +392,12 @@ static void call_js_read(napi_env env, napi_value js_callback, void* context, vo
       req->bytes_read = 0;
     }
   } else {
-    req->bytes_read = 0;
+    // Clear pending exception to prevent propagation
+    if (status == napi_pending_exception) {
+      napi_value exception;
+      napi_get_and_clear_last_exception(env, &exception);
+    }
+    req->bytes_read = -1;  // Signal error
   }
 
   uv_mutex_lock(&req->mutex);
