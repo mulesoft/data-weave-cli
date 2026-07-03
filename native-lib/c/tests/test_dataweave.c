@@ -8,7 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+
+/* Platform-specific includes */
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 /* Test result tracking */
 static int tests_passed = 0;
