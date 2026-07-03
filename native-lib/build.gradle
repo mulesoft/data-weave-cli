@@ -63,6 +63,23 @@ graalvmNative {
   }
 }
 
+// On Linux/macOS, create libdwlib.so symlink for standard -ldwlib linking
+tasks.named('nativeCompile').configure {
+  doLast {
+    if (!System.getProperty('os.name').toLowerCase().contains('windows')) {
+      def nativeDir = file("${buildDir}/native/nativeCompile")
+      def dwlibFile = fileTree(nativeDir).matching { include 'dwlib.so', 'dwlib.dylib' }.singleFile
+      if (dwlibFile?.exists()) {
+        def ext = dwlibFile.name.endsWith('.dylib') ? '.dylib' : '.so'
+        def symlinkTarget = new File(nativeDir, "lib${dwlibFile.name}")
+        if (!symlinkTarget.exists() || symlinkTarget.canonicalFile != dwlibFile.canonicalFile) {
+          ant.symlink(link: symlinkTarget, resource: dwlibFile.name, overwrite: true)
+        }
+      }
+    }
+  }
+}
+
 def pythonExe = (project.findProperty('pythonExe') ?: 'python3') as String
 
 tasks.register('stagePythonNativeLib', Copy) {
