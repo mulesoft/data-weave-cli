@@ -40,23 +40,75 @@ jobs:
           distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Runs a single command using the runners shell
-      - name: Run Build
-        run: |
-          ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true build
+      # Setup Node.js for native-lib Node binding tests and package
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      # Setup Go for Go binding tests
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      # Setup Rust for Rust binding tests
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Setup CMake for C binding tests
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      # All native binding tests (Python, Node.js, Go, Rust, C) are executed
+      # during the build step via the build -> test task dependency chain.
+      # Each test task in native-lib/build.gradle uses platform-appropriate
+      # shell commands (cmd on Windows, bash on Unix) to ensure correct PATH
+      # resolution for native toolchains.
+
+      # Run Build (Windows)
+      # Note: Uses 'shell: cmd' on Windows to ensure Visual Studio's link.exe
+      # is found before Git Bash's /usr/bin/link.exe. This prevents Rust linker
+      # PATH conflicts that cause compilation failures.
+      - name: Run Build (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report build
+        shell: cmd
+
+      - name: Run Build (Unix)
+        if: runner.os != 'Windows'
+        run: ./gradlew --stacktrace --no-problems-report build
         shell: bash
-      #Run regression tests
-      - name: Run regression test 2.9.8
-        run: |
-          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.9.8 -DweaveSuiteVersion=2.9.8 native-cli-integration-tests:test
+
+      # Run regression tests
+      - name: Run regression test 2.9.8 (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace -PweaveTestSuiteVersion=2.9.8 -DweaveSuiteVersion=2.9.8 native-cli-integration-tests:test
+        shell: cmd
+
+      - name: Run regression test 2.9.8 (Unix)
+        if: runner.os != 'Windows'
+        run: ./gradlew --stacktrace -PweaveTestSuiteVersion=2.9.8 -DweaveSuiteVersion=2.9.8 native-cli-integration-tests:test
         shell: bash
-      - name: Run regression test 2.10
-        run: |
-          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.10.0 -DweaveSuiteVersion=2.10.0 native-cli-integration-tests:test
+
+      - name: Run regression test 2.10 (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace -PweaveTestSuiteVersion=2.10.0 -DweaveSuiteVersion=2.10.0 native-cli-integration-tests:test
+        shell: cmd
+
+      - name: Run regression test 2.10 (Unix)
+        if: runner.os != 'Windows'
+        run: ./gradlew --stacktrace -PweaveTestSuiteVersion=2.10.0 -DweaveSuiteVersion=2.10.0 native-cli-integration-tests:test
         shell: bash
 
       # Generate distro
-      - name: Create Distro
+      - name: Create Distro (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report native-cli:distro
+        shell: cmd
+
+      - name: Create Distro (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-cli:distro
         shell: bash
 
@@ -66,60 +118,25 @@ jobs:
         shell: bash
 
       # Generate native-lib python wheel
-      - name: Create Native Lib Python Wheel
+      - name: Create Native Lib Python Wheel (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report native-lib:buildPythonWheel
+        shell: cmd
+
+      - name: Create Native Lib Python Wheel (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:buildPythonWheel
         shell: bash
 
-      # Setup Node.js for native-lib Node package
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
       # Stage the native lib and build Node package (npm install, node-gyp, tsc, npm pack)
-      - name: Create Native Lib Node Package
-        run: ./gradlew --stacktrace --no-problems-report native-lib:buildNodePackage
-        shell: bash
-
-      # Run all language binding tests
-      - name: Run Python Tests
-        run: ./gradlew --stacktrace --no-problems-report native-lib:pythonTest
-        shell: bash
-
-      - name: Run Node.js Tests
-        run: ./gradlew --stacktrace --no-problems-report native-lib:nodeTest
-        shell: bash
-
-      # Setup Go for Go binding tests
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
-      - name: Run Go Tests
-        run: ./gradlew --stacktrace --no-problems-report native-lib:goTest
-        shell: bash
-
-      # Setup Rust for Rust binding tests
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run Rust Tests (Windows)
+      - name: Create Native Lib Node Package (Windows)
         if: runner.os == 'Windows'
-        run: .\gradlew.bat --stacktrace --no-problems-report native-lib:rustTest
+        run: .\gradlew.bat --stacktrace --no-problems-report native-lib:buildNodePackage
         shell: cmd
 
-      - name: Run Rust Tests (Unix)
+      - name: Create Native Lib Node Package (Unix)
         if: runner.os != 'Windows'
-        run: ./gradlew --stacktrace --no-problems-report native-lib:rustTest
-        shell: bash
-
-      # Setup CMake for C binding tests
-      - name: Setup CMake
-        uses: lukka/get-cmake@latest
-
-      - name: Run C Tests
-        run: ./gradlew --stacktrace --no-problems-report native-lib:cTest
+        run: ./gradlew --stacktrace --no-problems-report native-lib:buildNodePackage
         shell: bash
 
       # Upload the artifact file
@@ -144,7 +161,13 @@ jobs:
           path: native-lib/node/dataweave-native-0.0.1.tgz
 
       # Package and upload Go module
-      - name: Package Go module
+      - name: Package Go module (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report native-lib:packageGo
+        shell: cmd
+
+      - name: Package Go module (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:packageGo
         shell: bash
 
@@ -155,7 +178,13 @@ jobs:
           path: native-lib/build/packages/dw-go-*.tar.gz
 
       # Package and upload Rust crate
-      - name: Package Rust crate
+      - name: Package Rust crate (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report native-lib:packageRust
+        shell: cmd
+
+      - name: Package Rust crate (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:packageRust
         shell: bash
 
@@ -166,7 +195,13 @@ jobs:
           path: native-lib/build/packages/*.crate
 
       # Package and upload C library
-      - name: Package C library
+      - name: Package C library (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report native-lib:packageC
+        shell: cmd
+
+      - name: Package C library (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:packageC
         shell: bash
 
