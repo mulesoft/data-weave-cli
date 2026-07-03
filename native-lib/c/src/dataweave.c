@@ -8,8 +8,29 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdint.h>
-#include <dlfcn.h>
-#include <pthread.h>
+
+/* Platform-specific includes and definitions */
+#ifdef _WIN32
+    #include <windows.h>
+    #define DW_THREAD_LOCAL __declspec(thread)
+
+    /* Windows equivalents for POSIX types */
+    typedef HANDLE pthread_t;
+    typedef CRITICAL_SECTION pthread_mutex_t;
+    typedef CONDITION_VARIABLE pthread_cond_t;
+    typedef struct { int unused; } pthread_attr_t;
+
+    /* Dynamic library handle type */
+    #define DL_HANDLE HMODULE
+
+#else
+    #include <dlfcn.h>
+    #include <pthread.h>
+    #define DW_THREAD_LOCAL __thread
+
+    /* Dynamic library handle type */
+    #define DL_HANDLE void*
+#endif
 
 /* Base64 encoding/decoding */
 static const char base64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -18,7 +39,7 @@ static const char base64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqr
 #include <ctype.h>
 
 /* Thread-local error storage */
-static __thread char error_buffer[512] = {0};
+static DW_THREAD_LOCAL char error_buffer[512] = {0};
 
 /* GraalVM types */
 typedef struct graal_isolate_t graal_isolate_t;
@@ -40,7 +61,7 @@ typedef char* (*run_script_input_output_callback_fn)(
 
 /* Runtime structure */
 struct dw_runtime {
-    void *lib_handle;
+    DL_HANDLE lib_handle;
     graal_isolate_t *isolate;
     graal_isolatethread_t *thread;
 
@@ -104,6 +125,132 @@ static void set_error(const char *fmt, ...) {
     vsnprintf(error_buffer, sizeof(error_buffer), fmt, args);
     va_end(args);
 }
+
+/* Platform abstraction layer for dynamic library loading */
+#ifdef _WIN32
+
+static DL_HANDLE dw_dlopen(const char *path) {
+    return LoadLibraryA(path);
+}
+
+static void* dw_dlsym(DL_HANDLE handle, const char *symbol) {
+    return (void*)GetProcAddress(handle, symbol);
+}
+
+static int dw_dlclose(DL_HANDLE handle) {
+    return FreeLibrary(handle) ? 0 : -1;
+}
+
+static const char* dw_dlerror(void) {
+    static char error_msg[256];
+    DWORD error = GetLastError();
+    FormatMessageA(
+        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        error,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        error_msg,
+        sizeof(error_msg),
+        NULL
+    );
+    return error_msg;
+}
+
+/* Windows pthread wrapper functions */
+static int pthread_mutex_init(pthread_mutex_t *mutex, void *attr) {
+    (void)attr;
+    InitializeCriticalSection(mutex);
+    return 0;
+}
+
+static int pthread_mutex_lock(pthread_mutex_t *mutex) {
+    EnterCriticalSection(mutex);
+    return 0;
+}
+
+static int pthread_mutex_unlock(pthread_mutex_t *mutex) {
+    LeaveCriticalSection(mutex);
+    return 0;
+}
+
+static int pthread_mutex_destroy(pthread_mutex_t *mutex) {
+    DeleteCriticalSection(mutex);
+    return 0;
+}
+
+static int pthread_cond_init(pthread_cond_t *cond, void *attr) {
+    (void)attr;
+    InitializeConditionVariable(cond);
+    return 0;
+}
+
+static int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
+    SleepConditionVariableCS(cond, mutex, INFINITE);
+    return 0;
+}
+
+static int pthread_cond_signal(pthread_cond_t *cond) {
+    WakeConditionVariable(cond);
+    return 0;
+}
+
+static int pthread_cond_destroy(pthread_cond_t *cond) {
+    (void)cond;
+    /* Windows condition variables don't need cleanup */
+    return 0;
+}
+
+typedef struct {
+    void* (*start_routine)(void*);
+    void* arg;
+} pthread_start_wrapper_t;
+
+static DWORD WINAPI pthread_start_wrapper(LPVOID param) {
+    pthread_start_wrapper_t *wrapper = (pthread_start_wrapper_t*)param;
+    void* (*start_routine)(void*) = wrapper->start_routine;
+    void* arg = wrapper->arg;
+    free(wrapper);
+    start_routine(arg);
+    return 0;
+}
+
+static int pthread_create(pthread_t *thread, pthread_attr_t *attr, void* (*start_routine)(void*), void *arg) {
+    (void)attr;
+    pthread_start_wrapper_t *wrapper = malloc(sizeof(pthread_start_wrapper_t));
+    if (!wrapper) return -1;
+
+    wrapper->start_routine = start_routine;
+    wrapper->arg = arg;
+
+    *thread = CreateThread(NULL, 0, pthread_start_wrapper, wrapper, 0, NULL);
+    return (*thread == NULL) ? -1 : 0;
+}
+
+static int pthread_detach(pthread_t thread) {
+    CloseHandle(thread);
+    return 0;
+}
+
+#else
+
+/* POSIX systems - use native functions */
+static DL_HANDLE dw_dlopen(const char *path) {
+    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
+
+static void* dw_dlsym(DL_HANDLE handle, const char *symbol) {
+    return dlsym(handle, symbol);
+}
+
+static int dw_dlclose(DL_HANDLE handle) {
+    return dlclose(handle);
+}
+
+static const char* dw_dlerror(void) {
+    return dlerror();
+}
+
+#endif
 
 /* Helper: find library path */
 static const char *find_library_path(void) {
@@ -307,26 +454,26 @@ dw_runtime *dw_init_with_path(const char *lib_path) {
     }
 
     /* Load library */
-    runtime->lib_handle = dlopen(lib_path, RTLD_NOW | RTLD_LOCAL);
+    runtime->lib_handle = dw_dlopen(lib_path);
     if (!runtime->lib_handle) {
-        set_error("Failed to load library from %s: %s", lib_path, dlerror());
+        set_error("Failed to load library from %s: %s", lib_path, dw_dlerror());
         free(runtime);
         return NULL;
     }
 
     /* Load function pointers */
-    runtime->graal_create_isolate = dlsym(runtime->lib_handle, "graal_create_isolate");
-    runtime->graal_attach_thread = dlsym(runtime->lib_handle, "graal_attach_thread");
-    runtime->graal_detach_thread = dlsym(runtime->lib_handle, "graal_detach_thread");
-    runtime->graal_tear_down_isolate = dlsym(runtime->lib_handle, "graal_tear_down_isolate");
-    runtime->run_script = dlsym(runtime->lib_handle, "run_script");
-    runtime->free_cstring = dlsym(runtime->lib_handle, "free_cstring");
-    runtime->run_script_callback = dlsym(runtime->lib_handle, "run_script_callback");
-    runtime->run_script_input_output_callback = dlsym(runtime->lib_handle, "run_script_input_output_callback");
+    runtime->graal_create_isolate = dw_dlsym(runtime->lib_handle, "graal_create_isolate");
+    runtime->graal_attach_thread = dw_dlsym(runtime->lib_handle, "graal_attach_thread");
+    runtime->graal_detach_thread = dw_dlsym(runtime->lib_handle, "graal_detach_thread");
+    runtime->graal_tear_down_isolate = dw_dlsym(runtime->lib_handle, "graal_tear_down_isolate");
+    runtime->run_script = dw_dlsym(runtime->lib_handle, "run_script");
+    runtime->free_cstring = dw_dlsym(runtime->lib_handle, "free_cstring");
+    runtime->run_script_callback = dw_dlsym(runtime->lib_handle, "run_script_callback");
+    runtime->run_script_input_output_callback = dw_dlsym(runtime->lib_handle, "run_script_input_output_callback");
 
     if (!runtime->graal_create_isolate || !runtime->run_script) {
         set_error("Required functions not found in library");
-        dlclose(runtime->lib_handle);
+        dw_dlclose(runtime->lib_handle);
         free(runtime);
         return NULL;
     }
@@ -335,7 +482,7 @@ dw_runtime *dw_init_with_path(const char *lib_path) {
     int rc = runtime->graal_create_isolate(NULL, &runtime->isolate, &runtime->thread);
     if (rc != 0) {
         set_error("Failed to create GraalVM isolate (error code %d)", rc);
-        dlclose(runtime->lib_handle);
+        dw_dlclose(runtime->lib_handle);
         free(runtime);
         return NULL;
     }
@@ -355,7 +502,7 @@ void dw_cleanup(dw_runtime *runtime) {
     }
 
     if (runtime->lib_handle) {
-        dlclose(runtime->lib_handle);
+        dw_dlclose(runtime->lib_handle);
     }
 
     free(runtime);
