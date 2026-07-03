@@ -104,7 +104,13 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run Rust Tests
+      - name: Run Rust Tests (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report native-lib:rustTest
+        shell: cmd
+
+      - name: Run Rust Tests (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:rustTest
         shell: bash
 
