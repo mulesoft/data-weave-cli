@@ -33,6 +33,12 @@ set(LIBRARY_HEADERS
 # Create library target
 if(BUILD_SHARED_LIBS)
     add_library(dataweave SHARED ${LIBRARY_SOURCES})
+    # On Windows, automatically export all symbols to create import library
+    if(WIN32)
+        set_target_properties(dataweave PROPERTIES
+            WINDOWS_EXPORT_ALL_SYMBOLS ON
+        )
+    endif()
 else()
     add_library(dataweave STATIC ${LIBRARY_SOURCES})
 endif()
