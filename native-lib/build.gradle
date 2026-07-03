@@ -113,15 +113,10 @@ tasks.register('stripNativeLibrary', Exec) {
   }
 }
 
-// Make Python/Node/Go/Rust/C packaging tasks depend on stripping
-tasks.named('stagePythonNativeLib').configure {
-  dependsOn tasks.named('stripNativeLibrary')
-}
-
 def pythonExe = (project.findProperty('pythonExe') ?: 'python3') as String
 
 tasks.register('stagePythonNativeLib', Copy) {
-  dependsOn tasks.named('nativeCompile')
+  dependsOn tasks.named('stripNativeLibrary')
   from("${buildDir}/native/nativeCompile") {
     include('dwlib.*')
   }
