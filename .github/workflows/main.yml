@@ -139,91 +139,71 @@ jobs:
         run: ./gradlew --stacktrace --no-problems-report native-lib:buildNodePackage
         shell: bash
 
-      # Upload artifacts (only on master branch to reduce storage costs on PRs)
-      - name: Upload generated script
-        if: github.ref == 'refs/heads/master'
+      # Upload CLI distro (includes embedded dwlib)
+      - name: Upload CLI Distro
         uses: actions/upload-artifact@v4
         with:
-          name: dw-${{env.NATIVE_VERSION}}-${{runner.os}}
+          name: dataweave-cli-${{env.NATIVE_VERSION}}-${{runner.os}}
           path: native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.script_name }}.zip
 
-      # Upload the Python wheel
-      - name: Upload Python wheel
-        if: github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v4
-        with:
-          name: dw-python-wheel-${{env.NATIVE_VERSION}}-${{runner.os}}
-          path: native-lib/python/dist/dataweave_native-0.0.1-py3-*.whl
-
-      # Upload the Node.js package
-      - name: Upload Node package
-        if: github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v4
-        with:
-          name: dw-node-package-${{env.NATIVE_VERSION}}-${{runner.os}}
-          path: native-lib/node/dataweave-native-0.0.1.tgz
-
-      # Package and upload Go module
+      # Package all language bindings (Go, Rust, C)
       - name: Package Go module (Windows)
-        if: runner.os == 'Windows' && github.ref == 'refs/heads/master'
+        if: runner.os == 'Windows'
         run: .\gradlew.bat --stacktrace --no-problems-report native-lib:packageGo
         shell: cmd
 
       - name: Package Go module (Unix)
-        if: runner.os != 'Windows' && github.ref == 'refs/heads/master'
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:packageGo
         shell: bash
 
-      - name: Upload Go module
-        if: github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v4
-        with:
-          name: dw-go-module-${{env.NATIVE_VERSION}}-${{runner.os}}
-          path: native-lib/build/packages/dw-go-*.tar.gz
-
-      # Package and upload Rust crate
       - name: Package Rust crate (Windows)
-        if: runner.os == 'Windows' && github.ref == 'refs/heads/master'
+        if: runner.os == 'Windows'
         run: .\gradlew.bat --stacktrace --no-problems-report native-lib:packageRust
         shell: cmd
 
       - name: Package Rust crate (Unix)
-        if: runner.os != 'Windows' && github.ref == 'refs/heads/master'
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:packageRust
         shell: bash
 
-      - name: Upload Rust crate
-        if: github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v4
-        with:
-          name: dw-rust-crate-${{env.NATIVE_VERSION}}-${{runner.os}}
-          path: native-lib/build/packages/*.crate
-
-      # Package and upload C library
       - name: Package C library (Windows)
-        if: runner.os == 'Windows' && github.ref == 'refs/heads/master'
+        if: runner.os == 'Windows'
         run: .\gradlew.bat --stacktrace --no-problems-report native-lib:packageC
         shell: cmd
 
       - name: Package C library (Unix)
-        if: runner.os != 'Windows' && github.ref == 'refs/heads/master'
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:packageC
         shell: bash
 
-      - name: Upload C library
-        if: github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v4
-        with:
-          name: dw-c-library-${{env.NATIVE_VERSION}}-${{runner.os}}
-          path: native-lib/build/packages/libdataweave-*.tar.gz
+      # Bundle all language bindings into a single artifact
+      - name: Create Bindings Bundle (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir bindings-bundle
+          copy native-lib\python\dist\*.whl bindings-bundle\
+          copy native-lib\node\*.tgz bindings-bundle\
+          copy native-lib\build\packages\dw-go-*.tar.gz bindings-bundle\
+          copy native-lib\build\packages\*.crate bindings-bundle\
+          copy native-lib\build\packages\libdataweave-*.tar.gz bindings-bundle\
+          tar -czf bindings-bundle-${{env.NATIVE_VERSION}}-${{runner.os}}.tar.gz bindings-bundle
+        shell: cmd
 
-      # Upload the native shared library + header together per OS
-      - name: Upload native shared library
-        if: github.ref == 'refs/heads/master'
+      - name: Create Bindings Bundle (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p bindings-bundle
+          cp native-lib/python/dist/*.whl bindings-bundle/
+          cp native-lib/node/*.tgz bindings-bundle/
+          cp native-lib/build/packages/dw-go-*.tar.gz bindings-bundle/
+          cp native-lib/build/packages/*.crate bindings-bundle/
+          cp native-lib/build/packages/libdataweave-*.tar.gz bindings-bundle/
+          tar -czf bindings-bundle-${{env.NATIVE_VERSION}}-${{runner.os}}.tar.gz bindings-bundle
+        shell: bash
+
+      - name: Upload Bindings Bundle
         uses: actions/upload-artifact@v4
         with:
-          name: dwlib-${{env.NATIVE_VERSION}}-${{runner.os}}
-          path: |
-            native-lib/python/src/dataweave/native/dwlib.so
-            native-lib/python/src/dataweave/native/dwlib.dll
-            native-lib/python/src/dataweave/native/dwlib.h
+          name: dataweave-bindings-${{env.NATIVE_VERSION}}-${{runner.os}}
+          path: bindings-bundle-${{env.NATIVE_VERSION}}-${{runner.os}}.tar.gz
