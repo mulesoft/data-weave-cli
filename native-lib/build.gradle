@@ -226,7 +226,7 @@ tasks.register('cTest', Exec) {
   }
 
   if (System.getProperty('os.name').toLowerCase().contains('windows')) {
-    commandLine('cmd', '/c', 'cmake -B build && cmake --build build && ctest --test-dir build --verbose')
+    commandLine('cmd', '/c', 'cmake -B build && cmake --build build --config Release && ctest --test-dir build --verbose -C Release')
   } else {
     commandLine('bash', '-c', "cmake -B build -DDWLIB_PATH=${buildDir}/native/nativeCompile && cmake --build build && ctest --test-dir build --verbose")
   }
