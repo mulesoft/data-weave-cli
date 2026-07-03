@@ -116,7 +116,7 @@ if(BUILD_TESTS)
 
     add_test(
         NAME dataweave_tests
-        COMMAND test_dataweave
+        COMMAND $<TARGET_FILE:test_dataweave>
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/tests
     )
 
