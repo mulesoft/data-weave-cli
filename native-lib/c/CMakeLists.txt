@@ -18,13 +18,6 @@ if(UNIX AND NOT APPLE)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
 endif()
 
-# On Windows, disable the Debug/Release subdirectories for single-config build
-if(WIN32)
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
-    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
-    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
-endif()
-
 # Find dependencies
 find_package(Threads REQUIRED)
 
@@ -71,6 +64,19 @@ set_target_properties(dataweave PROPERTIES
     PUBLIC_HEADER "${LIBRARY_HEADERS}"
 )
 
+# For Windows multi-config generators (Visual Studio), place outputs in build root
+# instead of Debug/Release subdirectories to match test expectations
+if(CMAKE_CONFIGURATION_TYPES)
+    foreach(CONFIG_TYPE ${CMAKE_CONFIGURATION_TYPES})
+        string(TOUPPER ${CONFIG_TYPE} CONFIG_TYPE_UPPER)
+        set_target_properties(dataweave PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_${CONFIG_TYPE_UPPER} ${CMAKE_BINARY_DIR}
+            LIBRARY_OUTPUT_DIRECTORY_${CONFIG_TYPE_UPPER} ${CMAKE_BINARY_DIR}
+            ARCHIVE_OUTPUT_DIRECTORY_${CONFIG_TYPE_UPPER} ${CMAKE_BINARY_DIR}
+        )
+    endforeach()
+endif()
+
 # Tests
 if(BUILD_TESTS)
     enable_testing()
@@ -84,6 +90,16 @@ if(BUILD_TESTS)
             dataweave
             Threads::Threads
     )
+
+    # For Windows multi-config generators, place test executable in build root
+    if(CMAKE_CONFIGURATION_TYPES)
+        foreach(CONFIG_TYPE ${CMAKE_CONFIGURATION_TYPES})
+            string(TOUPPER ${CONFIG_TYPE} CONFIG_TYPE_UPPER)
+            set_target_properties(test_dataweave PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY_${CONFIG_TYPE_UPPER} ${CMAKE_BINARY_DIR}
+            )
+        endforeach()
+    endif()
 
     # Copy test data
     configure_file(
