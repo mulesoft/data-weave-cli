@@ -80,6 +80,44 @@ tasks.named('nativeCompile').configure {
   }
 }
 
+// Strip debug symbols from native library to reduce artifact size (only on CI or when skipStripDebug is not set)
+tasks.register('stripNativeLibrary', Exec) {
+  dependsOn tasks.named('nativeCompile')
+
+  onlyIf {
+    // Skip stripping if explicitly disabled (for local development with debugging)
+    project.findProperty('skipStripDebug')?.toString()?.toBoolean() != true
+  }
+
+  def nativeDir = file("${buildDir}/native/nativeCompile")
+
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    // Windows: Use strip from mingw-w64 or MSYS2 if available
+    workingDir(nativeDir)
+    commandLine('cmd', '/c', 'where strip >nul 2>&1 && strip --strip-debug dwlib.dll || echo Strip not available on Windows, skipping')
+    ignoreExitValue = true  // Don't fail if strip is not available on Windows
+  } else if (System.getProperty('os.name').toLowerCase().contains('mac')) {
+    // macOS: Use strip -S to remove debug symbols
+    workingDir(nativeDir)
+    commandLine('strip', '-S', 'dwlib.dylib')
+  } else {
+    // Linux: Use strip --strip-debug
+    workingDir(nativeDir)
+    commandLine('strip', '--strip-debug', 'dwlib.so')
+  }
+
+  doLast {
+    if (executionResult.get().exitValue == 0) {
+      println("✓ Stripped debug symbols from native library")
+    }
+  }
+}
+
+// Make Python/Node/Go/Rust/C packaging tasks depend on stripping
+tasks.named('stagePythonNativeLib').configure {
+  dependsOn tasks.named('stripNativeLibrary')
+}
+
 def pythonExe = (project.findProperty('pythonExe') ?: 'python3') as String
 
 tasks.register('stagePythonNativeLib', Copy) {
@@ -124,7 +162,7 @@ tasks.register('pythonTest', Exec) {
 // --- Node.js native package tasks ---
 
 tasks.register('stageNodeNativeLib', Copy) {
-  dependsOn tasks.named('nativeCompile')
+  dependsOn tasks.named('stripNativeLibrary')
   from("${buildDir}/native/nativeCompile") {
     include('dwlib.*')
   }
@@ -260,7 +298,7 @@ tasks.named('test') {
 // --- Release artifact packaging tasks ---
 
 tasks.register('packageGo', Tar) {
-  dependsOn tasks.named('nativeCompile')
+  dependsOn tasks.named('stripNativeLibrary')
   from("${projectDir}/go") {
     exclude('dataweave_test')
     exclude('*.test')
@@ -278,7 +316,7 @@ tasks.register('packageGo', Tar) {
 }
 
 tasks.register('packageRust', Exec) {
-  dependsOn tasks.named('nativeCompile')
+  dependsOn tasks.named('stripNativeLibrary')
   workingDir("${projectDir}/rust")
 
   doFirst {
@@ -301,7 +339,7 @@ tasks.register('packageRust', Exec) {
 }
 
 tasks.register('packageC', Tar) {
-  dependsOn tasks.named('nativeCompile')
+  dependsOn tasks.named('stripNativeLibrary')
 
   // Include the native library
   from("${buildDir}/native/nativeCompile") {
