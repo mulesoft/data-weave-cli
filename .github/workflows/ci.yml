@@ -34,14 +34,28 @@ jobs:
           distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Runs a single command using the runners shell
-      - name: Run Build (Latest)
-        run: |
-          ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true -PweaveVersion=2.11.0-SNAPSHOT -PweaveTestSuiteVersion=2.11.0-SNAPSHOT -PweaveSuiteVersion=2.11.0-SNAPSHOT build
+      # Run Build (Windows)
+      # Note: Uses 'shell: cmd' on Windows to ensure Visual Studio's link.exe
+      # is found before Git Bash's /usr/bin/link.exe. This prevents Rust linker
+      # PATH conflicts that cause compilation failures.
+      - name: Run Build (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report -PskipNodeTests=true -PweaveVersion=2.11.0-SNAPSHOT -PweaveTestSuiteVersion=2.11.0-SNAPSHOT -PweaveSuiteVersion=2.11.0-SNAPSHOT build
+        shell: cmd
+
+      - name: Run Build (Unix)
+        if: runner.os != 'Windows'
+        run: ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true -PweaveVersion=2.11.0-SNAPSHOT -PweaveTestSuiteVersion=2.11.0-SNAPSHOT -PweaveSuiteVersion=2.11.0-SNAPSHOT build
         shell: bash
 
       # Generate distro
-      - name: Create Distro
+      - name: Create Distro (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT -PweaveTestSuiteVersion=2.11.0-SNAPSHOT -PweaveSuiteVersion=2.11.0-SNAPSHOT native-cli:distro
+        shell: cmd
+
+      - name: Create Distro (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT -PweaveTestSuiteVersion=2.11.0-SNAPSHOT -PweaveSuiteVersion=2.11.0-SNAPSHOT native-cli:distro
         shell: bash
 
@@ -51,7 +65,13 @@ jobs:
         shell: bash
 
       # Generate native-lib python wheel
-      - name: Create Native Lib Python Wheel
+      - name: Create Native Lib Python Wheel (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT native-lib:buildPythonWheel
+        shell: cmd
+
+      - name: Create Native Lib Python Wheel (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT native-lib:buildPythonWheel
         shell: bash
 
@@ -62,12 +82,24 @@ jobs:
           node-version: '18'
 
       # Stage the native lib and build Node package (npm install, node-gyp, tsc, npm pack)
-      - name: Create Native Lib Node Package
+      - name: Create Native Lib Node Package (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT native-lib:buildNodePackage
+        shell: cmd
+
+      - name: Create Native Lib Node Package (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT native-lib:buildNodePackage
         shell: bash
 
       # Run Node.js tests
-      - name: Run Node.js Tests
+      - name: Run Node.js Tests (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT native-lib:nodeTest
+        shell: cmd
+
+      - name: Run Node.js Tests (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report -PweaveVersion=2.11.0-SNAPSHOT native-lib:nodeTest
         shell: bash
 

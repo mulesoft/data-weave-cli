@@ -40,14 +40,48 @@ jobs:
           echo "NATIVE_VERSION=$(echo '${{github.ref}}' | sed -e 's,.*/v\(.*\),\1,')" >> $GITHUB_ENV
         shell: bash
 
-      # Runs a single command using the runners shell
-      - name: Run Build
-        run: |
-          ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true build -PnativeVersion=${{env.NATIVE_VERSION}}
+      # Setup Node.js for native-lib Node binding tests and package
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      # Setup Go for Go binding tests
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      # Setup Rust for Rust binding tests
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Setup CMake for C binding tests
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      # Run Build (Windows)
+      # Note: Uses 'shell: cmd' on Windows to ensure Visual Studio's link.exe
+      # is found before Git Bash's /usr/bin/link.exe. This prevents Rust linker
+      # PATH conflicts that cause compilation failures.
+      - name: Run Build (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report build -PnativeVersion=${{env.NATIVE_VERSION}}
+        shell: cmd
+
+      - name: Run Build (Unix)
+        if: runner.os != 'Windows'
+        run: ./gradlew --stacktrace --no-problems-report build -PnativeVersion=${{env.NATIVE_VERSION}}
         shell: bash
 
       # Generate distro
-      - name: Create Distro
+      - name: Create Distro (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report native-cli:distro -PnativeVersion=${{env.NATIVE_VERSION}}
+        shell: cmd
+
+      - name: Create Distro (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-cli:distro -PnativeVersion=${{env.NATIVE_VERSION}}
         shell: bash
 
@@ -57,52 +91,57 @@ jobs:
         shell: bash
 
       # Generate native-lib python wheel
-      - name: Create Native Lib Python Wheel
+      - name: Create Native Lib Python Wheel (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report native-lib:buildPythonWheel -PnativeVersion=${{env.NATIVE_VERSION}}
+        shell: cmd
+
+      - name: Create Native Lib Python Wheel (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:buildPythonWheel -PnativeVersion=${{env.NATIVE_VERSION}}
         shell: bash
 
-      # Setup Node.js for native-lib Node package
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
       # Stage the native lib and build Node package (npm install, node-gyp, tsc, npm pack)
-      - name: Create Native Lib Node Package
+      - name: Create Native Lib Node Package (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report native-lib:buildNodePackage -PnativeVersion=${{env.NATIVE_VERSION}}
+        shell: cmd
+
+      - name: Create Native Lib Node Package (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:buildNodePackage -PnativeVersion=${{env.NATIVE_VERSION}}
         shell: bash
 
-      # Run Node.js tests
-      - name: Run Node.js Tests
-        run: ./gradlew --stacktrace --no-problems-report native-lib:nodeTest -PnativeVersion=${{env.NATIVE_VERSION}}
-        shell: bash
-
-      # Setup Go for Go module packaging
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
       # Package Go module
-      - name: Package Go module
+      - name: Package Go module (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report native-lib:packageGo -PnativeVersion=${{env.NATIVE_VERSION}}
+        shell: cmd
+
+      - name: Package Go module (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:packageGo -PnativeVersion=${{env.NATIVE_VERSION}}
         shell: bash
 
-      # Setup Rust for Rust crate packaging
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
       # Package Rust crate
-      - name: Package Rust crate
+      - name: Package Rust crate (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report native-lib:packageRust -PnativeVersion=${{env.NATIVE_VERSION}}
+        shell: cmd
+
+      - name: Package Rust crate (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:packageRust -PnativeVersion=${{env.NATIVE_VERSION}}
         shell: bash
 
-      # Setup CMake for C library packaging
-      - name: Setup CMake
-        uses: lukka/get-cmake@latest
-
       # Package C library
-      - name: Package C library
+      - name: Package C library (Windows)
+        if: runner.os == 'Windows'
+        run: .\gradlew.bat --stacktrace --no-problems-report native-lib:packageC -PnativeVersion=${{env.NATIVE_VERSION}}
+        shell: cmd
+
+      - name: Package C library (Unix)
+        if: runner.os != 'Windows'
         run: ./gradlew --stacktrace --no-problems-report native-lib:packageC -PnativeVersion=${{env.NATIVE_VERSION}}
         shell: bash
 
