@@ -6,7 +6,9 @@ package dataweave
 import "C"
 import (
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"runtime/cgo"
 	"unsafe"
 )
@@ -25,11 +27,13 @@ func writeCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, length C.int) C.int
 	handle := cgo.Handle(uintptr(ctxPtr))
 	ctx := lookupContext(handle)
 	if ctx == nil {
+		fmt.Fprintf(os.Stderr, "dataweave: writeCallbackBridge: no context for handle %#x (stale/freed/invalid)\n", uintptr(ctxPtr))
 		return -1
 	}
 
 	// Validate length to prevent C.GoBytes panic
 	if length < 0 {
+		fmt.Fprintf(os.Stderr, "dataweave: writeCallbackBridge: negative length %d from native callback\n", int(length))
 		return -1
 	}
 
@@ -59,6 +63,7 @@ func readCallbackBridge(ctxPtr unsafe.Pointer, buf *C.char, bufSize C.int) C.int
 	handle := cgo.Handle(uintptr(ctxPtr))
 	ctx := lookupContext(handle)
 	if ctx == nil {
+		fmt.Fprintf(os.Stderr, "dataweave: readCallbackBridge: no context for handle %#x (stale/freed/invalid)\n", uintptr(ctxPtr))
 		return -1
 	}
 

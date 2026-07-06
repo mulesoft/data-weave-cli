@@ -107,6 +107,7 @@ typedef struct chunk_node {
 struct dw_stream {
     dw_runtime *runtime;
     pthread_t worker_thread;
+    bool worker_started;
     chunk_node *head;
     chunk_node *tail;
     chunk_node *current;
@@ -231,6 +232,13 @@ static int pthread_detach(pthread_t thread) {
     return 0;
 }
 
+static int pthread_join(pthread_t thread, void **retval) {
+    (void)retval;
+    WaitForSingleObject(thread, INFINITE);
+    CloseHandle(thread);
+    return 0;
+}
+
 #else
 
 /* POSIX systems - use native functions */
@@ -350,10 +358,18 @@ unsigned char *dw_base64_decode(const char *encoded, size_t *out_size) {
         return NULL;
     }
 
-    /* Count padding */
+    /* Count padding and validate it's only at the end */
     size_t padding = 0;
     if (encoded[len - 1] == '=') padding++;
     if (len > 1 && encoded[len - 2] == '=') padding++;
+
+    /* Validate no '=' before the final quantum */
+    for (size_t k = 0; k < len - padding; k++) {
+        if (encoded[k] == '=') {
+            *out_size = 0;
+            return NULL;  /* '=' found before trailing padding */
+        }
+    }
 
     size_t output_len = (len * 3) / 4 - padding;
     unsigned char *decoded = malloc(output_len + 1);
@@ -372,8 +388,20 @@ unsigned char *dw_base64_decode(const char *encoded, size_t *out_size) {
 
         i += 2; /* Advance past sextet_c and sextet_d positions */
 
-        /* Check for invalid characters in required sextets */
+        /* Check for invalid characters in all sextets */
         if (sextet_a == -1 || sextet_b == -1) {
+            free(decoded);
+            *out_size = 0;
+            return NULL;
+        }
+
+        /* Validate sextet_c and sextet_d only if not padding */
+        if (i - 2 < len && encoded[i - 2] != '=' && sextet_c == -1) {
+            free(decoded);
+            *out_size = 0;
+            return NULL;
+        }
+        if (i - 1 < len && encoded[i - 1] != '=' && sextet_d == -1) {
             free(decoded);
             *out_size = 0;
             return NULL;
@@ -408,6 +436,7 @@ static char *json_get_string(const char *json, const char *key) {
     if (*pos != '"') return NULL;
     pos++;
 
+    /* Find end of string, respecting escapes */
     const char *end = pos;
     while (*end && *end != '"') {
         if (*end == '\\') end++;
@@ -418,8 +447,32 @@ static char *json_get_string(const char *json, const char *key) {
     char *result = malloc(len + 1);
     if (!result) return NULL;
 
-    strncpy(result, pos, len);
-    result[len] = '\0';
+    /* Copy and unescape */
+    size_t j = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (pos[i] == '\\' && i + 1 < len) {
+            i++;
+            switch (pos[i]) {
+                case 'n':  result[j++] = '\n'; break;
+                case 't':  result[j++] = '\t'; break;
+                case 'r':  result[j++] = '\r'; break;
+                case 'b':  result[j++] = '\b'; break;
+                case 'f':  result[j++] = '\f'; break;
+                case '"':  result[j++] = '"';  break;
+                case '\\': result[j++] = '\\'; break;
+                case '/':  result[j++] = '/';  break;
+                default:
+                    /* For unhandled escapes, keep them literal (e.g., \uXXXX) */
+                    result[j++] = '\\';
+                    result[j++] = pos[i];
+                    break;
+            }
+        } else {
+            result[j++] = pos[i];
+        }
+    }
+
+    result[j] = '\0';
     return result;
 }
 
@@ -762,8 +815,8 @@ dw_streaming_result *dw_run_callback(
 typedef struct {
     dw_runtime *runtime;
     dw_stream *stream;
-    const char *script;
-    const char *inputs_json;
+    char *script;
+    char *inputs_json;
 } stream_worker_context;
 
 /* Write callback for stream worker thread */
@@ -817,6 +870,8 @@ static void *stream_worker_thread(void *arg) {
         stream->finished = true;
         pthread_cond_signal(&stream->cond);
         pthread_mutex_unlock(&stream->mutex);
+        free(ctx->script);
+        free(ctx->inputs_json);
         free(ctx);
         return NULL;
     }
@@ -831,8 +886,9 @@ static void *stream_worker_thread(void *arg) {
     );
 
     /* Parse metadata */
+    dw_streaming_result *metadata = NULL;
     if (response) {
-        stream->metadata = parse_streaming_result(response);
+        metadata = parse_streaming_result(response);
         if (runtime->free_cstring) {
             runtime->free_cstring(worker_thread, response);
         }
@@ -844,10 +900,13 @@ static void *stream_worker_thread(void *arg) {
     }
 
     pthread_mutex_lock(&stream->mutex);
+    stream->metadata = metadata;
     stream->finished = true;
     pthread_cond_signal(&stream->cond);
     pthread_mutex_unlock(&stream->mutex);
 
+    free(ctx->script);
+    free(ctx->inputs_json);
     free(ctx);
     return NULL;
 }
@@ -879,6 +938,7 @@ dw_stream *dw_run_streaming(dw_runtime *runtime, const char *script, const char 
     stream->runtime = runtime;
     pthread_mutex_init(&stream->mutex, NULL);
     pthread_cond_init(&stream->cond, NULL);
+    stream->worker_started = false;
 
     /* Allocate worker context */
     stream_worker_context *worker_ctx = malloc(sizeof(stream_worker_context));
@@ -890,15 +950,36 @@ dw_stream *dw_run_streaming(dw_runtime *runtime, const char *script, const char 
         return NULL;
     }
 
+    /* Copy script and inputs_json so the worker owns them */
+    worker_ctx->script = strdup(script);
+    if (!worker_ctx->script) {
+        free(worker_ctx);
+        pthread_mutex_destroy(&stream->mutex);
+        pthread_cond_destroy(&stream->cond);
+        free(stream);
+        set_error("Failed to copy script");
+        return NULL;
+    }
+
+    worker_ctx->inputs_json = inputs_json ? strdup(inputs_json) : strdup("{}");
+    if (!worker_ctx->inputs_json) {
+        free(worker_ctx->script);
+        free(worker_ctx);
+        pthread_mutex_destroy(&stream->mutex);
+        pthread_cond_destroy(&stream->cond);
+        free(stream);
+        set_error("Failed to copy inputs_json");
+        return NULL;
+    }
+
     worker_ctx->runtime = runtime;
     worker_ctx->stream = stream;
-    worker_ctx->script = script;
-    worker_ctx->inputs_json = inputs_json;
 
     /* Create worker thread to execute script and stream chunks */
-    pthread_t worker_thread;
-    int rc = pthread_create(&worker_thread, NULL, stream_worker_thread, worker_ctx);
+    int rc = pthread_create(&stream->worker_thread, NULL, stream_worker_thread, worker_ctx);
     if (rc != 0) {
+        free(worker_ctx->inputs_json);
+        free(worker_ctx->script);
         free(worker_ctx);
         pthread_mutex_destroy(&stream->mutex);
         pthread_cond_destroy(&stream->cond);
@@ -908,8 +989,7 @@ dw_stream *dw_run_streaming(dw_runtime *runtime, const char *script, const char 
         return NULL;
     }
 
-    /* Detach thread so it cleans up automatically */
-    pthread_detach(worker_thread);
+    stream->worker_started = true;
 
     return stream;
 }
@@ -955,11 +1035,22 @@ int dw_stream_next(dw_stream *stream, const unsigned char **out_buffer, size_t *
 }
 
 const dw_streaming_result *dw_stream_metadata(dw_stream *stream) {
-    return stream ? stream->metadata : NULL;
+    if (!stream) return NULL;
+
+    pthread_mutex_lock(&stream->mutex);
+    const dw_streaming_result *metadata = stream->metadata;
+    pthread_mutex_unlock(&stream->mutex);
+
+    return metadata;
 }
 
 void dw_stream_free(dw_stream *stream) {
     if (!stream) return;
+
+    /* Join the worker thread if it was started */
+    if (stream->worker_started) {
+        pthread_join(stream->worker_thread, NULL);
+    }
 
     /* Free chunks */
     chunk_node *node = stream->head;

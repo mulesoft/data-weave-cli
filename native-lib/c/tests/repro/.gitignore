@@ -1,0 +1,10 @@
+# Build artifacts from run.sh
+libdwlib_mock.*
+dwlib.so
+dwlib.dylib
+dwlib.dll
+repro_pure
+repro_stream_uaf
+repro_metadata_race
+*.log
+*.dSYM/

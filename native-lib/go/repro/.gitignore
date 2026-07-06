@@ -1,0 +1,4 @@
+# Build artifacts from `go test`
+*.test
+*.out
+coverage.*

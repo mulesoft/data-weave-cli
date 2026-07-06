@@ -253,10 +253,27 @@ type StreamingMetadata struct {
 
 // StreamResult represents the result of a streaming DataWeave execution.
 // Chunks delivers output data as it is produced. Metadata arrives after all chunks.
+// Call Close() to abandon the stream early and unblock the callback goroutine.
 type StreamResult struct {
 	Chunks   <-chan []byte
 	Metadata <-chan StreamingMetadata
 	Err      error
+
+	closeOnce sync.Once
+	doneCh    chan struct{} // internal: signals abandonment to callback
+	handle    cgo.Handle    // internal: for cleanup
+}
+
+// Close abandons the stream and unblocks any pending write callbacks.
+// Safe to call multiple times or after the stream has naturally completed.
+// Callers should defer this to ensure cleanup on early return or panic.
+func (sr *StreamResult) Close() error {
+	sr.closeOnce.Do(func() {
+		if sr.doneCh != nil {
+			close(sr.doneCh)
+		}
+	})
+	return nil
 }
 
 // TransformOptions configures bidirectional streaming.
@@ -383,6 +400,10 @@ func RunStreaming(script string, inputs map[string]interface{}) *StreamResult {
 		defer unregisterContext(handle)
 		defer close(chunkCh)
 		defer close(metaCh)
+		// NOTE: doneCh is NOT closed here. It has a single owner —
+		// StreamResult.Close() (sync.Once-guarded) — so that natural completion
+		// plus a caller's `defer sr.Close()` cannot double-close it. The worker
+		// closing doneCh on exit would race/double-close against Close().
 
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
@@ -420,6 +441,8 @@ func RunStreaming(script string, inputs map[string]interface{}) *StreamResult {
 	return &StreamResult{
 		Chunks:   chunkCh,
 		Metadata: metaCh,
+		doneCh:   doneCh,
+		handle:   handle,
 	}
 }
 
@@ -453,6 +476,8 @@ func RunTransform(script string, inputReader io.Reader, opts TransformOptions) *
 		defer unregisterContext(handle)
 		defer close(chunkCh)
 		defer close(metaCh)
+		// NOTE: doneCh is NOT closed here — single owner is StreamResult.Close()
+		// (sync.Once). See RunStreaming for the rationale (avoids double-close).
 
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
@@ -503,5 +528,7 @@ func RunTransform(script string, inputReader io.Reader, opts TransformOptions) *
 	return &StreamResult{
 		Chunks:   chunkCh,
 		Metadata: metaCh,
+		doneCh:   doneCh,
+		handle:   handle,
 	}
 }
