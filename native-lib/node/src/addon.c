@@ -68,12 +68,25 @@ static void init_thread_fn(void* arg) {
     return;
   }
 
-  rc = fn_create_isolate(NULL, &g_isolate, &g_thread);
+  void* boot_thread = NULL;
+  rc = fn_create_isolate(NULL, &g_isolate, &boot_thread);
   if (rc != 0) {
     snprintf(args->error, sizeof(args->error), "graal_create_isolate failed with code %d", rc);
     args->result = rc;
     return;
   }
+
+  // Detach the bootstrap thread immediately. This init OS thread is joined and
+  // exits right after, so leaving it attached would leave a phantom attached
+  // thread on the isolate — and graal_tear_down_isolate() blocks forever waiting
+  // for every other attached thread to reach a safepoint (the dead init thread
+  // never will). Subsequent calls (run/streaming/transform, and cleanup) attach
+  // their own OS thread on demand and detach when done. Mirrors the Go binding,
+  // which likewise detaches the bootstrap thread after graal_create_isolate.
+  if (fn_detach_thread) {
+    fn_detach_thread(boot_thread);
+  }
+  g_thread = NULL;
 
   args->result = 0;
 }
@@ -392,7 +405,40 @@ static void call_js_read(napi_env env, napi_value js_callback, void* context, vo
       req->bytes_read = 0;
     }
   } else {
-    req->bytes_read = 0;
+    // Clear pending exception to prevent propagation
+    if (status == napi_pending_exception) {
+      napi_value exception;
+      napi_get_and_clear_last_exception(env, &exception);
+
+      // Extract and log exception details before discarding
+      napi_value message_prop, stack_prop;
+      char message_buf[512] = {0};
+      char stack_buf[2048] = {0};
+      size_t message_len = 0, stack_len = 0;
+
+      // Try to get the message property
+      if (napi_get_named_property(env, exception, "message", &message_prop) == napi_ok) {
+        napi_get_value_string_utf8(env, message_prop, message_buf, sizeof(message_buf), &message_len);
+      }
+
+      // Try to get the stack property
+      if (napi_get_named_property(env, exception, "stack", &stack_prop) == napi_ok) {
+        napi_get_value_string_utf8(env, stack_prop, stack_buf, sizeof(stack_buf), &stack_len);
+      }
+
+      // Log the exception to stderr for diagnostics
+      fprintf(stderr, "[DataWeave Node addon] Read callback threw exception:\n");
+      if (message_len > 0) {
+        fprintf(stderr, "  Message: %s\n", message_buf);
+      }
+      if (stack_len > 0) {
+        fprintf(stderr, "  Stack:\n%s\n", stack_buf);
+      }
+      if (message_len == 0 && stack_len == 0) {
+        fprintf(stderr, "  (Unable to extract exception details)\n");
+      }
+    }
+    req->bytes_read = -1;  // Signal error
   }
 
   uv_mutex_lock(&req->mutex);
@@ -586,9 +632,20 @@ static napi_value napi_run_script_transform(napi_env env, napi_callback_info inf
 
 static void cleanup_thread_fn(void* arg) {
   (void)arg;
-  if (fn_tear_down_isolate && g_thread) {
-    fn_tear_down_isolate(g_thread);
+  // graal_tear_down_isolate() must be passed the IsolateThread belonging to the
+  // *calling* OS thread. g_thread was created by graal_create_isolate() on the
+  // (now-exited, already-joined) init thread, so it is invalid here — passing it
+  // trips GraalVM's "wrong IsolateThread" guard and aborts with a fatal
+  // StackOverflowError during teardown. Attach this cleanup thread to the isolate
+  // to obtain a valid local IsolateThread, then tear down with that.
+  if (!fn_tear_down_isolate || !fn_attach_thread || !g_isolate) {
+    return;
   }
+  void* local_thread = NULL;
+  if (fn_attach_thread(g_isolate, &local_thread) != 0 || local_thread == NULL) {
+    return;
+  }
+  fn_tear_down_isolate(local_thread);
 }
 
 static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
