@@ -25,3 +25,17 @@ grimoires/
 
 .windsurf/
 .claude/
+
+# Go
+native-lib/go/examples/simple_demo
+native-lib/go/examples/streaming_demo
+native-lib/go/simple_demo
+native-lib/go/streaming_demo
+
+# Rust
+native-lib/rust/target/
+native-lib/rust/Cargo.lock
+
+# Python
+__pycache__/
+*.pyc

@@ -1,0 +1,38 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# Test outputs - ignore at root and in subdirectories
+*.json
+*.csv
+!CMakeLists.txt
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# CMake (note: a hand-rolled Makefile IS shipped — see ! exception below)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!Makefile
+!CMakeLists.txt
+!cmake/
+
+# Executables
+test_dataweave
+simple
+streaming
+
+# OS files
+.DS_Store
+Thumbs.db

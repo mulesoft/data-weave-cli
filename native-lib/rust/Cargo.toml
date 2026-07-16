@@ -1,0 +1,25 @@
+[package]
+name = "dataweave-native"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+
+[dev-dependencies]
+
+[lib]
+name = "dataweave"
+path = "src/lib.rs"
+
+[[example]]
+name = "simple_demo"
+path = "examples/simple_demo.rs"
+
+[[example]]
+name = "streaming_demo"
+path = "examples/streaming_demo.rs"

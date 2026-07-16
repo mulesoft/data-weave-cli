@@ -198,9 +198,186 @@ tasks.register('nodeTest', Exec) {
   }
 }
 
+// --- Go native package tasks ---
+
+tasks.register('goTest', Exec) {
+  if (project.findProperty('skipGoTests')?.toString()?.toBoolean() == true) {
+    enabled = false
+  }
+
+  dependsOn tasks.named('nativeCompile')
+  workingDir("${projectDir}/go")
+  environment('CGO_ENABLED', '1')
+  environment('DYLD_LIBRARY_PATH', "${buildDir}/native/nativeCompile")
+  environment('LD_LIBRARY_PATH', "${buildDir}/native/nativeCompile")
+  environment('CGO_LDFLAGS', "-L${buildDir}/native/nativeCompile -ldwlib")
+  environment('PATH', "${buildDir}/native/nativeCompile" + File.pathSeparator + System.getenv('PATH'))
+
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    commandLine('cmd', '/c', 'go test -v')
+  } else {
+    commandLine('bash', '-c', 'go test -v')
+  }
+}
+
+tasks.register('goTestRace', Exec) {
+  if (project.findProperty('skipGoTests')?.toString()?.toBoolean() == true) {
+    enabled = false
+  }
+
+  dependsOn tasks.named('nativeCompile')
+  workingDir("${projectDir}/go")
+  environment('CGO_ENABLED', '1')
+  environment('DYLD_LIBRARY_PATH', "${buildDir}/native/nativeCompile")
+  environment('LD_LIBRARY_PATH', "${buildDir}/native/nativeCompile")
+  environment('PATH', "${buildDir}/native/nativeCompile" + File.pathSeparator + System.getenv('PATH'))
+
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    // Windows doesn't support -race flag
+    enabled = false
+  } else {
+    commandLine('bash', '-c', 'go test -race -v')
+  }
+}
+
+// --- Rust native package tasks ---
+
+tasks.register('rustTest', Exec) {
+  if (project.findProperty('skipRustTests')?.toString()?.toBoolean() == true) {
+    enabled = false
+  }
+
+  dependsOn tasks.named('nativeCompile')
+  workingDir("${projectDir}/rust")
+  environment('DYLD_LIBRARY_PATH', "${buildDir}/native/nativeCompile")
+  environment('LD_LIBRARY_PATH', "${buildDir}/native/nativeCompile")
+  environment('PATH', "${buildDir}/native/nativeCompile" + File.pathSeparator + System.getenv('PATH'))
+
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    commandLine('cmd', '/c', 'cargo test')
+  } else {
+    commandLine('bash', '-c', 'cargo test')
+  }
+}
+
+// --- C native package tasks ---
+
+tasks.register('cTest', Exec) {
+  if (project.findProperty('skipCTests')?.toString()?.toBoolean() == true) {
+    enabled = false
+  }
+
+  dependsOn tasks.named('nativeCompile')
+  workingDir("${projectDir}/c")
+
+  doFirst {
+    // Create build directory if it doesn't exist
+    file("${projectDir}/c/build").mkdirs()
+  }
+
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    commandLine('cmd', '/c', 'cmake -B build && cmake --build build --config Release && ctest --test-dir build --verbose -C Release')
+  } else {
+    commandLine('bash', '-c', "cmake -B build -DDWLIB_PATH=${buildDir}/native/nativeCompile && cmake --build build && ctest --test-dir build --verbose")
+  }
+}
+
 tasks.named('test') {
   dependsOn tasks.named('pythonTest')
   dependsOn tasks.named('nodeTest')
+  dependsOn tasks.named('goTest')
+  dependsOn tasks.named('rustTest')
+  dependsOn tasks.named('cTest')
+}
+
+// --- Release artifact packaging tasks ---
+
+tasks.register('packageGo', Tar) {
+  dependsOn tasks.named('stripNativeLibrary')
+  from("${projectDir}/go") {
+    exclude('dataweave_test')
+    exclude('*.test')
+    exclude('.git*')
+  }
+  archiveBaseName = 'dw-go'
+  archiveVersion = project.findProperty('nativeBindingsVersion') ?: '1.0.0'
+  archiveExtension = 'tar.gz'
+  destinationDirectory = file("${buildDir}/packages")
+  compression = Compression.GZIP
+
+  doFirst {
+    file("${buildDir}/packages").mkdirs()
+  }
+}
+
+tasks.register('packageRust', Exec) {
+  dependsOn tasks.named('stripNativeLibrary')
+  workingDir("${projectDir}/rust")
+
+  doFirst {
+    file("${buildDir}/packages").mkdirs()
+  }
+
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    commandLine('cmd', '/c', 'cargo package --allow-dirty')
+  } else {
+    commandLine('bash', '-c', 'cargo package --allow-dirty')
+  }
+
+  doLast {
+    copy {
+      from("${projectDir}/rust/target/package")
+      into("${buildDir}/packages")
+      include('*.crate')
+    }
+  }
+}
+
+tasks.register('packageC', Tar) {
+  dependsOn tasks.named('stripNativeLibrary')
+
+  // Include the native library
+  from("${buildDir}/native/nativeCompile") {
+    include('dwlib.*')
+    into('lib')
+  }
+
+  // Include the C header
+  from("${projectDir}/c/include") {
+    include('dataweave.h')
+    into('include')
+  }
+
+  // Include README and docs
+  from("${projectDir}/c") {
+    include('README.md')
+  }
+
+  def version = project.findProperty('nativeBindingsVersion') ?: '1.0.0'
+  def osName = System.getProperty('os.name').toLowerCase().replace(' ', '-')
+  def osArch = System.getProperty('os.arch')
+
+  archiveBaseName = 'libdataweave'
+  archiveVersion = version
+  archiveClassifier = "${osName}-${osArch}"
+  archiveExtension = 'tar.gz'
+  destinationDirectory = file("${buildDir}/packages")
+  compression = Compression.GZIP
+
+  doFirst {
+    file("${buildDir}/packages").mkdirs()
+  }
+}
+
+tasks.register('packageAllBindings') {
+  dependsOn tasks.named('buildPythonWheel')
+  dependsOn tasks.named('buildNodePackage')
+  dependsOn tasks.named('packageGo')
+  dependsOn tasks.named('packageRust')
+  dependsOn tasks.named('packageC')
+
+  description = 'Package all language binding release artifacts'
+  group = 'distribution'
 }
 
 tasks.named('clean') {
@@ -212,4 +389,7 @@ tasks.named('clean') {
   delete("${projectDir}/node/build")
   delete("${projectDir}/node/native")
   delete("${projectDir}/node/node_modules")
+  delete("${projectDir}/go/dataweave_test")
+  delete("${projectDir}/rust/target")
+  delete("${projectDir}/c/build")
 }

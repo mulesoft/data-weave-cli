@@ -472,6 +472,7 @@ if not stream.metadata.success:
 
 ## See Also
 
-- [Node.js bindings](../node/README.md) - Node.js FFI bindings
+- [Go bindings](../go/README.md) - Go FFI bindings
+- [Rust bindings](../rust/README.md) - Rust FFI bindings
 - [Main README](../README.md) - Native library overview
 - [DataWeave Documentation](https://docs.mulesoft.com/dataweave/latest/) - Language reference

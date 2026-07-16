@@ -1,0 +1,69 @@
+DataWeave CLI and Native Library Bindings
+Copyright (c) 2024-2026 Salesforce, Inc.
+
+This product includes software developed by MuleSoft, a Salesforce company.
+
+===============================================================================
+
+This product includes or depends on the following third-party components:
+
+DataWeave Runtime
+Copyright (c) 2024 MuleSoft, LLC.
+Licensed under the MuleSoft Community License.
+
+GraalVM Native Image
+Copyright (c) 2013, 2024, Oracle and/or its affiliates.
+Licensed under the Universal Permissive License v1.0 (UPL).
+
+Scala Standard Library
+Copyright (c) 2002-2024 EPFL
+Copyright (c) 2011-2024 Lightbend, Inc.
+Licensed under the Apache License 2.0.
+
+org.json (JSON-java)
+Copyright (c) 2002 JSON.org
+Licensed under the JSON License.
+
+===============================================================================
+
+Language Binding Dependencies:
+
+Python Binding:
+- No external dependencies (uses Python standard library only)
+
+Node.js Binding:
+- Node-API (N-API) - Part of Node.js runtime
+  Copyright Node.js contributors
+  Licensed under the MIT License
+
+Go Binding:
+- Uses Go standard library and CGo
+  Copyright (c) 2009 The Go Authors
+  Licensed under the BSD 3-Clause License
+
+Rust Binding:
+- thiserror (v1.0)
+  Copyright (c) David Tolnay
+  Licensed under the MIT License or Apache License 2.0
+
+C Binding:
+- No external dependencies (pure C99)
+
+===============================================================================
+
+Build and Development Dependencies:
+
+Gradle Build System
+Copyright 2008-2024 the original author or authors.
+Licensed under the Apache License 2.0.
+
+JUnit 5
+Copyright 2015-2024 the original author or authors.
+Licensed under the Eclipse Public License v2.0.
+
+===============================================================================
+
+For complete license texts, see the LICENSE.txt file and individual
+dependency licenses in their respective directories.
+
+For security issues, please report to security@salesforce.com.
