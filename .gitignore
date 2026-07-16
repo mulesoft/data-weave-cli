@@ -35,3 +35,7 @@ native-lib/go/streaming_demo
 # Rust
 native-lib/rust/target/
 native-lib/rust/Cargo.lock
+
+# Python
+__pycache__/
+*.pyc
