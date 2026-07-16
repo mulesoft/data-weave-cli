@@ -45,12 +45,14 @@ jobs:
         run: |
           ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true build
         shell: bash
-      #Run regression tests
+      # Run regression tests (only on master branch to save CI time on PRs)
       - name: Run regression test 2.9.8
+        if: github.ref == 'refs/heads/master'
         run: |
           ./gradlew --stacktrace -PweaveTestSuiteVersion=2.9.8 -DweaveSuiteVersion=2.9.8 native-cli-integration-tests:test
         shell: bash
       - name: Run regression test 2.10
+        if: github.ref == 'refs/heads/master'
         run: |
           ./gradlew --stacktrace -PweaveTestSuiteVersion=2.10.0 -DweaveSuiteVersion=2.10.0 native-cli-integration-tests:test
         shell: bash
