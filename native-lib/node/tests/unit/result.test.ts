@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseNativeResponse, makeResult, parseStreamingResult } from "../../src/result";
+import { parseNativeResponse, makeResult, parseStreamingResult, decodeBytes } from "../../src/result";
 
 const b64 = (s: string, enc: BufferEncoding = "utf-8") =>
   Buffer.from(s, enc).toString("base64");
@@ -95,6 +95,61 @@ describe("makeResult", () => {
     expect(r.getString()).toBe(raw);
     // getBytes still decodes the base64 payload
     expect(r.getBytes()!.toString("utf-8")).toBe("anything");
+  });
+});
+
+describe("decodeBytes", () => {
+  it("defaults to UTF-8 when charset is null", () => {
+    expect(decodeBytes(Buffer.from("café", "utf-8"), null)).toBe("café");
+  });
+
+  it("decodes UTF-8 by name", () => {
+    expect(decodeBytes(Buffer.from("café", "utf-8"), "UTF-8")).toBe("café");
+  });
+
+  it("decodes little-endian UTF-16", () => {
+    const le = Buffer.from("café", "utf16le");
+    expect(decodeBytes(le, "UTF-16LE")).toBe("café");
+  });
+
+  it("decodes big-endian UTF-16 by label (byte-swapping)", () => {
+    const be = Buffer.from("café", "utf16le");
+    be.swap16();
+    expect(decodeBytes(be, "UTF-16BE")).toBe("café");
+  });
+
+  it("honors a big-endian BOM regardless of label", () => {
+    const body = Buffer.from("café", "utf16le");
+    body.swap16();
+    const beWithBom = Buffer.concat([Buffer.from([0xfe, 0xff]), body]);
+    expect(decodeBytes(beWithBom, "UTF-16")).toBe("café");
+  });
+
+  it("honors a little-endian BOM and strips it", () => {
+    const leWithBom = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("café", "utf16le")]);
+    expect(decodeBytes(leWithBom, "UTF-16")).toBe("café");
+  });
+
+  it("decodes ISO-8859-1 / latin1", () => {
+    const latin = Buffer.from("café", "latin1");
+    expect(decodeBytes(latin, "ISO-8859-1")).toBe("café");
+  });
+
+  it("decodes US-ASCII", () => {
+    expect(decodeBytes(Buffer.from("hello", "ascii"), "US-ASCII")).toBe("hello");
+  });
+
+  it("falls back to UTF-8 for an unrecognized charset instead of throwing", () => {
+    expect(() => decodeBytes(Buffer.from("hi", "utf-8"), "x-made-up-charset")).not.toThrow();
+    expect(decodeBytes(Buffer.from("hi", "utf-8"), "x-made-up-charset")).toBe("hi");
+  });
+
+  it("does not mutate the caller's buffer when byte-swapping", () => {
+    const be = Buffer.from("AB", "utf16le");
+    be.swap16();
+    const snapshot = Buffer.from(be);
+    decodeBytes(be, "UTF-16BE");
+    expect(be.equals(snapshot)).toBe(true);
   });
 });
 
