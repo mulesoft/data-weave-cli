@@ -10,6 +10,11 @@
     "build:ts": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:tck": "vitest run --project tck",
+    "test:coverage": "vitest run --coverage",
+    "test:coverage:unit": "vitest run --project unit --coverage",
     "pack": "npm pack"
   },
   "files": [
@@ -31,6 +36,7 @@
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^20",
+    "@vitest/coverage-v8": "^3.0",
     "node-gyp": "^10",
     "typescript": "^5.5",
     "vitest": "^3.0"

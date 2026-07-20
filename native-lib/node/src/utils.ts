@@ -2,14 +2,30 @@ import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { InputEntry, Inputs } from "./types";
 
+/** Environment variable holding an explicit absolute path to the `dwlib` shared library. */
 const ENV_NATIVE_LIB = "DATAWEAVE_NATIVE_LIB";
 
+/** Platform-specific shared-library extensions, in the order they are probed (macOS, Linux, Windows). */
 const LIB_EXTENSIONS = [".dylib", ".so", ".dll"];
 
+/** Returns the candidate `dwlib` file names for every supported platform (`dwlib.dylib`, `dwlib.so`, `dwlib.dll`). */
 function libNames(): string[] {
   return LIB_EXTENSIONS.map((ext) => `dwlib${ext}`);
 }
 
+/**
+ * Locates the DataWeave native shared library (`dwlib.*`) on disk.
+ *
+ * Resolution is attempted in priority order:
+ * 1. The {@link ENV_NATIVE_LIB} environment variable, if it points at an existing file.
+ * 2. The packaged location — `<pkg>/native/dwlib.*` relative to this module.
+ * 3. A dev-build fallback — walking up to 10 parent directories looking for
+ *    `build/native/nativeCompile/dwlib.*`.
+ * 4. The current working directory.
+ *
+ * @returns The absolute path to the located library.
+ * @throws Error if no library can be found in any of the above locations.
+ */
 export function findLibrary(): string {
   const envValue = (process.env[ENV_NATIVE_LIB] ?? "").trim();
   if (envValue && existsSync(envValue)) {
@@ -51,6 +67,25 @@ export function findLibrary(): string {
   );
 }
 
+/**
+ * Normalizes a single input value into the base64-encoded envelope the native
+ * layer expects: `{ content, mimeType, charset, properties? }`.
+ *
+ * The shape is inferred from the value:
+ * - `null` / `undefined` → the JSON literal `null` as `application/json`.
+ * - An explicit {@link InputValue} object (has both `content` and `mimeType`) →
+ *   its content is base64-encoded (Buffers directly, strings via `charset`),
+ *   preserving any `charset` and `properties`.
+ * - A string → `text/plain`.
+ * - A number, boolean, or any other object/array → JSON-serialized as
+ *   `application/json`, falling back to `String(value)` / `text/plain` if it
+ *   cannot be serialized.
+ *
+ * @param value - The raw input entry to normalize.
+ * @param mimeType - Optional MIME type override; when omitted a type is inferred
+ *   from the value.
+ * @returns The native-ready envelope with base64-encoded `content`.
+ */
 export function normalizeInputValue(value: InputEntry, mimeType?: string): Record<string, unknown> {
   if (value === null || value === undefined) {
     const content = Buffer.from("null", "utf-8").toString("base64");
@@ -102,6 +137,13 @@ export function normalizeInputValue(value: InputEntry, mimeType?: string): Recor
   return { content: encodedContent, mimeType: mimeType ?? defaultMime, charset };
 }
 
+/**
+ * Normalizes every entry in an {@link Inputs} map via {@link normalizeInputValue}
+ * and serializes the result to the JSON string passed to the native FFI calls.
+ *
+ * @param inputs - The named inputs to make available to the script (e.g. `payload`).
+ * @returns A JSON string mapping each input name to its base64-encoded envelope.
+ */
 export function buildInputsJson(inputs: Inputs): string {
   const normalized: Record<string, unknown> = {};
   for (const [key, val] of Object.entries(inputs)) {

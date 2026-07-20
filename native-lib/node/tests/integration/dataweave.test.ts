@@ -1,7 +1,7 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { DataWeave, run, runStreaming, runTransform, cleanup } from "../src/index";
+import { DataWeave, run, runStreaming, runTransform, cleanup } from "../../src/index";
 
 afterAll(() => {
   cleanup();
@@ -35,7 +35,7 @@ describe("DataWeave Node.js API", () => {
     });
 
     it("encoding: UTF-16 XML to CSV", () => {
-      const xmlPath = join(__dirname, "fixtures", "person.xml");
+      const xmlPath = join(__dirname, "..", "fixtures", "person.xml");
       const xmlBytes = readFileSync(xmlPath);
 
       const script = `output application/csv header=true
@@ -194,7 +194,7 @@ describe("DataWeave Node.js API", () => {
     });
 
     it("file-based streaming input", async () => {
-      const xmlPath = join(__dirname, "fixtures", "person.xml");
+      const xmlPath = join(__dirname, "..", "fixtures", "person.xml");
       const xmlData = readFileSync(xmlPath);
 
       function* chunked(data: Buffer, size = 4096): Generator<Buffer> {

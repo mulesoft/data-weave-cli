@@ -67,7 +67,7 @@ graalvmNative {
 tasks.named('nativeCompile').configure {
   doLast {
     if (!System.getProperty('os.name').toLowerCase().contains('windows')) {
-      def nativeDir = file("${buildDir}/native/nativeCompile")
+      def nativeDir = file("${getLayout().getBuildDirectory()}/native/nativeCompile")
       def dwlibFile = fileTree(nativeDir).matching { include 'dwlib.so', 'dwlib.dylib' }.singleFile
       if (dwlibFile?.exists()) {
         def ext = dwlibFile.name.endsWith('.dylib') ? '.dylib' : '.so'
@@ -89,7 +89,7 @@ tasks.register('stripNativeLibrary', Exec) {
     project.findProperty('skipStripDebug')?.toString()?.toBoolean() != true
   }
 
-  def nativeDir = file("${buildDir}/native/nativeCompile")
+  def nativeDir = file("${getLayout().getBuildDirectory()}/native/nativeCompile")
 
   if (System.getProperty('os.name').toLowerCase().contains('windows')) {
     // Windows: Use strip from mingw-w64 or MSYS2 if available
@@ -117,7 +117,7 @@ def pythonExe = (project.findProperty('pythonExe') ?: 'python3') as String
 
 tasks.register('stagePythonNativeLib', Copy) {
   dependsOn tasks.named('stripNativeLibrary')
-  from("${buildDir}/native/nativeCompile") {
+  from("${getLayout().getBuildDirectory()}/native/nativeCompile") {
     include('dwlib.*')
   }
   into("${projectDir}/python/src/dataweave/native")
@@ -158,7 +158,7 @@ tasks.register('pythonTest', Exec) {
 
 tasks.register('stageNodeNativeLib', Copy) {
   dependsOn tasks.named('stripNativeLibrary')
-  from("${buildDir}/native/nativeCompile") {
+  from("${getLayout().getBuildDirectory()}/native/nativeCompile") {
     include('dwlib.*')
   }
   into("${projectDir}/node/native")
