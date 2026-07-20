@@ -1,5 +1,6 @@
 import * as ffi from "./ffi";
 import { findLibrary, buildInputsJson } from "./utils";
+import { parseNativeResponse, parseStreamingResult } from "./result";
 import type {
   ExecutionResult,
   StreamingResult,
@@ -30,82 +31,6 @@ export class DataWeaveScriptError extends DataWeaveError {
     this.name = "DataWeaveScriptError";
     this.result = result;
   }
-}
-
-function parseNativeResponse(raw: string): ExecutionResult {
-  if (!raw) {
-    return makeResult(false, null, "Native returned empty response", false, null, null);
-  }
-
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    return makeResult(false, null, `Failed to parse native JSON response: ${e}`, false, null, null);
-  }
-
-  const success = Boolean(parsed.success);
-  if (!success) {
-    return makeResult(false, null, (parsed.error as string) ?? null, false, null, null);
-  }
-
-  return makeResult(
-    true,
-    (parsed.result as string) ?? null,
-    null,
-    Boolean(parsed.binary),
-    (parsed.mimeType as string) ?? null,
-    (parsed.charset as string) ?? null
-  );
-}
-
-function makeResult(
-  success: boolean,
-  result: string | null,
-  error: string | null,
-  binary: boolean,
-  mimeType: string | null,
-  charset: string | null
-): ExecutionResult {
-  return {
-    success,
-    result,
-    error,
-    binary,
-    mimeType,
-    charset,
-    getBytes() {
-      if (!this.success || this.result === null) return null;
-      return Buffer.from(this.result, "base64");
-    },
-    getString() {
-      if (!this.success || this.result === null) return null;
-      if (this.binary) return this.result;
-      const bytes = Buffer.from(this.result, "base64");
-      return bytes.toString((this.charset as BufferEncoding) ?? "utf-8");
-    },
-  };
-}
-
-function parseStreamingResult(raw: string): StreamingResult {
-  let meta: Record<string, unknown>;
-  try {
-    meta = raw ? JSON.parse(raw) : { success: false, error: "Empty response" };
-  } catch {
-    return { success: false, error: "Failed to parse metadata", mimeType: null, charset: null, binary: false };
-  }
-
-  const success = Boolean(meta.success);
-  if (!success) {
-    return { success: false, error: (meta.error as string) ?? null, mimeType: null, charset: null, binary: false };
-  }
-  return {
-    success: true,
-    error: null,
-    mimeType: (meta.mimeType as string) ?? null,
-    charset: (meta.charset as string) ?? null,
-    binary: Boolean(meta.binary),
-  };
 }
 
 export class DataWeave {
