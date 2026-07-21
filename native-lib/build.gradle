@@ -164,6 +164,42 @@ tasks.register('stageNodeNativeLib', Copy) {
   into("${projectDir}/node/native")
 }
 
+// --- Node.js TCK conformance suite staging ---
+// Downloads the same DataWeave test-suite zips the CLI regression uses and
+// unzips each into node/tests/tck/suites/<suite>/ for the Node `tck` vitest
+// lane. Not wired into `nodeTest` (which runs on PRs) — invoked on demand and
+// by the master-only TCK CI step, mirroring native-cli-integration-tests.
+configurations {
+  weaveTckSuite
+}
+
+dependencies {
+  weaveTckSuite "org.mule.weave:runtime:${weaveTestSuiteVersion}:test@zip"
+  weaveTckSuite "org.mule.weave:core-modules:${weaveTestSuiteVersion}:test@zip"
+}
+
+def tckSuitesDir = "${projectDir}/node/tests/tck/suites"
+
+tasks.register('cleanTckSuites', Delete) {
+  delete tckSuitesDir
+}
+
+tasks.register('stageTckSuites') {
+  dependsOn 'cleanTckSuites'
+  // Map each resolved artifact to a suite name (runtime, core-modules) taken
+  // from the artifact file name, and unzip into suites/<name>/.
+  doLast {
+    configurations.weaveTckSuite.resolvedConfiguration.resolvedArtifacts.each { artifact ->
+      def suiteName = artifact.name // e.g. "runtime", "core-modules"
+      copy {
+        from zipTree(artifact.file)
+        into "${tckSuitesDir}/${suiteName}"
+      }
+      println("Staged TCK suite '${suiteName}' -> ${tckSuitesDir}/${suiteName}")
+    }
+  }
+}
+
 tasks.register('buildNodePackage', Exec) {
   dependsOn tasks.named('stageNodeNativeLib')
   workingDir("${projectDir}/node")

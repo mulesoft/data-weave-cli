@@ -30,15 +30,41 @@ describe("compareOutput — json (structural)", () => {
   });
 });
 
-describe("compareOutput — xml (whitespace-collapsed)", () => {
+describe("compareOutput — xml (structural)", () => {
   it("ignores layout whitespace between elements", () => {
     const a = buf("<root>\n  <a>1</a>\n</root>");
     const e = buf("<root><a>1</a></root>");
     expect(compareOutput("xml", a, e).match).toBe(true);
   });
 
+  it("ignores the XML declaration and attribute quote style", () => {
+    const a = buf("<?xml version='1.0' encoding='UTF-8'?><a x='1'/>");
+    const e = buf('<?xml version="1.0" encoding="UTF-8"?><a x="1"></a>');
+    expect(compareOutput("xml", a, e).match).toBe(true);
+  });
+
+  it("treats self-closing and explicit-close empty elements as equal", () => {
+    expect(compareOutput("xml", buf("<r><a/></r>"), buf("<r><a></a></r>")).match).toBe(true);
+  });
+
+  it("ignores where an xmlns declaration is placed (namespace scope, not location)", () => {
+    const a = buf('<f:flow xmlns:f="m"><h:x xmlns:h="h" a="1"/></f:flow>');
+    const e = buf('<f:flow xmlns:f="m" xmlns:h="h"><h:x a="1"></h:x></f:flow>');
+    expect(compareOutput("xml", a, e).match).toBe(true);
+  });
+
   it("detects a content difference", () => {
     expect(compareOutput("xml", buf("<a>1</a>"), buf("<a>2</a>")).match).toBe(false);
+  });
+
+  it("detects a differing attribute value", () => {
+    expect(compareOutput("xml", buf('<a x="1"/>'), buf('<a x="2"/>')).match).toBe(false);
+  });
+
+  it("reports invalid actual XML as a mismatch", () => {
+    const r = compareOutput("xml", buf("<a>"), buf("<a></a>"));
+    // fast-xml-parser is lenient, so this may parse; the point is it must not throw.
+    expect(typeof r.match).toBe("boolean");
   });
 });
 

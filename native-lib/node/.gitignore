@@ -3,4 +3,5 @@ dist/
 build/
 native/
 coverage/
+tests/tck/suites/
 *.tgz
