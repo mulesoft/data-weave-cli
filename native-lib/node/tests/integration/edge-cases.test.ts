@@ -108,9 +108,8 @@ describe("multi-instance lifecycle", () => {
   // runtime is loaded process-globally (ref-counted, see g_ref_count in
   // addon.c), so once any good init has run, a later bad-path init is tolerated
   // rather than re-dlopen'd. Because this shared suite loads dwlib in earlier
-  // tests, that path can't be asserted here without a dedicated isolated process
-  // (a follow-up: run it via a separate vitest pool/child so no prior init has
-  // happened). Verified manually: in a fresh process it throws DataWeaveError.
+  // tests, that path can't be asserted here; it is covered in a dedicated child
+  // process in init-bad-path.test.ts.
 });
 
 describe("concurrent execution", () => {
