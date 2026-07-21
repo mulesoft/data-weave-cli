@@ -1,5 +1,74 @@
 import type { ExecutionResult, StreamingResult } from "./types";
 
+/** Normalizes a charset name for comparison: lowercased, non-alphanumerics stripped. */
+function normalizeCharset(charset: string): string {
+  return charset.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * Decodes payload bytes to a string using a DataWeave/IANA charset name.
+ *
+ * The native runtime reports charsets using IANA-style names (e.g. `UTF-16`,
+ * `US-ASCII`, `ISO-8859-1`) that Node's `Buffer.toString` does not accept —
+ * passing them through directly throws `ERR_UNKNOWN_ENCODING`. This maps the
+ * common cases to a valid Node {@link BufferEncoding} and handles UTF-16
+ * byte-order (Node only decodes little-endian): a leading BOM, or a `UTF-16BE`
+ * label, is honored by stripping the BOM and byte-swapping big-endian input.
+ * Unrecognized charsets fall back to UTF-8 so decoding degrades gracefully
+ * instead of throwing.
+ *
+ * @param bytes - The decoded payload bytes.
+ * @param charset - The charset name reported by the runtime, or `null`.
+ * @returns The decoded string.
+ */
+export function decodeBytes(bytes: Buffer, charset: string | null): string {
+  if (!charset) return bytes.toString("utf-8");
+
+  switch (normalizeCharset(charset)) {
+    case "utf16":
+    case "utf16le":
+    case "utf16be":
+    case "ucs2":
+    case "unicode":
+      return decodeUtf16(bytes, normalizeCharset(charset) === "utf16be");
+    case "usascii":
+    case "ascii":
+      return bytes.toString("ascii");
+    case "latin1":
+    case "iso88591":
+    case "cp1252":
+    case "windows1252":
+      return bytes.toString("latin1");
+    case "base64":
+      return bytes.toString("base64");
+    case "hex":
+      return bytes.toString("hex");
+    case "utf8":
+    default:
+      return bytes.toString("utf-8");
+  }
+}
+
+/**
+ * Decodes UTF-16 bytes to a string, honoring a BOM if present (which overrides
+ * `labelIsBE`) and byte-swapping big-endian input, since Node only has a
+ * little-endian UTF-16 decoder.
+ */
+function decodeUtf16(bytes: Buffer, labelIsBE: boolean): string {
+  let big = labelIsBE;
+  let start = 0;
+  if (bytes.length >= 2) {
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) { big = true; start = 2; }       // BE BOM
+    else if (bytes[0] === 0xff && bytes[1] === 0xfe) { big = false; start = 2; } // LE BOM
+  }
+  let body = bytes.subarray(start);
+  if (big) {
+    body = Buffer.from(body); // copy so swap16 doesn't mutate the caller's bytes
+    if (body.length % 2 === 0) body.swap16();
+  }
+  return body.toString("utf16le");
+}
+
 /**
  * Parses the JSON envelope returned by the native `run_script` FFI call into an
  * {@link ExecutionResult}.
@@ -82,7 +151,7 @@ export function makeResult(
       if (!this.success || this.result === null) return null;
       if (this.binary) return this.result;
       const bytes = Buffer.from(this.result, "base64");
-      return bytes.toString((this.charset as BufferEncoding) ?? "utf-8");
+      return decodeBytes(bytes, this.charset);
     },
   };
 }
