@@ -11,20 +11,17 @@
 //                       (org::mule::weave::v2::libs::*, dw::Client, imports,
 //                       readUrl/classpath resources).
 //   java              — uses the Java module / java:: types (application/java).
-//   do-block          — the transform's output directive lives inside a `do {}`
-//                       block; our text-level normalizer can't rewrite it (the
-//                       CLI uses a full AST rewriter). See transform.ts.
-//   output-directive-mismatch — the transform pins its own output format (e.g.
-//                       application/dw or application/json) that differs from
-//                       the expected file's extension. The CLI replaces the
-//                       directive via its AST rewriter; our normalizer only
-//                       appends when absent, so it cannot override these.
+//   dw::Runtime       — needs dw::Runtime run/orElseTry behavior not in dwlib.
 //   dwl-output-format — application/dw output formatting (quoting, @(…) metadata)
 //                       differs from the expected DWL fixture.
 //   multipart         — multipart writing edge cases (empty parts, binary parts)
 //                       not supported / not comparable here.
 //   nondeterministic  — output embeds a timestamp or otherwise varies per run.
 //   coercion/runtime  — runtime coercion/streaming behavior, also CLI-ignored.
+//
+// (do-block and output-format-mismatch cases are no longer skipped — see
+// transform.ts: the normalizer splits on a column-0 `---` and replaces a
+// conflicting output mime, recovering them.)
 
 export interface IgnoreEntry {
   reason: string;
@@ -65,33 +62,29 @@ export const IGNORED_CASES: Readonly<Record<string, IgnoreEntry>> = {
   "java-field-ref": { reason: "java: java module" },
   "java-interop-enum": { reason: "java: java module" },
   "java-interop-function-call": { reason: "java: java module" },
-  "groupby-complex": { reason: "java: application/java content type" },
   "write-function-with-null": { reason: "java: java module" },
   "runtime_run_null_java": { reason: "java: java module" },
 
-  // do-block cases previously skipped here now run: ensureOutputDirective
-  // splits on a column-0 `---`, so it no longer mis-detects the indented `---`
-  // inside a do {} block. Remaining try-handle-*/private_scope_directives cases
-  // fail for a different reason (unresolved module) and are grouped above.
+  // Previously-skipped cases that now run after ensureOutputDirective was
+  // strengthened: splitting on a column-0 `---` recovered the do-block cases
+  // (do-1, do-block, csv-streaming, range-selector, …), and replacing a
+  // conflicting output mime recovered format-mismatch cases (recursive_mapObject,
+  // xml-root-with-text, groupby-complex's application/java, tree-filter*,
+  // bad-inline, string_interpolation_selection, overload-functions,
+  // dynamic_attribute_name). Remaining try-handle-*/private_scope_directives
+  // fail on unresolved-module and are grouped above.
 
-  // output-directive-mismatch — transform pins a format ≠ expected extension
-  "recursive_mapObject": { reason: "output-directive-mismatch: transform outputs json, expected xml" },
-  "xml-root-with-text": { reason: "output-directive-mismatch: transform pins a differing output" },
-  "runtime_orElseTry": { reason: "output-directive-mismatch: transform pins a differing output" },
-  "runtime_run": { reason: "output-directive-mismatch: transform pins a differing output" },
-  "runtime_run_coercionException": { reason: "output-directive-mismatch: transform pins a differing output" },
-  "runtime_run_fibo": { reason: "output-directive-mismatch: transform pins a differing output" },
-  "try-recursive-call": { reason: "output-directive-mismatch: transform pins a differing output" },
-  "runtime_dataFormatsDescriptors": { reason: "output-directive-mismatch: internal data-format descriptors" },
+  // dw::Runtime module cases — the run/orElseTry/dataFormatsDescriptors behavior
+  // isn't available in this dwlib (not a directive issue).
+  "runtime_orElseTry": { reason: "dw::Runtime: run/orElseTry behavior not in dwlib" },
+  "runtime_run": { reason: "dw::Runtime: run behavior not in dwlib" },
+  "runtime_run_coercionException": { reason: "dw::Runtime: run behavior not in dwlib" },
+  "runtime_run_fibo": { reason: "dw::Runtime: run behavior not in dwlib" },
+  "try-recursive-call": { reason: "dw::Runtime: run behavior not in dwlib" },
+  "runtime_dataFormatsDescriptors": { reason: "dw::Runtime: internal data-format descriptors" },
 
   // dwl-output-format — application/dw formatting differs from expected DWL
-  "tree-filterArrayLeafs": { reason: "dwl-output-format: @(…) metadata / quoting differs" },
-  "tree-filterObjectLeafs": { reason: "dwl-output-format: @(…) metadata / quoting differs" },
-  "tree-filterTree": { reason: "dwl-output-format: @(…) metadata / quoting differs" },
-  "bad-inline": { reason: "dwl-output-format: application/dw formatting differs" },
-  "string_interpolation_selection": { reason: "dwl-output-format: unquoted keys in application/dw output" },
   "coerciones_toString": { reason: "dwl-output-format: application/dw formatting differs" },
-  "overload-functions": { reason: "dwl-output-format: application/dw formatting differs" },
 
   // multipart — multipart writing edge cases
   "multipart-binary": { reason: "multipart: binary part comparison unsupported" },
@@ -116,7 +109,6 @@ export const IGNORED_CASES: Readonly<Record<string, IgnoreEntry>> = {
   "xml-value-selector": { reason: "xml: namespace scoping in fixture" },
   "xml-streaming-selectors": { reason: "xml: streaming selector serialization" },
   "xml_empty_namespace": { reason: "xml: empty namespace serialization" },
-  "dynamic_attribute_name": { reason: "xml: dynamic attribute serialization" },
 };
 
 /** Whether a case is on the ignore list. */

@@ -8,8 +8,30 @@ describe("ensureOutputDirective", () => {
     expect(out).toBe("type IName = String\noutput application/json\n---\n{ a: 1 }");
   });
 
-  it("leaves a transform with an existing output directive unchanged", () => {
-    const src = "%dw 2.0\noutput application/xml\n---\npayload";
+  it("leaves an existing directive unchanged when it already targets the format", () => {
+    const src = "%dw 2.0\noutput application/json\n---\npayload";
+    expect(ensureOutputDirective(src, "application/json")).toBe(src);
+  });
+
+  it("replaces the mime token when the pinned format differs from the target", () => {
+    const src = "%dw 2.0\noutput application/json\n---\npayload";
+    expect(ensureOutputDirective(src, "application/xml")).toBe("%dw 2.0\noutput application/xml\n---\npayload");
+  });
+
+  it("preserves trailing directive options when replacing the mime", () => {
+    const src = '%dw 2.0\noutput application/json encoding="UTF-16"\n---\npayload';
+    expect(ensureOutputDirective(src, "text/plain")).toBe('%dw 2.0\noutput text/plain encoding="UTF-16"\n---\npayload');
+  });
+
+  it("does not clobber a multipart subtype directive", () => {
+    // A pinned multipart/mixed (with its boundary option) must survive even
+    // though the expected extension maps to multipart/form-data.
+    const src = '%dw 2.0\noutput multipart/mixed boundary="abc"\n---\npayload';
+    expect(ensureOutputDirective(src, "multipart/form-data")).toBe(src);
+  });
+
+  it("does not touch a non-mime output selector (output :Type json)", () => {
+    const src = "%dw 2.0\noutput :Test.number json\n---\npayload";
     expect(ensureOutputDirective(src, "application/json")).toBe(src);
   });
 

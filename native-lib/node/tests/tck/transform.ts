@@ -4,28 +4,28 @@
 // the output directive to the format implied by the expected file's extension.
 // We can't run that AST rewriter from Node, so we do a deliberately small
 // text-level normalization that covers the common cases and lean on the ignore
-// list for the rest (e.g. `do`-block headers, which a regex can't safely
-// rewrite). Empirically this runs ~91% of supported runtime cases.
+// list for the rest.
 //
 // Rule: split on the document body separator — a `---` at column 0 — into
-// header + body. If the header has no `output` directive, append one for the
-// target MIME. Matching only column-0 `---` avoids mis-splitting on the
-// indented `---` that appears inside a `do { … }` block (whose document
-// separator, if any, is still at column 0). Transforms that pin a *conflicting*
-// output format are a separate case handled via the ignore list, not here,
-// since replacing a directive needs the AST rewrite the CLI uses.
+// header + body (matching only column-0 avoids mis-splitting on the indented
+// `---` inside a `do { … }` block), then:
+//   - no header `output` directive → append `output <mime>`;
+//   - header pins a plain `mime/type` of a DIFFERENT family than the target →
+//     replace just the mime token (keeping trailing options), matching what the
+//     CLI's AST rewriter does for the expected extension;
+//   - otherwise leave the directive alone. "Otherwise" deliberately covers
+//     same-family directives, `multipart/*` subtypes (so a pinned
+//     `multipart/mixed` with its `boundary=` option isn't clobbered), and
+//     non-mime output selectors like `output :Type json`.
+
+import { familyForMime } from "./formats";
 
 /**
- * Ensures the transform declares an `output` directive for `mime`.
- *
- * If the header (everything before the first column-0 `---`) already has an
- * `output` line, the script is returned unchanged. Otherwise `output <mime>` is
- * appended to the header. A transform with no column-0 `---` is treated as a
- * bare body and given a fresh `output <mime>\n---\n` header.
+ * Ensures the transform's `output` directive targets `mime`.
  *
  * @param src - The raw transform.dwl contents.
  * @param mime - The MIME type implied by the expected output file's extension.
- * @returns The transform with a guaranteed output directive.
+ * @returns The transform with an output directive for the target format.
  */
 export function ensureOutputDirective(src: string, mime: string): string {
   const lines = src.split(/\r?\n/);
@@ -41,9 +41,19 @@ export function ensureOutputDirective(src: string, mime: string): string {
   const header = lines.slice(0, sep);
   const body = lines.slice(sep + 1);
 
-  if (header.some((l) => /^\s*output\s+/.test(l))) {
-    return src; // already has an output directive
+  const outputIdx = header.findIndex((l) => /^\s*output\s+/.test(l));
+  if (outputIdx < 0) {
+    return [...header, `output ${mime}`].join("\n") + "\n---\n" + body.join("\n");
   }
 
-  return [...header, `output ${mime}`].join("\n") + "\n---\n" + body.join("\n");
+  // Replace the mime token only when it is a plain `mime/type` of a different
+  // family than the target. Leave `:Type` selectors and same-/multipart-family
+  // directives untouched to avoid corrupting a directive that was correct.
+  const token = header[outputIdx].match(/^\s*output\s+(\S+)/)?.[1] ?? "";
+  const targetFamily = familyForMime(mime);
+  if (token.includes("/") && familyForMime(token) !== targetFamily && familyForMime(token) !== "multipart") {
+    header[outputIdx] = header[outputIdx].replace(/^(\s*output\s+)\S+/, `$1${mime}`);
+  }
+
+  return header.join("\n") + "\n---\n" + body.join("\n");
 }
