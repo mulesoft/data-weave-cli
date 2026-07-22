@@ -50,6 +50,15 @@ export const IGNORED_CASES: Readonly<Record<string, IgnoreEntry>> = {
   urlEncodeDecode: { reason: "unresolved-module: resource not in dwlib" },
   "try-handle-attribute-delegate-with-failures": { reason: "unresolved-module: resource not in dwlib" },
   "try-handle-materialized-object-with-failures": { reason: "unresolved-module: resource not in dwlib" },
+  "private_scope_directives": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-array-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-attributes-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-binary-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-delegate-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-key-value-pair-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-name-value-pair-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-schema-property-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-schema-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
 
   // java — Java module / java:: interop
   "java-big-decimal": { reason: "java: java::lang interop" },
@@ -60,26 +69,10 @@ export const IGNORED_CASES: Readonly<Record<string, IgnoreEntry>> = {
   "write-function-with-null": { reason: "java: java module" },
   "runtime_run_null_java": { reason: "java: java module" },
 
-  // do-block — output directive inside a do {} block; not text-rewritable
-  "do-1": { reason: "do-block: output directive inside do {}" },
-  "do-block": { reason: "do-block: output directive inside do {}" },
-  "do-block-private-scope": { reason: "do-block: output directive inside do {}" },
-  "do-overload": { reason: "do-block: output directive inside do {}" },
-  "do-repeated-variable": { reason: "do-block: output directive inside do {}" },
-  "csv-streaming": { reason: "do-block: output directive inside do {}" },
-  "function-call-index-out-of-bounds": { reason: "do-block: output directive inside do {}" },
-  "overloaded_function_materialized": { reason: "do-block: output directive inside do {}" },
-  "private_scope_directives": { reason: "do-block: output directive inside do {}" },
-  "range-selector": { reason: "do-block: output directive inside do {}" },
-  "update_recurisive": { reason: "do-block: output directive inside do {}" },
-  "try-handle-array-value-with-failures": { reason: "do-block: output directive inside do {}" },
-  "try-handle-attributes-value-with-failures": { reason: "do-block: output directive inside do {}" },
-  "try-handle-binary-value-with-failures": { reason: "do-block: output directive inside do {}" },
-  "try-handle-delegate-value-with-failures": { reason: "do-block: output directive inside do {}" },
-  "try-handle-key-value-pair-value-with-failures": { reason: "do-block: output directive inside do {}" },
-  "try-handle-name-value-pair-value-with-failures": { reason: "do-block: output directive inside do {}" },
-  "try-handle-schema-property-value-with-failures": { reason: "do-block: output directive inside do {}" },
-  "try-handle-schema-value-with-failures": { reason: "do-block: output directive inside do {}" },
+  // do-block cases previously skipped here now run: ensureOutputDirective
+  // splits on a column-0 `---`, so it no longer mis-detects the indented `---`
+  // inside a do {} block. Remaining try-handle-*/private_scope_directives cases
+  // fail for a different reason (unresolved module) and are grouped above.
 
   // output-directive-mismatch — transform pins a format ≠ expected extension
   "recursive_mapObject": { reason: "output-directive-mismatch: transform outputs json, expected xml" },

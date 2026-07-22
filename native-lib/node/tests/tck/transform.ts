@@ -7,18 +7,21 @@
 // list for the rest (e.g. `do`-block headers, which a regex can't safely
 // rewrite). Empirically this runs ~91% of supported runtime cases.
 //
-// Rule: split on the first top-level `---` separator into header + body. If the
-// header has no `output` directive, append one for the target MIME. Transforms
-// whose only `---` lives inside a `do { … }` block are mis-split by this and
-// are handled via the ignore list, not here.
+// Rule: split on the document body separator — a `---` at column 0 — into
+// header + body. If the header has no `output` directive, append one for the
+// target MIME. Matching only column-0 `---` avoids mis-splitting on the
+// indented `---` that appears inside a `do { … }` block (whose document
+// separator, if any, is still at column 0). Transforms that pin a *conflicting*
+// output format are a separate case handled via the ignore list, not here,
+// since replacing a directive needs the AST rewrite the CLI uses.
 
 /**
  * Ensures the transform declares an `output` directive for `mime`.
  *
- * If the header (everything before the first `---`) already has an `output`
- * line, the script is returned unchanged. Otherwise `output <mime>` is appended
- * to the header. A transform with no `---` at all is treated as a bare body and
- * given a fresh `output <mime>\n---\n` header.
+ * If the header (everything before the first column-0 `---`) already has an
+ * `output` line, the script is returned unchanged. Otherwise `output <mime>` is
+ * appended to the header. A transform with no column-0 `---` is treated as a
+ * bare body and given a fresh `output <mime>\n---\n` header.
  *
  * @param src - The raw transform.dwl contents.
  * @param mime - The MIME type implied by the expected output file's extension.
@@ -26,10 +29,12 @@
  */
 export function ensureOutputDirective(src: string, mime: string): string {
   const lines = src.split(/\r?\n/);
-  const sep = lines.findIndex((l) => l.trim() === "---");
+  // The document body separator is a `---` at column 0. An indented `---`
+  // belongs to a do-block and must not be treated as the header/body split.
+  const sep = lines.findIndex((l) => /^---\s*$/.test(l));
 
   if (sep < 0) {
-    // No separator: the whole file is a body. Give it a header.
+    // No document separator: the whole file is a body. Give it a header.
     return `output ${mime}\n---\n${src}`;
   }
 

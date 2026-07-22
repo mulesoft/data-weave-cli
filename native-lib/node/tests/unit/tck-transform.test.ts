@@ -31,4 +31,19 @@ describe("ensureOutputDirective", () => {
     const src = "%dw 2.0\n---\n1";
     expect(ensureOutputDirective(src, "application/json")).toBe("%dw 2.0\noutput application/json\n---\n1");
   });
+
+  it("splits on the column-0 separator, not an indented do-block separator", () => {
+    // The do-block's indented `---` must not be mistaken for the header/body
+    // split; the output directive belongs before the column-0 `---`.
+    const src = ["var v = do {", "  var a = 1", "  ---", "  a + 1", "}", "---", "v"].join("\n");
+    const out = ensureOutputDirective(src, "application/json");
+    expect(out).toBe(["var v = do {", "  var a = 1", "  ---", "  a + 1", "}", "output application/json", "---", "v"].join("\n"));
+  });
+
+  it("treats a transform whose only separator is inside a do-block as a bare body", () => {
+    // No column-0 `---` → the whole thing is a body and gets a fresh header.
+    const src = ["fun f() = do {", "  var a = 1", "  ---", "  a", "}"].join("\n");
+    const out = ensureOutputDirective(src, "application/json");
+    expect(out).toBe(`output application/json\n---\n${src}`);
+  });
 });
