@@ -11,9 +11,11 @@ Benchmark the DataWeave native-lib wrappers to serve, from one harness:
 - **CI regression gating** — repeatable numbers, comparable across runs.
 - **Local perf characterization** — where time goes (wrapper overhead vs. native runtime).
 - **Wrapper-overhead / cross-binding comparison** — Node vs. Python later.
-- **Native-wrapper vs. current engine tradeoff** — the headline goal: compare the native-image wrappers against the Scala DataWeave engine (`DataWeaveScriptingEngine`, repo at `~/Documents/mule-emu/data-weave`).
+- **Native-wrapper vs. current engine tradeoff** — the headline goal: compare the native-image wrappers against the Scala DataWeave engine (`DataWeaveScriptingEngine`).
 
-Because the engine is a separate repo at a different version (`2.13.0-SNAPSHOT` vs. the wrappers' pinned `2.12.0-20260413`), the comparison is decoupled: every surface runs the **same shared corpus** and emits the **same JSON schema**; a report script joins the results and flags version skew rather than hiding it.
+The comparison is decoupled by construction: every surface runs the **same shared corpus** and emits the **same JSON schema**, and a report script joins the results.
+
+> **Correction (post-spec):** an earlier draft assumed the engine harness had to live in a separate `data-weave` repo at a different version (`2.13.0-SNAPSHOT`), forcing a permanent version-skew caveat. This is wrong. **This repo already depends on the engine runtime as a Maven artifact** — `native-lib/build.gradle` and `native-cli/build.gradle` both declare `api org.mule.weave:runtime:${weaveVersion}`, so `DataWeaveScriptingEngine` is on the JVM classpath here. The engine runner can therefore live in **this** repo and, crucially, run the **same `weaveVersion` (`2.12.0-20260413`) that the native image is compiled from** — eliminating the skew and isolating purely the native-image-vs-JVM axis. The skew banner (below) remains as a safety net for an accidental mismatch, not a standing condition. See "Engine runner" under the layout and the out-of-scope note.
 
 ## Metrics (all four)
 
@@ -41,15 +43,15 @@ benchmarks/
       coldstart.ts         # spawn harness: cold-start / init
       emit.ts              # collect both -> schema-conformant JSON, validate ids, stamp env
     python/                # FOLLOW-UP: same corpus + schema, pytest-benchmark/custom timer + spawn harness
-    engine/                # FOLLOW-UP: README/pointer only; actual -Ddw.perf harness lives in the data-weave repo,
-                           #            reads THIS corpus via env-var path, emits THIS schema
+    engine/                # FOLLOW-UP: JVM harness IN THIS REPO — depends on org.mule.weave:runtime (already a
+                           #            build dep), drives DataWeaveScriptingEngine over THIS corpus, emits THIS schema
   report/
     report.mjs             # ingest N result JSONs -> markdown/console comparison table
   results/                 # gitignored; per-runner per-run JSON output
   README.md
 ```
 
-`benchmarks/runners/` is the extension point: one subdirectory per surface, each a self-contained consumer of the shared corpus + schema. Adding Python later means dropping in `runners/python/`, consuming the corpus unchanged, emitting schema-conformant JSON — no changes to Node, corpus, schema, or report. The engine surface must live in the `data-weave` repo (it depends on `DataWeaveScriptingEngine`); `runners/engine/` here is only a pointer, but it reads this repo's corpus so all surfaces run identical cases.
+`benchmarks/runners/` is the extension point: one subdirectory per surface, each a self-contained consumer of the shared corpus + schema. Adding Python later means dropping in `runners/python/`, consuming the corpus unchanged, emitting schema-conformant JSON — no changes to Node, corpus, schema, or report. The engine surface is the same story: it lives in **this** repo as a JVM harness under `runners/engine/`, because this repo already depends on the engine runtime (`api org.mule.weave:runtime:${weaveVersion}` in both `native-lib` and `native-cli` build files), so `DataWeaveScriptingEngine` is on the classpath. It runs the **same `weaveVersion` the native image is built from**, reads this repo's corpus, and emits this schema — so the node-vs-engine comparison is on identical runtime code, isolating the native-image-vs-JVM axis.
 
 ## 1. Shared corpus
 
@@ -193,10 +195,10 @@ The design keeps a durable-history feature a bolt-on rather than a redesign:
 ## Out of scope (this spec)
 
 - Python runner (`runners/python/`) — follow-up.
-- Engine baseline harness in the `data-weave` repo — follow-up; this repo ships the corpus + schema it will consume and a `runners/engine/` pointer.
+- Engine baseline harness — follow-up, but **built in this repo** (not the `data-weave` repo) as a JVM runner under `runners/engine/`, using the already-present `org.mule.weave:runtime` dependency. This deliverable ships the corpus + schema it will consume; the harness itself is deferred pending a short spec on the JVM-specific decisions (see below).
 - Any results datastore, dashboard, or CI benchmark job.
 
 ## Non-obvious context
 
-- The engine repo's own `benchmark/` module is **empty locally** (moved to `data-weave-mule-service` per git history) — there is no in-tree harness to reuse there. The engine baseline harness will be new, following the existing `-Ddw.perf`-gated scalatest convention (`TypeCheckBenchmarkTest`).
+- The engine runner is greenfield (no existing harness to reuse). Because it lives here and uses the Maven `runtime` dependency, it drives the same `DataWeaveScriptingEngine` API that `native-cli`'s `NativeRuntime` already wraps. The remaining JVM-specific design decisions — deferred to the engine runner's own spec — are: (1) warmup iteration counts sufficient for the JIT to reach steady state before `warm` sampling; (2) whether cold-start/first-run spawn fresh JVMs (`java -cp … Child` per sample, the honest JVM cold path incl. classload) mirroring the Node spawn harness; (3) whether "engine" means the bare `DataWeaveScriptingEngine` or the CLI's `NativeRuntime` wrapper. Timing must use the same methodology as the Node runner (`System.nanoTime()` ⇢ ms), which is why that methodology was hand-rolled rather than delegated to a JS bench library.
 - Engine and wrapper are on different weave versions; the skew banner is a first-class requirement, not a nicety.
