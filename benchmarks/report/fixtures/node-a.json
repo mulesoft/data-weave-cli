@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "1.0",
+  "runner": "node-wrapper",
+  "env": { "os": "darwin-arm64", "cpu": "M1", "runtimeVersion": "node v20", "weaveVersion": "2.12.0-20260413", "commit": "abc", "dwlibBuildId": "dwlib-1" },
+  "timestamp": "2026-07-22T12:00:00.000Z",
+  "cases": [
+    { "id": "trivial", "metric": "warm", "unit": "ms", "stats": { "median": 2.0 }, "iterations": 100 },
+    { "id": "map-scale", "metric": "streaming", "unit": "MB/s", "stats": { "median": 300 }, "iterations": 10 }
+  ]
+}
