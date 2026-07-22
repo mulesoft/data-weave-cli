@@ -17,6 +17,18 @@ export function detectSkew(results) {
   return [...new Set(results.map((r) => r.env.weaveVersion))];
 }
 
+/** Keep only the latest result per distinct runner (by timestamp). */
+export function dedupeLatestByRunner(results) {
+  const latest = new Map();
+  for (const r of results) {
+    const existing = latest.get(r.runner);
+    if (!existing || r.timestamp > existing.timestamp) {
+      latest.set(r.runner, r);
+    }
+  }
+  return results.filter((r) => latest.get(r.runner) === r);
+}
+
 /** True if lower is better for this unit. */
 function lowerIsBetter(unit) {
   return unit === "ms";
@@ -74,7 +86,8 @@ export function main(argv) {
   if (emit) throw new Error(`--emit ${emit} not implemented (exporter seam reserved for future history/dashboard)`);
   if (files.length === 0) throw new Error("usage: report.mjs <result.json...> [--baseline <runner>]");
 
-  const results = files.map((f) => JSON.parse(readFileSync(f, "utf-8")));
+  let results = files.map((f) => JSON.parse(readFileSync(f, "utf-8")));
+  results = dedupeLatestByRunner(results);
   const manifest = loadManifest(CORPUS);
   const baselineRunner = baseline ?? (results.find((r) => r.runner === "engine")?.runner ?? results[0].runner);
 

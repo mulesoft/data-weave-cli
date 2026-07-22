@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { loadManifest } from "../lib/manifest.mjs";
-import { computeDelta, detectSkew, buildTable } from "./report.mjs";
+import { computeDelta, detectSkew, buildTable, dedupeLatestByRunner } from "./report.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CORPUS = join(__dirname, "..", "corpus");
@@ -30,4 +30,39 @@ test("buildTable joins by (id, metric) with a delta vs baseline", () => {
   assert.equal(trivialWarm.values["node-wrapper"], 2.0);
   assert.equal(trivialWarm.values["engine"], 4.0);
   assert.equal(trivialWarm.delta, -50); // node is 50% lower (faster) than engine baseline
+});
+
+test("dedupeLatestByRunner keeps the latest result per runner", () => {
+  const older = {
+    runner: "node-wrapper",
+    timestamp: "2026-07-22T12:00:00.000Z",
+    cases: [{ id: "trivial", metric: "warm", stats: { median: 3.0 }, unit: "ms" }],
+    env: { weaveVersion: "2.12.0" }
+  };
+  const newer = {
+    runner: "node-wrapper",
+    timestamp: "2026-07-22T13:00:00.000Z",
+    cases: [{ id: "trivial", metric: "warm", stats: { median: 2.5 }, unit: "ms" }],
+    env: { weaveVersion: "2.12.0" }
+  };
+  const engine = {
+    runner: "engine",
+    timestamp: "2026-07-22T12:30:00.000Z",
+    cases: [{ id: "trivial", metric: "warm", stats: { median: 4.0 }, unit: "ms" }],
+    env: { weaveVersion: "2.12.0" }
+  };
+
+  // Single runner: newer wins
+  const deduped1 = dedupeLatestByRunner([older, newer]);
+  assert.equal(deduped1.length, 1);
+  assert.equal(deduped1[0].timestamp, "2026-07-22T13:00:00.000Z");
+  assert.equal(deduped1[0].cases[0].stats.median, 2.5);
+
+  // Multiple runners: one per runner
+  const deduped2 = dedupeLatestByRunner([older, engine, newer]);
+  assert.equal(deduped2.length, 2);
+  const nodeResult = deduped2.find((r) => r.runner === "node-wrapper");
+  const engineResult = deduped2.find((r) => r.runner === "engine");
+  assert.equal(nodeResult.timestamp, "2026-07-22T13:00:00.000Z");
+  assert.equal(engineResult.timestamp, "2026-07-22T12:30:00.000Z");
 });

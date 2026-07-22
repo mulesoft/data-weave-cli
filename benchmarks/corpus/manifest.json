@@ -28,7 +28,7 @@
       "id": "xml-to-csv",
       "script": "scripts/xml-to-csv.dwl",
       "inputs": {
-        "payload": { "file": "inputs/person.xml", "mimeType": "application/xml", "charset": "UTF-8" }
+        "payload": { "file": "inputs/person.xml", "mimeType": "application/xml", "charset": "UTF-16" }
       },
       "metrics": ["first-run", "warm"],
       "iterations": { "warm": 100, "warmup": 10, "samples": 20 }
