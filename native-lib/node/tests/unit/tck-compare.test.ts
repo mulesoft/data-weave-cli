@@ -28,6 +28,21 @@ describe("compareOutput — json (structural)", () => {
     expect(r.match).toBe(false);
     expect(r.detail).toMatch(/actual is not valid JSON/);
   });
+
+  it("ignores CRLF vs LF inside a string value (Windows line endings)", () => {
+    // Regression: a JSON output embedding CSV — the writer emits CRLF on Windows
+    // but the fixture has LF. The line breaks are escaped \r\n / \n inside the
+    // JSON string, so they must be normalized during value comparison.
+    const actual = buf(JSON.stringify({ csv: "a|b\r\nx|y\r\n" }));
+    const expected = buf(JSON.stringify({ csv: "a|b\nx|y\n" }));
+    expect(compareOutput("json", actual, expected).match).toBe(true);
+  });
+
+  it("still distinguishes genuinely different string values", () => {
+    const actual = buf(JSON.stringify({ v: "hello" }));
+    const expected = buf(JSON.stringify({ v: "world" }));
+    expect(compareOutput("json", actual, expected).match).toBe(false);
+  });
 });
 
 describe("compareOutput — xml (structural)", () => {

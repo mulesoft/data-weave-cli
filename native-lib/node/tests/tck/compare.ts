@@ -73,7 +73,10 @@ function compareJson(actual: string, expected: string): CompareResult {
   } catch (err) {
     return fail(`expected is not valid JSON: ${err}`);
   }
-  return deepEqual(a, e) ? ok : fail(`JSON mismatch:\n  actual:   ${actual.trim()}\n  expected: ${expected.trim()}`);
+  // Normalize CRLF → LF within string values so platform line endings don't
+  // cause a mismatch — e.g. an embedded CSV value the writer emits with CRLF on
+  // Windows but LF elsewhere. Matches the CLI's AssertionHelper EOL handling.
+  return deepEqual(a, e, true) ? ok : fail(`JSON mismatch:\n  actual:   ${actual.trim()}\n  expected: ${expected.trim()}`);
 }
 
 const xmlParser = new XMLParser({
@@ -141,15 +144,23 @@ function stripAllWhitespace(s: string): string {
   return s.replace(/\s+/g, "");
 }
 
-/** Structural deep equality for JSON values (objects compared key-insensitively to order). */
-export function deepEqual(a: unknown, b: unknown): boolean {
+/**
+ * Structural deep equality for JSON values (objects compared key-insensitively
+ * to order). When `normEol` is true, string values are compared with CRLF
+ * normalized to LF so platform line endings inside a value don't cause a
+ * mismatch.
+ */
+export function deepEqual(a: unknown, b: unknown, normEol = false): boolean {
+  if (typeof a === "string" && typeof b === "string") {
+    return normEol ? a.replace(/\r\n/g, "\n") === b.replace(/\r\n/g, "\n") : a === b;
+  }
   if (a === b) return true;
   if (a === null || b === null) return a === b;
   if (typeof a !== typeof b) return false;
 
   if (Array.isArray(a) || Array.isArray(b)) {
     if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
-    return a.every((v, i) => deepEqual(v, b[i]));
+    return a.every((v, i) => deepEqual(v, b[i], normEol));
   }
 
   if (typeof a === "object" && typeof b === "object") {
@@ -158,7 +169,7 @@ export function deepEqual(a: unknown, b: unknown): boolean {
     const ak = Object.keys(ao);
     const bk = Object.keys(bo);
     if (ak.length !== bk.length) return false;
-    return ak.every((k) => Object.prototype.hasOwnProperty.call(bo, k) && deepEqual(ao[k], bo[k]));
+    return ak.every((k) => Object.prototype.hasOwnProperty.call(bo, k) && deepEqual(ao[k], bo[k], normEol));
   }
 
   return false;
