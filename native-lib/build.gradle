@@ -198,6 +198,21 @@ tasks.register('nodeTest', Exec) {
   }
 }
 
+tasks.register('benchmark', Exec) {
+  // Opt-in only: skipped unless -Pbenchmark=true. Never part of build/test.
+  onlyIf { project.findProperty('benchmark')?.toString()?.toBoolean() == true }
+
+  dependsOn tasks.named('buildNodePackage')
+  workingDir("${rootDir}/benchmarks")
+
+  def script = 'node corpus/gen-inputs.mjs && node runners/node/emit.mjs && node report/report.mjs results/*.json'
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    commandLine('cmd', '/c', script)
+  } else {
+    commandLine('bash', '-c', script)
+  }
+}
+
 tasks.named('test') {
   dependsOn tasks.named('pythonTest')
   dependsOn tasks.named('nodeTest')
