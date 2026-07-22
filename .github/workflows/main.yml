@@ -88,6 +88,18 @@ jobs:
         run: ./gradlew --stacktrace --no-problems-report native-lib:nodeTest
         shell: bash
 
+      # Run the Node.js TCK conformance lane (only on master to save CI time on
+      # PRs — mirrors the native-cli regression gating). Stages the DataWeave
+      # test-suite corpus, then runs the tck vitest project against the built
+      # package. The Node package was already built by "Create Native Lib Node
+      # Package" above.
+      - name: Run Node.js TCK Conformance
+        if: github.ref == 'refs/heads/master'
+        run: |
+          ./gradlew --stacktrace --no-problems-report native-lib:stageTckSuites
+          cd native-lib/node && npm run test:tck
+        shell: bash
+
       # Upload the artifact file
       - name: Upload generated script
         uses: actions/upload-artifact@v4
