@@ -1,0 +1,4 @@
+# Ephemeral per-run result files
+results/
+# Deterministically regenerated large inputs
+corpus/inputs/generated/
