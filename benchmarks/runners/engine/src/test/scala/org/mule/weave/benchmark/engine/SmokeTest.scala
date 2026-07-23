@@ -10,4 +10,11 @@ class SmokeTest extends AnyFreeSpec with Matchers {
     out.write(42)
     out.count() shouldBe 6L
   }
+
+  "CountingOutputStream.write(Array[Byte], Int, Int) counts only len bytes" in {
+    val out = new CountingOutputStream()
+    val buf = Array[Byte](1, 2, 3, 4, 5)
+    out.write(buf, 1, 3)  // write 3 bytes starting at offset 1
+    out.count() shouldBe 3L
+  }
 }

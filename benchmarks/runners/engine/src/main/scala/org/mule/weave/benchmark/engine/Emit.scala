@@ -74,11 +74,14 @@ object Emit {
       javaBin, "-cp", cp,
       "org.mule.weave.benchmark.engine.EngineChild",
       corpus.getAbsolutePath, caseId)
+    // Redirect stderr into stdout so it can't fill the pipe and deadlock; also surfaces child errors.
+    pb.redirectErrorStream(true)
     val p = pb.start()
     val lines = scala.io.Source.fromInputStream(p.getInputStream).getLines().toList
     val code = p.waitFor()
     if (code != 0) throw new RuntimeException(s"EngineChild failed for case '$caseId' (exit $code)")
-    val obj = new JSONObject(lines.last)
+    val obj = new JSONObject(lines.lastOption.getOrElse(
+      throw new RuntimeException(s"EngineChild produced no output for case '$caseId'")))
     (obj.getDouble("initMs"), obj.getDouble("firstRunMs"))
   }
 
