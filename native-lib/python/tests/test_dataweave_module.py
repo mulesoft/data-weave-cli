@@ -403,6 +403,33 @@ def test_run_transform_large():
         traceback.print_exc()
         return False
 
+def test_run_transform_large_single_chunk():
+    """Regression: a single input chunk > 8KB native buffer must not be truncated."""
+    print("\nTesting run_transform large single chunk (>8KB, regression)...")
+    try:
+        import json as _json
+        records = [{"id": i, "name": f"item_{i}", "value": i*3} for i in range(1, 2001)]
+        payload = _json.dumps(records).encode()  # ~97KB, one chunk
+        assert len(payload) > 8192, f"Expected payload > 8192 bytes, got {len(payload)}"
+        script = "output application/json\n---\nsizeOf(payload)"
+        stream = dataweave.run_transform(script, input_stream=iter([payload]), input_mime_type="application/json")
+        chunks = []
+        try:
+            while True:
+                chunks.append(next(stream))
+        except StopIteration as e:
+            metadata = e.value
+        text = b"".join(chunks).decode(metadata.charset or "utf-8")
+        assert metadata.success is True, f"Expected success, got: {metadata}"
+        assert text == "2000", f"Expected '2000', got '{text}'"
+        print(f"[OK] run_transform large single chunk works (result='{text}')")
+        return True
+    except Exception as e:
+        print(f"[FAIL] run_transform large single chunk failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def test_run_transform_with_file():
     """Test run_transform reading from a file-like object"""
     print("\nTesting run_transform with file...")
@@ -461,6 +488,7 @@ def main():
         results.append(test_run_streaming_with_inputs())
         results.append(test_run_transform_basic())
         results.append(test_run_transform_large())
+        results.append(test_run_transform_large_single_chunk())
         results.append(test_run_transform_with_file())
         
         # Cleanup
