@@ -9,8 +9,9 @@ Language-agnostic benchmark harness for the DataWeave native-lib wrappers.
   `gen-inputs.mjs` (deterministic generator).
 - `schema/result.schema.json` — the JSON schema every runner's output conforms to.
 - `lib/` — dependency-free shared modules (stats, manifest, env).
-- `runners/node/` — the Node reference runner. `runners/python/` and `runners/engine/`
-  are follow-ups; the engine harness lives in the `data-weave` repo but reads this corpus.
+- `runners/node/` — the Node reference runner. `runners/engine/` is the JVM baseline
+  (Scala/Gradle subproject `:benchmarks-engine`, depends on `org.mule.weave:runtime` at
+  the same `weaveVersion` the native image is built from). `runners/python/` is a follow-up.
 - `report/report.mjs` — joins result files against the manifest and prints a comparison table.
 - `results/` — gitignored per-run output.
 
@@ -31,5 +32,10 @@ Or directly, once the wrapper is built (`./gradlew native-lib:buildNodePackage`)
 Generate large inputs first (idempotent):
 
     node corpus/gen-inputs.mjs
+
+Run the engine (JVM) baseline and let the report pick it up as the comparison anchor:
+
+    ./gradlew benchmarks-engine:benchmarkEngine -Pbenchmark=true   # writes results/engine-<ts>.json
+    node report/report.mjs results/*.json                          # engine is auto-selected as baseline
 
 Results are local-only; no history is accumulated (see the design spec).
