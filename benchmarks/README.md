@@ -22,20 +22,35 @@ Language-agnostic benchmark harness for the DataWeave native-lib wrappers.
 
 ## Running
 
-    ./gradlew native-lib:benchmark -Pbenchmark=true      # build wrapper, run, report
+The one-shot cross-runner comparison — runs **every** registered runner and prints the table:
+
+    ./gradlew benchmarkCompare -Pbenchmark=true          # all runners + comparison report
+
+Single-runner options:
+
+    ./gradlew native-lib:benchmark -Pbenchmark=true              # Node only: build wrapper, run, report
+    ./gradlew benchmarks-engine:benchmarkEngine -Pbenchmark=true # engine (JVM) only: writes results/engine-<ts>.json
 
 Or directly, once the wrapper is built (`./gradlew native-lib:buildNodePackage`):
 
+    node corpus/gen-inputs.mjs                            # generate large inputs first (idempotent)
     node runners/node/emit.mjs                            # writes results/node-<ts>.json
     node report/report.mjs results/*.json                 # renders the table
 
-Generate large inputs first (idempotent):
-
-    node corpus/gen-inputs.mjs
-
-Run the engine (JVM) baseline and let the report pick it up as the comparison anchor:
-
-    ./gradlew benchmarks-engine:benchmarkEngine -Pbenchmark=true   # writes results/engine-<ts>.json
-    node report/report.mjs results/*.json                          # engine is auto-selected as baseline
-
 Results are local-only; no history is accumulated (see the design spec).
+
+## Adding a runner
+
+`benchmarkCompare` (defined in the root `build.gradle`) auto-discovers runners — you do
+**not** edit that task to add one. A new runner integrates itself in two steps:
+
+1. In the runner's Gradle module, register a task that runs the runner and writes its
+   result to `benchmarks/results/<runner>-<timestamp>.json`, conforming to
+   `schema/result.schema.json`. The result's `runner` field is the report's column name
+   and the dedupe key. The task should **not** render the report — `benchmarkCompare`
+   does that once, over all runners. (Follow `benchmarks-engine:benchmarkEngine` for a
+   JVM runner or `native-lib:benchmarkNode` for a scripted one.)
+2. Tag that task: `ext.benchmarkRunner = true`.
+
+`benchmarkCompare` then runs it alongside the others and includes its column in the table.
+`report.mjs` keeps only the latest result per runner, so re-runs never duplicate a column.

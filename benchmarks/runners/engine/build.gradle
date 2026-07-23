@@ -28,8 +28,11 @@ tasks.register('genBenchInputs', Exec) {
 }
 
 // Opt-in only: skipped unless -Pbenchmark=true. Never part of build/test.
+// Tagged `benchmarkRunner` so the root :benchmarkCompare aggregator discovers and
+// runs it automatically — no edit to that task is needed to include this runner.
 tasks.register('benchmarkEngine', JavaExec) {
     onlyIf { project.findProperty('benchmark')?.toString()?.toBoolean() == true }
+    ext.benchmarkRunner = true
     dependsOn tasks.named('genBenchInputs'), tasks.named('classes')
     classpath = sourceSets.main.runtimeClasspath
     mainClass = 'org.mule.weave.benchmark.engine.Emit'
