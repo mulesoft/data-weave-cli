@@ -1,3 +1,5 @@
 include 'native-cli'
 include 'native-cli-integration-tests'
 include 'native-lib'
+include 'benchmarks-engine'
+project(':benchmarks-engine').projectDir = file('benchmarks/runners/engine')
