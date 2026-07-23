@@ -15,6 +15,7 @@ import stats
 import manifest
 import env as envmod
 import wrapper
+import coldstart
 
 
 class TestStats(unittest.TestCase):
@@ -110,6 +111,43 @@ class TestWrapper(unittest.TestCase):
         api = wrapper.load_wrapper()
         for attr in ("DataWeave", "run", "run_transform", "run_streaming"):
             self.assertTrue(hasattr(api, attr), f"binding missing {attr}")
+
+
+class TestColdstartAggregation(unittest.TestCase):
+    def _manifest(self):
+        return {
+            "corpusDir": str(CORPUS),
+            "cases": [
+                {"id": "trivial", "script": "scripts/trivial.dwl",
+                 "metrics": ["cold-start", "first-run"], "iterations": {"samples": 5}},
+                {"id": "object-transform", "script": "scripts/object-transform.dwl",
+                 "metrics": ["first-run"], "iterations": {"samples": 5}},
+            ],
+            "ids": {"trivial", "object-transform"},
+        }
+
+    def test_aggregates_injected_samples(self):
+        calls = []
+
+        def fake_sample(corpus_dir, case_id):
+            calls.append(case_id)
+            return (1.0, 2.0)  # (initMs, firstRunMs)
+
+        rows = coldstart.run_cold_start_and_first_run(
+            self._manifest(), sample_fn=fake_sample, samples_override=3)
+
+        by = {(r["id"], r["metric"]): r for r in rows}
+        self.assertIn(("trivial", "cold-start"), by)
+        self.assertIn(("trivial", "first-run"), by)
+        self.assertIn(("object-transform", "first-run"), by)
+        self.assertNotIn(("object-transform", "cold-start"), by)
+
+        self.assertEqual(by[("trivial", "cold-start")]["unit"], "ms")
+        self.assertEqual(by[("trivial", "cold-start")]["stats"]["median"], 1.0)
+        self.assertEqual(by[("trivial", "first-run")]["stats"]["median"], 2.0)
+        self.assertEqual(by[("trivial", "cold-start")]["iterations"], 3)
+        # 2 cases sampled 3 times each.
+        self.assertEqual(len(calls), 6)
 
 
 if __name__ == "__main__":
