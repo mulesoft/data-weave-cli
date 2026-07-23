@@ -14,6 +14,7 @@ CORPUS = Path(__file__).resolve().parents[2] / "corpus"
 import stats
 import manifest
 import env as envmod
+import wrapper
 
 
 class TestStats(unittest.TestCase):
@@ -102,6 +103,13 @@ class TestEnv(unittest.TestCase):
         finally:
             del os.environ["DATAWEAVE_NATIVE_LIB"]
             os.unlink(path)
+
+
+class TestWrapper(unittest.TestCase):
+    def test_load_wrapper_exposes_api(self):
+        api = wrapper.load_wrapper()
+        for attr in ("DataWeave", "run", "run_transform", "run_streaming"):
+            self.assertTrue(hasattr(api, attr), f"binding missing {attr}")
 
 
 if __name__ == "__main__":
