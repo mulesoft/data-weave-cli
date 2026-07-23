@@ -11,7 +11,8 @@ Language-agnostic benchmark harness for the DataWeave native-lib wrappers.
 - `lib/` — dependency-free shared modules (stats, manifest, env).
 - `runners/node/` — the Node reference runner. `runners/engine/` is the JVM baseline
   (Scala/Gradle subproject `:benchmarks-engine`, depends on `org.mule.weave:runtime` at
-  the same `weaveVersion` the native image is built from). `runners/python/` is a follow-up.
+  the same `weaveVersion` the native image is built from). `runners/python/` is the
+  Python runner (stdlib scripts under `native-lib`, wrapping the same staged `dwlib` as Node).
 - `report/report.mjs` — joins result files against the manifest and prints a comparison table.
 - `results/` — gitignored per-run output.
 
@@ -30,6 +31,7 @@ Single-runner options:
 
     ./gradlew native-lib:benchmark -Pbenchmark=true              # Node only: build wrapper, run, report
     ./gradlew benchmarks-engine:benchmarkEngine -Pbenchmark=true # engine (JVM) only: writes results/engine-<ts>.json
+    ./gradlew native-lib:benchmarkPython -Pbenchmark=true        # Python only: writes results/python-<ts>.json
 
 Or directly, once the wrapper is built (`./gradlew native-lib:buildNodePackage`):
 

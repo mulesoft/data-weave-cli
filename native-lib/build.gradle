@@ -234,9 +234,60 @@ tasks.register('benchmarkNode', Exec) {
   }
 }
 
+// --- Python runner benchmark tasks ---
+
+// The Python runner as an aggregator-registered runner: emits its result file
+// but does NOT render the report (root :benchmarkCompare renders once over all
+// runners). Tagged `benchmarkRunner` so :benchmarkCompare discovers it.
+tasks.register('benchmarkPython', Exec) {
+  onlyIf { project.findProperty('benchmark')?.toString()?.toBoolean() == true }
+  ext.benchmarkRunner = true
+
+  dependsOn tasks.named('stagePythonNativeLib')
+  workingDir("${rootDir}/benchmarks")
+
+  // Generate the shared input via the Node generator (idempotent, deterministic,
+  // byte-identical to other runners) then emit; no report here.
+  def script = 'node corpus/gen-inputs.mjs && ' + pythonExe + ' runners/python/emit.py'
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    commandLine('cmd', '/c', script)
+  } else {
+    commandLine('bash', '-c', script)
+  }
+}
+
+// Always-on parity guard: pure-stdlib stats + manifest + env tests (no dwlib, no
+// venv). Wired into `test` so drift vs lib/stats.mjs fails the normal build.
+tasks.register('benchmarkPythonStatsTest', Exec) {
+  if (project.findProperty('skipPythonTests')?.toString()?.toBoolean() == true) {
+    enabled = false
+  }
+  workingDir("${rootDir}/benchmarks")
+  commandLine(pythonExe, 'runners/python/test_bench.py')
+}
+
+// Always-on parity guard for the dwlib-free JS harness tests (shared lib + report
+// + node emit builder). Excludes the dwlib-dependent warm-bench/coldstart tests.
+tasks.register('benchmarkJsUnitTest', Exec) {
+  if (project.findProperty('skipNodeTests')?.toString()?.toBoolean() == true) {
+    enabled = false
+  }
+  workingDir("${rootDir}/benchmarks")
+  def files = 'lib/stats.test.mjs lib/manifest.test.mjs lib/env.test.mjs ' +
+    'report/report.test.mjs runners/node/emit.test.mjs'
+  def script = 'node --test ' + files
+  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+    commandLine('cmd', '/c', script)
+  } else {
+    commandLine('bash', '-c', script)
+  }
+}
+
 tasks.named('test') {
   dependsOn tasks.named('pythonTest')
   dependsOn tasks.named('nodeTest')
+  dependsOn tasks.named('benchmarkPythonStatsTest')
+  dependsOn tasks.named('benchmarkJsUnitTest')
 }
 
 tasks.named('clean') {
