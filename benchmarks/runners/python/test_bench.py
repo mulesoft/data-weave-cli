@@ -17,6 +17,7 @@ import env as envmod
 import wrapper
 import coldstart
 import warm_bench
+import emit
 
 
 class TestStats(unittest.TestCase):
@@ -227,6 +228,21 @@ class TestWarmBench(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             warm_bench.run_warm_and_streaming(
                 _FakeApi(run_ok=False), self._warm_manifest(), warmup_cap=1, warm_cap=1)
+
+
+class TestEmit(unittest.TestCase):
+    def test_build_result_shape(self):
+        env = {"runner": "python-wrapper", "os": "darwin-arm64", "cpu": "x",
+               "runtimeVersion": "python 3.9.6", "weaveVersion": "2.12.0-x",
+               "commit": "abc", "dwlibBuildId": "dwlib-x"}
+        cases = [{"id": "trivial", "metric": "warm", "unit": "ms",
+                  "stats": {"median": 1.0}, "iterations": 3}]
+        r = emit.build_result(env, cases)
+        self.assertEqual(r["schemaVersion"], "1.0")
+        self.assertEqual(r["runner"], "python-wrapper")
+        self.assertEqual(r["env"], env)
+        self.assertEqual(r["cases"], cases)
+        self.assertTrue(r["timestamp"].endswith("Z"))
 
 
 if __name__ == "__main__":
