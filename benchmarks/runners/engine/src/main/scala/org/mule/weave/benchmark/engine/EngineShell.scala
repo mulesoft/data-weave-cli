@@ -1,0 +1,78 @@
+package org.mule.weave.benchmark.engine
+
+import org.mule.weave.v2.model.ServiceManager
+import org.mule.weave.v2.model.service.CharsetProviderService
+import org.mule.weave.v2.parser.ast.variables.NameIdentifier
+import org.mule.weave.v2.runtime.{
+  BindingValue,
+  DataWeaveScript,
+  DataWeaveScriptingEngine,
+  InputType,
+  ModuleComponentsFactory,
+  ParserConfiguration,
+  ScriptingBindings
+}
+import org.mule.weave.v2.sdk.ClassLoaderWeaveResourceResolver
+
+import java.io.OutputStream
+import java.nio.charset.{ Charset, StandardCharsets }
+import java.util.Properties
+import scala.util.Random
+
+/** A minimal engine harness: builds a bare DataWeaveScriptingEngine (classloader
+  * resolver only) and compiles+writes a script per run(), mirroring how
+  * native-cli's NativeRuntime drives the engine. Constructing this class is the
+  * work EngineChild times as `initMs`. */
+class EngineShell {
+
+  EngineShell.setupEnv()
+
+  private val engine: DataWeaveScriptingEngine = {
+    val resolver = ClassLoaderWeaveResourceResolver.apply()
+    new DataWeaveScriptingEngine(ModuleComponentsFactory.apply(resolver), ParserConfiguration(), new Properties())
+  }
+
+  // UTF-8 default charset service, matching NativeRuntime.createServiceManager.
+  // Required so cases that don't pin a charset decode as UTF-8; per-input charsets
+  // (e.g. the UTF-16 xml-to-csv case) come from the binding itself.
+  private val serviceManager: ServiceManager = {
+    val charsetService = new CharsetProviderService {
+      override def defaultCharset(): Charset = StandardCharsets.UTF_8
+    }
+    val customServices: Map[Class[_], _] = Map(classOf[CharsetProviderService] -> charsetService)
+    ServiceManager(customServices)
+  }
+
+  /** Compile `script` and write its output into `out`. Throws on failure. */
+  def run(script: String, name: String, inputs: Seq[ResolvedInput], out: OutputStream): Unit = {
+    val bindings = new ScriptingBindings()
+    inputs.foreach { in =>
+      val charset = Charset.forName(in.charset.getOrElse("UTF-8"))
+      val bv = new BindingValue(in.bytes, Some(in.mimeType), Map.empty[String, Any], charset)
+      bindings.addBinding(in.name, bv)
+    }
+
+    val config = engine.newConfig()
+      .withScript(script)
+      .withNameIdentifier(NameIdentifier(name))
+      .withInputs(inputs.map(in => new InputType(in.name, None)).toArray)
+      .withDefaultOutputType("application/json")
+
+    val compiled: DataWeaveScript = engine.compileWith(config)
+    // 3-arg write(bindings, serviceManager, target: Option[Any]) writes into `out`,
+    // exactly as NativeRuntime.run does. A compile/exec failure throws here.
+    compiled.write(bindings, serviceManager, Option(out))
+  }
+}
+
+object EngineShell {
+
+  /** Netty init properties, adapted from NativeRuntime.setupEnv. */
+  def setupEnv(): Unit = {
+    System.setProperty("io.netty.processId", Math.abs(Random.nextInt()).toString)
+    System.setProperty("io.netty.noUnsafe", true.toString)
+  }
+
+  /** A NameIdentifier-safe logical name derived from a case id. */
+  def safeName(id: String): String = "bench_" + id.replaceAll("[^A-Za-z0-9_]", "_")
+}
