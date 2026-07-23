@@ -16,6 +16,7 @@ import manifest
 import env as envmod
 import wrapper
 import coldstart
+import warm_bench
 
 
 class TestStats(unittest.TestCase):
@@ -148,6 +149,84 @@ class TestColdstartAggregation(unittest.TestCase):
         self.assertEqual(by[("trivial", "cold-start")]["iterations"], 3)
         # 2 cases sampled 3 times each.
         self.assertEqual(len(calls), 6)
+
+
+class _FakeResult:
+    def __init__(self, success=True, error=None):
+        self.success, self.error = success, error
+
+
+class _FakeMeta:
+    def __init__(self, success=True, error=None):
+        self.success, self.error = success, error
+
+
+class _FakeStream:
+    def __init__(self, chunks, meta):
+        self._chunks = iter(chunks)
+        self.metadata = meta
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._chunks)
+
+
+class _FakeApi:
+    def __init__(self, run_ok=True):
+        self.run_ok = run_ok
+
+    def run(self, script, inputs=None):
+        return _FakeResult(self.run_ok, None if self.run_ok else "boom")
+
+    def run_transform(self, script, input_stream, input_name="payload",
+                      input_mime_type="application/json", input_charset=None):
+        for _ in input_stream:  # consume, mimicking the real read side
+            pass
+        return _FakeStream([b"out-chunk"], _FakeMeta(True))
+
+
+class TestWarmBench(unittest.TestCase):
+    def _warm_manifest(self):
+        return {
+            "corpusDir": str(CORPUS),
+            "cases": [{"id": "trivial", "script": "scripts/trivial.dwl",
+                       "metrics": ["warm"], "iterations": {}}],
+            "ids": {"trivial"},
+        }
+
+    def _streaming_manifest(self):
+        return {
+            "corpusDir": str(CORPUS),
+            "cases": [{"id": "object-transform", "script": "scripts/object-transform.dwl",
+                       "inputs": {"payload": {"file": "inputs/person-record.json",
+                                              "mimeType": "application/json"}},
+                       "metrics": ["streaming"], "iterations": {}}],
+            "ids": {"object-transform"},
+        }
+
+    def test_warm_rows(self):
+        rows = warm_bench.run_warm_and_streaming(
+            _FakeApi(), self._warm_manifest(), warmup_cap=1, warm_cap=3)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["metric"], "warm")
+        self.assertEqual(rows[0]["unit"], "ms")
+        self.assertEqual(rows[0]["iterations"], 3)
+        self.assertGreaterEqual(rows[0]["stats"]["median"], 0.0)
+
+    def test_streaming_rows(self):
+        rows = warm_bench.run_warm_and_streaming(
+            _FakeApi(), self._streaming_manifest(), streaming_cap=2)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["metric"], "streaming")
+        self.assertEqual(rows[0]["unit"], "MB/s")
+        self.assertGreater(rows[0]["stats"]["median"], 0.0)
+
+    def test_warm_guard_raises_on_failure(self):
+        with self.assertRaises(RuntimeError):
+            warm_bench.run_warm_and_streaming(
+                _FakeApi(run_ok=False), self._warm_manifest(), warmup_cap=1, warm_cap=1)
 
 
 if __name__ == "__main__":
