@@ -4,12 +4,16 @@ logic. Pure stdlib — no dwlib, no venv. Run: python3 runners/python/test_bench
 
 import unittest
 from pathlib import Path
+import hashlib
+import os
+import tempfile
 
 # benchmarks/runners/python -> benchmarks -> corpus
 CORPUS = Path(__file__).resolve().parents[2] / "corpus"
 
 import stats
 import manifest
+import env as envmod
 
 
 class TestStats(unittest.TestCase):
@@ -71,6 +75,33 @@ class TestManifest(unittest.TestCase):
         with self.assertRaises(ValueError):
             manifest.validate_result_ids(self.m, ["trivial", "not-a-case"])
         manifest.validate_result_ids(self.m, ["trivial"])  # no raise
+
+
+class TestEnv(unittest.TestCase):
+    def test_gather_env_has_required_keys(self):
+        e = envmod.gather_env()
+        for k in ("os", "cpu", "runtimeVersion", "weaveVersion", "commit", "dwlibBuildId"):
+            self.assertIn(k, e)
+        self.assertEqual(e["runner"], "python-wrapper")
+        self.assertTrue(e["runtimeVersion"].startswith("python "))
+        self.assertTrue(e["weaveVersion"])  # non-empty (read from gradle.properties)
+
+    def test_dwlib_build_id_formula(self):
+        data = b"hello world" * 10
+        with tempfile.NamedTemporaryFile(suffix=".dylib", delete=False) as f:
+            f.write(data)
+            path = f.name
+        os.environ["DATAWEAVE_NATIVE_LIB"] = path
+        try:
+            e = envmod.gather_env()
+            size = os.path.getsize(path)
+            h = hashlib.sha256()
+            h.update(str(size).encode())
+            h.update(data[:65536])
+            self.assertEqual(e["dwlibBuildId"], "dwlib-" + h.hexdigest()[:8])
+        finally:
+            del os.environ["DATAWEAVE_NATIVE_LIB"]
+            os.unlink(path)
 
 
 if __name__ == "__main__":
