@@ -95,6 +95,11 @@ export const IGNORED_CASES: Readonly<Record<string, IgnoreEntry>> = {
   "multipart-write-message": { reason: "multipart: empty parts / structural" },
   "multipart-write-subtype-override": { reason: "multipart: subtype override" },
 
+  // slow — pathological type-checking stress case; passes but is far too slow
+  // (~13s locally, ~34s on the Windows CI runner, exceeding the tck 30s
+  // testTimeout). The CLI ignores it for the same "takes too long" reason.
+  "big_intersection": { reason: "slow: 500-way intersection type exceeds the test timeout" },
+
   // nondeterministic — output embeds a timestamp
   "properties-writer": { reason: "nondeterministic: properties output embeds a timestamp comment" },
   "properties-passthrough": { reason: "nondeterministic: properties output embeds a timestamp comment" },
