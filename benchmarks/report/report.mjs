@@ -21,15 +21,15 @@ export function computeDelta(value, baseline, _unit) {
 }
 
 /**
- * Delta cell text for a table row. Distinguishes three states so the report is
- * never misleading: `n/a` = metric is not comparable across runners (methodology
- * differs), `—` = comparison not possible (missing baseline or only one runner),
- * else the signed percent.
+ * Delta cell text for one runner's percent change vs the baseline. Distinguishes
+ * three states so the report is never misleading: `n/a` = metric is not
+ * comparable across runners (methodology differs), `—` = comparison not possible
+ * (missing baseline or this runner's value), else the signed percent.
  */
-export function formatDelta(row) {
-  if (!row.comparable) return "n/a";
-  if (row.delta === null) return "—";
-  return `${row.delta > 0 ? "+" : ""}${row.delta.toFixed(1)}%`;
+export function formatDelta(delta, comparable) {
+  if (!comparable) return "n/a";
+  if (delta === null || delta === undefined) return "—";
+  return `${delta > 0 ? "+" : ""}${delta.toFixed(1)}%`;
 }
 
 /** Distinct weaveVersions across results; length > 1 means the comparison spans versions. */
@@ -55,11 +55,15 @@ function lowerIsBetter(unit) {
 }
 
 /**
- * Join result files against the manifest into one row per (id, metric).
- * @param baselineRunner runner name whose value anchors the delta column
+ * Join result files against the manifest into one row per (id, metric). Each row
+ * carries a `deltas` map: for every non-baseline runner, its percent change vs
+ * the baseline (or null when that runner's value is missing). One delta column
+ * per non-baseline runner keeps every runner represented once there are 3+.
+ * @param baselineRunner runner name whose value anchors the delta columns
  */
 export function buildTable(manifest, results, baselineRunner) {
   const runners = results.map((r) => r.runner);
+  const otherRunners = runners.filter((r) => r !== baselineRunner);
   const cellByRunner = new Map(); // `${runner}|${id}|${metric}` -> {value, unit}
   for (const r of results) {
     for (const c of r.cases) {
@@ -82,15 +86,18 @@ export function buildTable(manifest, results, baselineRunner) {
       if (Object.keys(values).length === 0) continue; // metric declared but no runner ran it
       const comparable = !NON_COMPARABLE_METRICS.has(metric);
       const base = values[baselineRunner];
-      const other = runners.find((r) => r !== baselineRunner && values[r] !== undefined);
-      const delta =
-        comparable && base !== undefined && other !== undefined
-          ? computeDelta(values[other], base, unit)
-          : null;
-      rows.push({ id: c.id, metric, unit, values, delta, comparable, lowerIsBetter: lowerIsBetter(unit) });
+      const deltas = {};
+      for (const runner of otherRunners) {
+        deltas[runner] =
+          comparable && base !== undefined && values[runner] !== undefined
+            ? computeDelta(values[runner], base, unit)
+            : null;
+      }
+      rows.push({ id: c.id, metric, unit, values, deltas, comparable, lowerIsBetter: lowerIsBetter(unit) });
     }
   }
-  return { header: ["case", "metric", "unit", ...runners, `Δ vs ${baselineRunner}`], rows };
+  const deltaCols = otherRunners.map((r) => `Δ ${r} vs ${baselineRunner}`);
+  return { header: ["case", "metric", "unit", ...runners, ...deltaCols], rows, baselineRunner, otherRunners };
 }
 
 function fmt(n) {
@@ -102,9 +109,9 @@ function mermaidLabel(s) {
   return `"${String(s).replace(/"/g, "'")}"`;
 }
 
-/** Distinct runner names from the table header (between the fixed cols and the Δ col). */
+/** Runner names carrying value columns (between the fixed cols and the Δ cols). */
 function runnersOf(table) {
-  return table.header.slice(3, table.header.length - 1);
+  return table.header.slice(3, table.header.length - table.otherRunners.length);
 }
 
 /**
@@ -166,15 +173,16 @@ export function renderMarkdown(table, results, { baselineRunner, stamp }) {
   out.push("| " + table.header.join(" | ") + " |");
   out.push("| " + table.header.map(() => "---").join(" | ") + " |");
   for (const row of table.rows) {
-    const runnerCols = table.header.slice(3, table.header.length - 1).map((r) => fmt(row.values[r]));
-    out.push(`| ${row.id} | ${row.metric} | ${row.unit} | ${runnerCols.join(" | ")} | ${formatDelta(row)} |`);
+    const runnerCols = runnersOf(table).map((r) => fmt(row.values[r]));
+    const deltaCols = table.otherRunners.map((r) => formatDelta(row.deltas[r], row.comparable));
+    out.push(`| ${row.id} | ${row.metric} | ${row.unit} | ${[...runnerCols, ...deltaCols].join(" | ")} |`);
   }
   out.push("");
   out.push("## Charts", "");
   out.push(
     `One chart per corpus case, one bar per runner (${runnersOf(table).map((r) => `\`${r}\``).join(", ")}). ` +
       `A case's metrics differ in unit and scale, so each metric is a separate single-unit chart. ` +
-      `\`${baselineRunner}\` is the table's delta baseline.`,
+      `\`${baselineRunner}\` is the table's delta baseline; each other runner gets its own Δ column.`,
     ""
   );
   out.push(renderMermaidCharts(table));
@@ -208,12 +216,14 @@ export function main(argv) {
   }
 
   const table = buildTable(manifest, results, baselineRunner);
-  const { header, rows } = table;
+  const { header, rows, otherRunners } = table;
+  const valueRunners = header.slice(3, header.length - otherRunners.length);
   console.log("| " + header.join(" | ") + " |");
   console.log("| " + header.map(() => "---").join(" | ") + " |");
   for (const row of rows) {
-    const runnerCols = header.slice(3, header.length - 1).map((runner) => fmt(row.values[runner]));
-    console.log(`| ${row.id} | ${row.metric} | ${row.unit} | ${runnerCols.join(" | ")} | ${formatDelta(row)} |`);
+    const runnerCols = valueRunners.map((runner) => fmt(row.values[runner]));
+    const deltaCols = otherRunners.map((runner) => formatDelta(row.deltas[runner], row.comparable));
+    console.log(`| ${row.id} | ${row.metric} | ${row.unit} | ${[...runnerCols, ...deltaCols].join(" | ")} |`);
   }
 
   if (markdown) {

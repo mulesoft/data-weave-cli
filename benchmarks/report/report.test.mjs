@@ -30,14 +30,32 @@ test("detectSkew finds differing weave versions", () => {
   assert.ok(skew.includes("2.13.0-SNAPSHOT"));
 });
 
-test("buildTable joins by (id, metric) with a delta vs baseline", () => {
+test("buildTable joins by (id, metric) with a per-runner delta vs baseline", () => {
   const manifest = loadManifest(CORPUS);
-  const { rows } = buildTable(manifest, [load("node-a.json"), load("engine-b.json")], "engine");
-  const trivialWarm = rows.find((r) => r.id === "trivial" && r.metric === "warm");
+  const table = buildTable(manifest, [load("node-a.json"), load("engine-b.json")], "engine");
+  const trivialWarm = table.rows.find((r) => r.id === "trivial" && r.metric === "warm");
   assert.ok(trivialWarm);
   assert.equal(trivialWarm.values["node-wrapper"], 2.0);
   assert.equal(trivialWarm.values["engine"], 4.0);
-  assert.equal(trivialWarm.delta, -50); // node is 50% lower (faster) than engine baseline
+  assert.equal(trivialWarm.deltas["node-wrapper"], -50); // node is 50% lower (faster) than engine baseline
+  // engine is the baseline, so it never gets its own delta entry.
+  assert.deepEqual(table.otherRunners, ["node-wrapper"]);
+  assert.equal(table.header.at(-1), "Δ node-wrapper vs engine");
+});
+
+test("buildTable emits one delta column per non-baseline runner (3 runners)", () => {
+  const manifest = loadManifest(CORPUS);
+  const engine = load("engine-b.json");
+  // Derive a python runner from the node fixture so all three share (id, metric) rows.
+  const node = load("node-a.json");
+  const python = { ...node, runner: "python-wrapper" };
+  const table = buildTable(manifest, [engine, node, python], "engine");
+  assert.deepEqual(table.otherRunners, ["node-wrapper", "python-wrapper"]);
+  assert.equal(table.header.at(-2), "Δ node-wrapper vs engine");
+  assert.equal(table.header.at(-1), "Δ python-wrapper vs engine");
+  const trivialWarm = table.rows.find((r) => r.id === "trivial" && r.metric === "warm");
+  assert.equal(trivialWarm.deltas["node-wrapper"], -50);
+  assert.equal(trivialWarm.deltas["python-wrapper"], -50);
 });
 
 test("streaming metric now carries a real cross-runner delta", () => {
@@ -50,8 +68,8 @@ test("streaming metric now carries a real cross-runner delta", () => {
   const streaming = rows.find((r) => r.id === "map-scale" && r.metric === "streaming");
   assert.ok(streaming, "fixture should exercise a streaming row");
   assert.equal(streaming.comparable, true);
-  assert.equal(streaming.delta, 100);
-  assert.equal(formatDelta(streaming), "+100.0%");
+  assert.equal(streaming.deltas["node-wrapper"], 100);
+  assert.equal(formatDelta(streaming.deltas["node-wrapper"], streaming.comparable), "+100.0%");
 });
 
 test("renderMarkdown emits no streaming non-comparable footnote", () => {
@@ -85,7 +103,7 @@ test("renderMermaidCharts emits one chart per (case, metric) with a bar per runn
   for (const id of cases) assert.ok(md.includes(`### ${id}`), `missing heading for ${id}`);
 
   // x-axis is the runners; the bar series length matches the runner count.
-  const runners = table.header.slice(3, table.header.length - 1);
+  const runners = table.header.slice(3, table.header.length - table.otherRunners.length);
   for (const block of md.split("```mermaid").slice(1)) {
     const xs = (block.match(/x-axis \[([^\]]*)\]/) ?? [])[1]?.split(",").length ?? 0;
     assert.equal(xs, runners.length, "x-axis lists every runner");
