@@ -1,6 +1,9 @@
-// Fresh-process worker. Measures a cold isolate init + a cold (first) compile+exec
-// for one case, then prints a single JSON line. Invoked by coldstart.mjs.
-import { readFileSync } from "node:fs";
+// Fresh-process worker for one case. Prints a "READY" marker the instant the
+// runtime is initialized, then a JSON line with the in-process first-run timing.
+// The PARENT (coldstart.mjs) measures cold-start as wall-clock from spawn to the
+// READY marker, so process launch + module/addon load + isolate init are all
+// included — not just the in-process initialize() call.
+import { readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { loadManifest, resolveInputs } from "../../lib/manifest.mjs";
 import { loadWrapper } from "./wrapper.mjs";
@@ -23,9 +26,11 @@ for (const [name, v] of Object.entries(resolved)) {
 const api = await loadWrapper();
 const dw = new api.DataWeave();
 
-const initStart = nowNs();
 dw.initialize();
-const initMs = msSince(initStart);
+// Runtime is ready: flush the marker synchronously so the parent's clock stops
+// here. writeSync (fd 1) bypasses the async stdout buffer, so the timestamp the
+// parent reads reflects init completion, not stream flushing.
+writeSync(1, "READY\n");
 
 const runStart = nowNs();
 const result = dw.run(script, inputs);
@@ -33,4 +38,4 @@ const firstRunMs = msSince(runStart);
 if (!result.success) throw new Error(`first run failed: ${result.error}`);
 
 dw.cleanup();
-process.stdout.write(JSON.stringify({ initMs, firstRunMs }) + "\n");
+process.stdout.write(JSON.stringify({ firstRunMs }) + "\n");

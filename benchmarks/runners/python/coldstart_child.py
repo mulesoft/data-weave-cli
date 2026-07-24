@@ -1,7 +1,8 @@
-"""Fresh-process worker. Measures a cold engine init + a cold (first) compile+exec
-for one case, then prints a single JSON line. Spawned by coldstart.py — the honest
-cold path (process launch + interpreter start + dlopen(dwlib) + isolate creation +
-first compile+exec)."""
+"""Fresh-process worker for one case. Prints a "READY" marker the instant the
+runtime is initialized, then a JSON line with the in-process first-run timing.
+The PARENT (coldstart.py) measures cold-start as wall-clock from spawn to the
+READY marker, so process launch + interpreter start + dlopen(dwlib) + isolate
+creation are all included — not just the in-process initialize() call."""
 
 import json
 import sys
@@ -34,9 +35,11 @@ def main(argv):
     api = load_wrapper()
     dw = api.DataWeave()
 
-    init_start = time.perf_counter_ns()
     dw.initialize()
-    init_ms = (time.perf_counter_ns() - init_start) / 1e6
+    # Runtime is ready: flush the marker now so the parent's clock stops here.
+    # flush() guarantees the byte is on the pipe before the timed run begins.
+    sys.stdout.write("READY\n")
+    sys.stdout.flush()
 
     run_start = time.perf_counter_ns()
     result = dw.run(script, inputs)
@@ -45,7 +48,7 @@ def main(argv):
         raise SystemExit(f"first run failed: {result.error}")
 
     dw.cleanup()
-    sys.stdout.write(json.dumps({"initMs": init_ms, "firstRunMs": first_run_ms}) + "\n")
+    sys.stdout.write(json.dumps({"firstRunMs": first_run_ms}) + "\n")
 
 
 if __name__ == "__main__":

@@ -133,7 +133,7 @@ class TestColdstartAggregation(unittest.TestCase):
 
         def fake_sample(corpus_dir, case_id):
             calls.append(case_id)
-            return (1.0, 2.0)  # (initMs, firstRunMs)
+            return (1.0, 2.0)  # (coldStartMs, firstRunMs)
 
         rows = coldstart.run_cold_start_and_first_run(
             self._manifest(), sample_fn=fake_sample, samples_override=3)

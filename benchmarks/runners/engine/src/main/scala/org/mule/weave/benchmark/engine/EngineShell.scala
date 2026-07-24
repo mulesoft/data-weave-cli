@@ -21,8 +21,9 @@ import scala.util.Random
 
 /** A minimal engine harness: builds a bare DataWeaveScriptingEngine (classloader
   * resolver only) and compiles+writes a script per run(), mirroring how
-  * native-cli's NativeRuntime drives the engine. Constructing this class is the
-  * work EngineChild times as `initMs`. */
+  * native-cli's NativeRuntime drives the engine. Constructing this class completes
+  * engine init; EngineChild prints its READY marker right after, and the parent
+  * (Emit) measures cold-start as the full spawn-to-READY wall-clock. */
 class EngineShell {
 
   EngineShell.setupEnv()

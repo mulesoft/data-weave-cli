@@ -49,24 +49,28 @@ object Emit {
     ids.flatMap { id =>
       val c = manifest.cases.find(_.id == id).get
       val n = samplesCap.getOrElse(c.samples)
-      val inits = new Array[Double](n)
+      val colds = new Array[Double](n)
       val firsts = new Array[Double](n)
       var i = 0
       while (i < n) {
-        val (initMs, firstMs) = sampleOnce(corpus, id)
-        inits(i) = initMs
+        val (coldMs, firstMs) = sampleOnce(corpus, id)
+        colds(i) = coldMs
         firsts(i) = firstMs
         i += 1
       }
       val rows = scala.collection.mutable.ArrayBuffer[Row]()
       if (c.metrics.contains("cold-start"))
-        rows += Row(id, "cold-start", "ms", Stats.computeStats(inits.toSeq), n)
+        rows += Row(id, "cold-start", "ms", Stats.computeStats(colds.toSeq), n)
       if (c.metrics.contains("first-run"))
         rows += Row(id, "first-run", "ms", Stats.computeStats(firsts.toSeq), n)
       rows.toSeq
     }
   }
 
+  /** Spawn a fresh JVM and measure true cold-start: wall-clock from just before
+    * `start()` to the child's READY line (process launch + classload + engine
+    * init). first-run is timed in-process by the child. Returns (coldStartMs,
+    * firstRunMs). */
   private def sampleOnce(corpus: File, caseId: String): (Double, Double) = {
     val javaBin = new File(System.getProperty("java.home"), "bin/java").getAbsolutePath
     val cp = System.getProperty("java.class.path")
@@ -76,13 +80,24 @@ object Emit {
       corpus.getAbsolutePath, caseId)
     // Redirect stderr into stdout so it can't fill the pipe and deadlock; also surfaces child errors.
     pb.redirectErrorStream(true)
+    val t0 = System.nanoTime()
     val p = pb.start()
-    val lines = scala.io.Source.fromInputStream(p.getInputStream).getLines().toList
+    // Read line-by-line (not toList) so we can stamp the clock the instant READY
+    // arrives, before the child runs the script.
+    var coldStartMs: Option[Double] = None
+    var jsonLine: Option[String] = None
+    val src = scala.io.Source.fromInputStream(p.getInputStream)
+    for (line <- src.getLines()) {
+      if (line == "READY") coldStartMs = Some((System.nanoTime() - t0) / 1e6)
+      else if (line.startsWith("{")) jsonLine = Some(line)
+    }
     val code = p.waitFor()
     if (code != 0) throw new RuntimeException(s"EngineChild failed for case '$caseId' (exit $code)")
-    val obj = new JSONObject(lines.lastOption.getOrElse(
-      throw new RuntimeException(s"EngineChild produced no output for case '$caseId'")))
-    (obj.getDouble("initMs"), obj.getDouble("firstRunMs"))
+    val cold = coldStartMs.getOrElse(
+      throw new RuntimeException(s"EngineChild for case '$caseId' never printed READY"))
+    val obj = new JSONObject(jsonLine.getOrElse(
+      throw new RuntimeException(s"EngineChild produced no result line for case '$caseId'")))
+    (cold, obj.getDouble("firstRunMs"))
   }
 
   def main(args: Array[String]): Unit = {
