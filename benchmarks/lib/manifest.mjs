@@ -25,6 +25,9 @@ export function loadManifest(corpusDir) {
     if (!c.script || !existsSync(join(corpusDir, c.script))) {
       throw new Error(`case ${c.id} script not found: ${c.script}`);
     }
+    if (c.streamingScript && !existsSync(join(corpusDir, c.streamingScript))) {
+      throw new Error(`case ${c.id} streamingScript not found: ${c.streamingScript}`);
+    }
     for (const [name, inp] of Object.entries(c.inputs ?? {})) {
       if (inp.file && !inp.generated && !existsSync(join(corpusDir, inp.file))) {
         throw new Error(`case ${c.id} input '${name}' file not found: ${inp.file}`);
@@ -50,6 +53,16 @@ export function resolveInputs(manifest, caseObj) {
     out[name] = { buffer, mimeType: inp.mimeType, charset: inp.charset };
   }
   return out;
+}
+
+/**
+ * Read the script used for the streaming metric: the `streamingScript` variant
+ * (e.g. a deferred=true output) if declared, else the base `script`. Warm and
+ * first-run always use `script`, never this.
+ */
+export function resolveStreamingScript(manifest, caseObj) {
+  const rel = caseObj.streamingScript ?? caseObj.script;
+  return readFileSync(join(manifest.corpusDir, rel), "utf-8");
 }
 
 /** Fail-fast: throw if any result case carries an id not present in the manifest. */
