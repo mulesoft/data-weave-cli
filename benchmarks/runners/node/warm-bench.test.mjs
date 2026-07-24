@@ -2,12 +2,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadManifest } from "../../lib/manifest.mjs";
+import { loadManifest, resolveStreamingScript } from "../../lib/manifest.mjs";
 import { loadWrapper } from "./wrapper.mjs";
 import { runWarmAndStreaming } from "./warm-bench.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CORPUS = join(__dirname, "..", "..", "corpus");
+
+test("streaming uses the deferred=true script variant", () => {
+  const manifest = loadManifest(CORPUS);
+  const mapScale = manifest.cases.find((c) => c.id === "map-scale");
+  assert.ok(resolveStreamingScript(manifest, mapScale).includes("deferred=true"));
+});
 
 test("warm + streaming rows are produced with valid stats", async () => {
   const api = await loadWrapper();

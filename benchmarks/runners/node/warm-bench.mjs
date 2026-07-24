@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { casesForMetric, resolveInputs } from "../../lib/manifest.mjs";
+import { casesForMetric, resolveInputs, resolveStreamingScript } from "../../lib/manifest.mjs";
 import { computeStats, toMBps } from "../../lib/stats.mjs";
 
 const nowNs = () => process.hrtime.bigint();
@@ -54,7 +54,7 @@ export async function runWarmAndStreaming(api, manifest) {
   }
 
   for (const c of casesForMetric(manifest, "streaming")) {
-    const script = readScript(manifest, c);
+    const script = resolveStreamingScript(manifest, c);
     const resolved = resolveInputs(manifest, c);
     const [primaryName, primary] = Object.entries(resolved)[0];
     const iters = c.iterations?.streaming ?? 10;
