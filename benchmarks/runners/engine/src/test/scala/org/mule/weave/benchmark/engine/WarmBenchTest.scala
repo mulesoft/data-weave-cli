@@ -9,6 +9,7 @@ class WarmBenchTest extends AnyFreeSpec with Matchers {
   private val manifest = Manifest.load(corpus)
 
   "warm rows are produced with ms unit and positive median" in {
+    if (!TestSupport.ensureGeneratedInputs(corpus)) cancel("generated input unavailable (node missing?)")
     val shell = new EngineShell()
     val rows = WarmBench.runWarm(shell, manifest, warmupCap = Some(2), iterCap = Some(3))
     rows.map(_.id) should contain ("trivial")
