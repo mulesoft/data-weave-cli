@@ -5,6 +5,7 @@ import org.mule.weave.v2.model.service.CharsetProviderService
 import org.mule.weave.v2.parser.ast.variables.NameIdentifier
 import org.mule.weave.v2.runtime.{
   BindingValue,
+  DataWeaveResult,
   DataWeaveScript,
   DataWeaveScriptingEngine,
   InputType,
@@ -14,7 +15,7 @@ import org.mule.weave.v2.runtime.{
 }
 import org.mule.weave.v2.sdk.ClassLoaderWeaveResourceResolver
 
-import java.io.OutputStream
+import java.io.{ InputStream, OutputStream }
 import java.nio.charset.{ Charset, StandardCharsets }
 import java.util.Properties
 import scala.util.Random
@@ -63,6 +64,42 @@ class EngineShell {
     // 3-arg write(bindings, serviceManager, target: Option[Any]) writes into `out`,
     // exactly as NativeRuntime.run does. A compile/exec failure throws here.
     compiled.write(bindings, serviceManager, Option(out))
+  }
+
+  /** Streaming variant of `run`: binds `input` as a lazy InputStream (so the
+    * runtime reads it incrementally), compiles the deferred script, and drains
+    * the deferred PipedInputStream result in a read loop. Returns the number of
+    * output bytes drained. Throws on compile/exec failure or a non-InputStream
+    * (non-deferred) result, so a script that forgot `deferred=true` fails loudly. */
+  def runStreaming(script: String, name: String, input: InputStream, inMime: String, inCharset: Option[String]): Long = {
+    val bindings = new ScriptingBindings()
+    val charset = Charset.forName(inCharset.getOrElse("UTF-8"))
+    val bv = new BindingValue(input, Some(inMime), Map.empty[String, Any], charset)
+    bindings.addBinding(name, bv)
+
+    val config = engine.newConfig()
+      .withScript(script)
+      .withNameIdentifier(NameIdentifier(name))
+      .withInputs(Array(new InputType(name, None)))
+      .withDefaultOutputType("application/json")
+
+    val compiled: DataWeaveScript = engine.compileWith(config)
+    val result: DataWeaveResult = compiled.write(bindings, serviceManager, "application/json", Option.empty[Any])
+    result.getContent match {
+      case is: InputStream =>
+        try {
+          val buf = new Array[Byte](65536)
+          var total = 0L
+          var n = is.read(buf)
+          while (n > 0) { total += n; n = is.read(buf) }
+          total
+        } finally {
+          is.close()
+        }
+      case other =>
+        throw new RuntimeException(
+          s"streaming result is not an InputStream (did the script declare deferred=true?): ${other.getClass.getName}")
+    }
   }
 }
 
