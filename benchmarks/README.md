@@ -21,6 +21,24 @@ Language-agnostic benchmark harness for the DataWeave native-lib wrappers.
 `cold-start` and `first-run` (fresh process per sample), `warm` (in-process steady state),
 `streaming` (MB/s). Each case declares which apply via `metrics[]`.
 
+**Cold-start is measured by the parent, not the child** — every runner spawns a fresh
+child that prints a `READY` marker the instant its runtime is initialized, and the parent
+records wall-clock from just-before-spawn to that marker. So cold-start includes process
+launch + library/class load + runtime init on all three runners, which is what makes the
+native-image-vs-JVM comparison meaningful (the native image has no JVM to boot; the JVM's
+cold cost *is* launch + classload). Adding a runner requires the same protocol: print
+`READY` (flushed) after init, then a JSON line with the in-process `firstRunMs`. Note only
+the first sample sees a truly cold OS page cache; the reported median is warm-cache init.
+
+## Prerequisites
+
+The Node and Python runners benchmark the staged `dwlib` (a GraalVM native image), so
+running them — and therefore `benchmarkCompare` — requires the same GraalVM toolchain as the
+rest of the repo: **GraalVM (Java 21+, `graalvm-community`)** with `native-image`, `GRAALVM_HOME`
+and `JAVA_HOME` set to it (see the root README / `CLAUDE.md`). The pinned build JDK is
+`graalvmVersion` in `gradle.properties`. The **engine runner alone** drives the JVM
+`DataWeaveScriptingEngine` and runs on any JDK — no native image required.
+
 ## Running
 
 The one-shot cross-runner comparison — runs **every** registered runner and prints the table:

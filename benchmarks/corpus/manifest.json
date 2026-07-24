@@ -47,6 +47,42 @@
       "script": "scripts/compile-heavy.dwl",
       "metrics": ["first-run", "warm"],
       "iterations": { "warm": 100, "warmup": 10, "samples": 20 }
+    },
+    {
+      "id": "csv-to-json",
+      "script": "scripts/csv-to-json.dwl",
+      "inputs": {
+        "payload": { "file": "inputs/records.csv", "mimeType": "application/csv" }
+      },
+      "metrics": ["first-run", "warm"],
+      "iterations": { "warm": 100, "warmup": 10, "samples": 20 }
+    },
+    {
+      "id": "xml-to-json",
+      "script": "scripts/xml-to-json.dwl",
+      "inputs": {
+        "payload": { "file": "inputs/catalog.xml", "mimeType": "application/xml" }
+      },
+      "metrics": ["first-run", "warm"],
+      "iterations": { "warm": 100, "warmup": 10, "samples": 20 }
+    },
+    {
+      "id": "deep-selector",
+      "script": "scripts/deep-selector.dwl",
+      "inputs": {
+        "payload": { "file": "inputs/nested.json", "mimeType": "application/json" }
+      },
+      "metrics": ["first-run", "warm"],
+      "iterations": { "warm": 200, "warmup": 20, "samples": 20 }
+    },
+    {
+      "id": "group-by",
+      "script": "scripts/group-by.dwl",
+      "inputs": {
+        "payload": { "file": "inputs/generated/records-large.json", "mimeType": "application/json", "generated": true }
+      },
+      "metrics": ["first-run", "warm"],
+      "iterations": { "warm": 30, "warmup": 3, "samples": 15 }
     }
   ]
 }
