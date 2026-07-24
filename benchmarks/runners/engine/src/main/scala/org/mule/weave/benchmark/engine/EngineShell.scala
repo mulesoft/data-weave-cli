@@ -89,6 +89,9 @@ class EngineShell {
     val compiled: DataWeaveScript = engine.compileWith(config)
     val result: DataWeaveResult = compiled.write(bindings, serviceManager, Option.empty[Any])
     result.getContent match {
+      // Matching PipedInputStream specifically distinguishes genuinely-deferred
+      // results from materialized ByteArraySeekableStream; a future weave version
+      // wrapping the deferred stream in another InputStream type would need this revisited.
       case is: java.io.PipedInputStream =>
         try {
           val buf = new Array[Byte](65536)

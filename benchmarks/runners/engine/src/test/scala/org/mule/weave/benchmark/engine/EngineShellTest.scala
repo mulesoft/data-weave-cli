@@ -60,7 +60,10 @@ class EngineShellTest extends AnyFreeSpec with Matchers {
       new ChunkedInputStream(resolved.bytes, 65536),
       "application/json",
       None)
-    drained should be > 0L
+    // Assert a substantial output, not just > 0: a mid-stream async truncation
+    // (DeferredWriter logs rather than throws) would drop well below this bound.
+    // map-scale emits JSON of magnitude comparable to its input.
+    drained should be > (resolved.bytes.length / 2).toLong
   }
 
   "runStreaming rejects a non-deferred script (tightened guard)" in {

@@ -10,6 +10,8 @@ import java.io.InputStream
 class ChunkedInputStream(data: Array[Byte], chunkSize: Int) extends InputStream {
   private var pos: Int = 0
 
+  // Single-byte read returns one byte (correct for this overload); chunk pacing
+  // applies to the bulk read(b,off,len) below, which DataWeave actually calls.
   override def read(): Int = {
     if (pos >= data.length) -1
     else {
