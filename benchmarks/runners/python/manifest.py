@@ -31,6 +31,9 @@ def load_manifest(corpus_dir):
         script = c.get("script")
         if not script or not (corpus_dir / script).exists():
             raise ValueError(f"case {cid} script not found: {script}")
+        streaming_script = c.get("streamingScript")
+        if streaming_script and not (corpus_dir / streaming_script).exists():
+            raise ValueError(f"case {cid} streamingScript not found: {streaming_script}")
         for name, inp in (c.get("inputs") or {}).items():
             if inp.get("file") and not inp.get("generated") \
                     and not (corpus_dir / inp["file"]).exists():
@@ -54,6 +57,13 @@ def resolve_inputs(manifest, case_obj):
 
 def read_script(manifest, case_obj):
     return (Path(manifest["corpusDir"]) / case_obj["script"]).read_text(encoding="utf-8")
+
+
+def resolve_streaming_script(manifest, case_obj):
+    """Script for the streaming metric: the streamingScript variant if declared,
+    else the base script. Warm/first-run always use read_script."""
+    rel = case_obj.get("streamingScript") or case_obj["script"]
+    return (Path(manifest["corpusDir"]) / rel).read_text(encoding="utf-8")
 
 
 def validate_result_ids(manifest, result_ids):

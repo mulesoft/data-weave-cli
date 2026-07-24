@@ -67,6 +67,18 @@ class TestManifest(unittest.TestCase):
         trivial = next(c for c in self.m["cases"] if c["id"] == "trivial")
         self.assertIn("2 + 2", manifest.read_script(self.m, trivial))
 
+    def test_resolve_streaming_script_prefers_variant(self):
+        map_scale = next(c for c in self.m["cases"] if c["id"] == "map-scale")
+        text = manifest.resolve_streaming_script(self.m, map_scale)
+        self.assertIn("deferred=true", text)
+
+    def test_resolve_streaming_script_falls_back_to_base(self):
+        obj = next(c for c in self.m["cases"] if c["id"] == "object-transform")
+        self.assertEqual(
+            manifest.resolve_streaming_script(self.m, obj),
+            manifest.read_script(self.m, obj),
+        )
+
     def test_resolve_inputs_reads_bytes_mime_charset(self):
         xml = next(c for c in self.m["cases"] if c["id"] == "xml-to-csv")
         resolved = manifest.resolve_inputs(self.m, xml)
