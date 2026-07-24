@@ -1,9 +1,9 @@
 # DataWeave benchmark results
 
-_Generated from commit `d6611d4` on 2026-07-24T19:27:26.294Z._
+_Generated from commit `f4bca0d` on 2026-07-24T20:28:12.909Z._
 
 **Environment** (Apple M4 Max, Mac OS X-aarch64):  
-`engine` — jvm 17.0.16, weave 2.12.0-20260413  
+`engine` — jvm 21.0.11, weave 2.12.0-20260413  
 `node-wrapper` — node v22.23.0, weave 2.12.0-20260413  
 `python-wrapper` — python 3.9.6, weave 2.12.0-20260413
 
@@ -13,29 +13,29 @@ _Generated from commit `d6611d4` on 2026-07-24T19:27:26.294Z._
 
 | case | metric | unit | engine | node-wrapper | python-wrapper | Δ node-wrapper vs engine | Δ python-wrapper vs engine |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| trivial | cold-start | ms | 149.48 | 38.14 | 42.67 | -74.5% | -71.5% |
-| trivial | first-run | ms | 309.21 | 8.53 | 8.78 | -97.2% | -97.2% |
-| trivial | warm | ms | 0.10 | 0.09 | 0.08 | -11.0% | -20.9% |
-| object-transform | first-run | ms | 583.65 | 16.73 | 17.01 | -97.1% | -97.1% |
-| object-transform | warm | ms | 0.26 | 0.24 | 0.22 | -9.8% | -16.3% |
-| map-scale | first-run | ms | 700.98 | 145.62 | 146.48 | -79.2% | -79.1% |
-| map-scale | warm | ms | 33.50 | 117.51 | 118.96 | +250.7% | +255.1% |
-| map-scale | streaming | MB/s | 52.43 | 28.53 | 29.66 | -45.6% | -43.4% |
-| xml-to-csv | first-run | ms | 323.17 | 8.62 | 8.83 | -97.3% | -97.3% |
-| xml-to-csv | warm | ms | 0.10 | 0.11 | 0.09 | +4.2% | -9.8% |
-| json-stream | first-run | ms | 673.21 | 126.30 | 127.67 | -81.2% | -81.0% |
-| json-stream | warm | ms | 26.41 | 100.12 | 101.72 | +279.0% | +285.1% |
-| json-stream | streaming | MB/s | 69.23 | 35.84 | 37.90 | -48.2% | -45.2% |
-| compile-heavy | first-run | ms | 619.24 | 17.91 | 18.13 | -97.1% | -97.1% |
-| compile-heavy | warm | ms | 1.07 | 0.86 | 0.84 | -19.7% | -21.3% |
-| csv-to-json | first-run | ms | 595.66 | 16.63 | 17.06 | -97.2% | -97.1% |
-| csv-to-json | warm | ms | 0.16 | 0.18 | 0.17 | +14.8% | +3.4% |
-| xml-to-json | first-run | ms | 609.17 | 16.80 | 17.22 | -97.2% | -97.2% |
-| xml-to-json | warm | ms | 0.17 | 0.19 | 0.17 | +13.6% | +3.2% |
-| deep-selector | first-run | ms | 318.98 | 8.65 | 9.08 | -97.3% | -97.2% |
-| deep-selector | warm | ms | 0.09 | 0.11 | 0.10 | +34.5% | +20.4% |
-| group-by | first-run | ms | 809.04 | 199.03 | 201.40 | -75.4% | -75.1% |
-| group-by | warm | ms | 70.83 | 168.45 | 171.07 | +137.8% | +141.5% |
+| trivial | cold-start | ms | 175.48 | 38.99 | 39.79 | -77.8% | -77.3% |
+| trivial | first-run | ms | 347.90 | 8.65 | 8.93 | -97.5% | -97.4% |
+| trivial | warm | ms | 0.11 | 0.09 | 0.08 | -23.2% | -28.4% |
+| object-transform | first-run | ms | 656.29 | 16.49 | 17.65 | -97.5% | -97.3% |
+| object-transform | warm | ms | 0.34 | 0.24 | 0.22 | -30.4% | -36.7% |
+| map-scale | first-run | ms | 785.94 | 141.34 | 144.58 | -82.0% | -81.6% |
+| map-scale | warm | ms | 33.77 | 115.52 | 117.89 | +242.1% | +249.1% |
+| map-scale | streaming | MB/s | 56.23 | 29.39 | 30.17 | -47.7% | -46.4% |
+| xml-to-csv | first-run | ms | 356.13 | 8.62 | 9.01 | -97.6% | -97.5% |
+| xml-to-csv | warm | ms | 0.09 | 0.10 | 0.10 | +16.5% | +8.8% |
+| json-stream | first-run | ms | 743.44 | 125.23 | 126.95 | -83.2% | -82.9% |
+| json-stream | warm | ms | 25.87 | 99.79 | 101.11 | +285.8% | +290.9% |
+| json-stream | streaming | MB/s | 75.43 | 37.08 | 38.31 | -50.8% | -49.2% |
+| compile-heavy | first-run | ms | 701.18 | 17.36 | 17.84 | -97.5% | -97.5% |
+| compile-heavy | warm | ms | 0.87 | 0.85 | 0.84 | -2.1% | -3.1% |
+| csv-to-json | first-run | ms | 669.11 | 16.35 | 17.12 | -97.6% | -97.4% |
+| csv-to-json | warm | ms | 0.12 | 0.17 | 0.17 | +44.9% | +41.0% |
+| xml-to-json | first-run | ms | 693.56 | 16.70 | 16.95 | -97.6% | -97.6% |
+| xml-to-json | warm | ms | 0.13 | 0.18 | 0.17 | +42.2% | +37.1% |
+| deep-selector | first-run | ms | 348.25 | 8.61 | 8.93 | -97.5% | -97.4% |
+| deep-selector | warm | ms | 0.07 | 0.12 | 0.10 | +82.7% | +53.9% |
+| group-by | first-run | ms | 919.06 | 196.34 | 199.28 | -78.6% | -78.3% |
+| group-by | warm | ms | 57.42 | 168.43 | 170.83 | +193.3% | +197.5% |
 
 ## Charts
 
@@ -48,7 +48,7 @@ xychart-beta
     title "trivial — cold-start (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [149.484, 38.142, 42.668]
+    bar [175.477, 38.991, 39.786]
 ```
 
 ```mermaid
@@ -56,7 +56,7 @@ xychart-beta
     title "trivial — first-run (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [309.206, 8.532, 8.775]
+    bar [347.897, 8.652, 8.929]
 ```
 
 ```mermaid
@@ -64,7 +64,7 @@ xychart-beta
     title "trivial — warm (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [0.101, 0.09, 0.08]
+    bar [0.112, 0.086, 0.08]
 ```
 
 ### object-transform
@@ -74,7 +74,7 @@ xychart-beta
     title "object-transform — first-run (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [583.654, 16.731, 17.012]
+    bar [656.287, 16.493, 17.65]
 ```
 
 ```mermaid
@@ -82,7 +82,7 @@ xychart-beta
     title "object-transform — warm (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [0.261, 0.236, 0.219]
+    bar [0.343, 0.239, 0.217]
 ```
 
 ### map-scale
@@ -92,7 +92,7 @@ xychart-beta
     title "map-scale — first-run (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [700.978, 145.616, 146.478]
+    bar [785.942, 141.339, 144.58]
 ```
 
 ```mermaid
@@ -100,7 +100,7 @@ xychart-beta
     title "map-scale — warm (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [33.504, 117.512, 118.956]
+    bar [33.766, 115.517, 117.892]
 ```
 
 ```mermaid
@@ -108,7 +108,7 @@ xychart-beta
     title "map-scale — streaming (MB/s, higher is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "MB/s"
-    bar [52.428, 28.532, 29.66]
+    bar [56.235, 29.388, 30.166]
 ```
 
 ### xml-to-csv
@@ -118,7 +118,7 @@ xychart-beta
     title "xml-to-csv — first-run (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [323.172, 8.615, 8.832]
+    bar [356.126, 8.621, 9.009]
 ```
 
 ```mermaid
@@ -126,7 +126,7 @@ xychart-beta
     title "xml-to-csv — warm (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [0.104, 0.109, 0.094]
+    bar [0.088, 0.103, 0.096]
 ```
 
 ### json-stream
@@ -136,7 +136,7 @@ xychart-beta
     title "json-stream — first-run (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [673.213, 126.296, 127.674]
+    bar [743.439, 125.233, 126.949]
 ```
 
 ```mermaid
@@ -144,7 +144,7 @@ xychart-beta
     title "json-stream — warm (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [26.415, 100.115, 101.718]
+    bar [25.868, 99.787, 101.11]
 ```
 
 ```mermaid
@@ -152,7 +152,7 @@ xychart-beta
     title "json-stream — streaming (MB/s, higher is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "MB/s"
-    bar [69.226, 35.839, 37.904]
+    bar [75.428, 37.076, 38.315]
 ```
 
 ### compile-heavy
@@ -162,7 +162,7 @@ xychart-beta
     title "compile-heavy — first-run (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [619.235, 17.909, 18.126]
+    bar [701.179, 17.36, 17.84]
 ```
 
 ```mermaid
@@ -170,7 +170,7 @@ xychart-beta
     title "compile-heavy — warm (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [1.072, 0.86, 0.843]
+    bar [0.867, 0.848, 0.84]
 ```
 
 ### csv-to-json
@@ -180,7 +180,7 @@ xychart-beta
     title "csv-to-json — first-run (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [595.66, 16.631, 17.056]
+    bar [669.11, 16.35, 17.125]
 ```
 
 ```mermaid
@@ -188,7 +188,7 @@ xychart-beta
     title "csv-to-json — warm (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [0.161, 0.185, 0.166]
+    bar [0.118, 0.171, 0.166]
 ```
 
 ### xml-to-json
@@ -198,7 +198,7 @@ xychart-beta
     title "xml-to-json — first-run (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [609.166, 16.797, 17.218]
+    bar [693.561, 16.704, 16.947]
 ```
 
 ```mermaid
@@ -206,7 +206,7 @@ xychart-beta
     title "xml-to-json — warm (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [0.168, 0.191, 0.173]
+    bar [0.126, 0.179, 0.172]
 ```
 
 ### deep-selector
@@ -216,7 +216,7 @@ xychart-beta
     title "deep-selector — first-run (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [318.976, 8.651, 9.078]
+    bar [348.245, 8.611, 8.93]
 ```
 
 ```mermaid
@@ -224,7 +224,7 @@ xychart-beta
     title "deep-selector — warm (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [0.085, 0.115, 0.103]
+    bar [0.067, 0.122, 0.102]
 ```
 
 ### group-by
@@ -234,7 +234,7 @@ xychart-beta
     title "group-by — first-run (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [809.044, 199.029, 201.398]
+    bar [919.061, 196.338, 199.279]
 ```
 
 ```mermaid
@@ -242,5 +242,5 @@ xychart-beta
     title "group-by — warm (ms, lower is better)"
     x-axis ["engine", "node-wrapper", "python-wrapper"]
     y-axis "ms"
-    bar [70.834, 168.445, 171.073]
+    bar [57.416, 168.427, 170.826]
 ```
