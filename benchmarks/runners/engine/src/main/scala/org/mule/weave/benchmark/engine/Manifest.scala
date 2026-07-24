@@ -12,6 +12,7 @@ final case class CaseInput(name: String, file: String, mimeType: String, charset
 final case class BenchCase(
   id: String,
   script: String,
+  streamingScript: Option[String],
   inputs: Seq[CaseInput],
   metrics: Set[String],
   iterations: Map[String, Int]) {
@@ -54,6 +55,13 @@ object Manifest {
       val script = obj.getString("script")
       if (!new File(corpusDir, script).exists()) throw new RuntimeException(s"case $id script not found: $script")
 
+      val streamingScript: Option[String] =
+        if (obj.has("streamingScript")) {
+          val ss = obj.getString("streamingScript")
+          if (!new File(corpusDir, ss).exists()) throw new RuntimeException(s"case $id streamingScript not found: $ss")
+          Some(ss)
+        } else None
+
       val iterations: Map[String, Int] =
         if (obj.has("iterations")) {
           val it = obj.getJSONObject("iterations")
@@ -79,7 +87,7 @@ object Manifest {
           }
         } else Seq.empty
 
-      BenchCase(id, script, inputs, metrics, iterations)
+      BenchCase(id, script, streamingScript, inputs, metrics, iterations)
     }
     new Manifest(corpusDir, cases)
   }
@@ -95,6 +103,11 @@ object Manifest {
 
   def resolveScript(m: Manifest, c: BenchCase): String =
     new String(Files.readAllBytes(new File(m.corpusDir, c.script).toPath), StandardCharsets.UTF_8)
+
+  def resolveStreamingScript(m: Manifest, c: BenchCase): String = {
+    val rel = c.streamingScript.getOrElse(c.script)
+    new String(Files.readAllBytes(new File(m.corpusDir, rel).toPath), StandardCharsets.UTF_8)
+  }
 
   def resolveInputs(m: Manifest, c: BenchCase): Seq[ResolvedInput] =
     c.inputs.map { in =>

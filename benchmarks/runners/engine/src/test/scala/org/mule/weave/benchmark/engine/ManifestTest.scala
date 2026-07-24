@@ -40,4 +40,18 @@ class ManifestTest extends AnyFreeSpec with Matchers {
     an [RuntimeException] should be thrownBy Manifest.validateResultIds(m, Seq("trivial", "not-a-case"))
     noException should be thrownBy Manifest.validateResultIds(m, Seq("trivial"))
   }
+
+  "resolveStreamingScript prefers the streamingScript variant" in {
+    val corpus = new File("../../corpus").getCanonicalFile
+    val m = Manifest.load(corpus)
+    val mapScale = m.cases.find(_.id == "map-scale").get
+    Manifest.resolveStreamingScript(m, mapScale) should include ("deferred=true")
+  }
+
+  "resolveStreamingScript falls back to the base script" in {
+    val corpus = new File("../../corpus").getCanonicalFile
+    val m = Manifest.load(corpus)
+    val obj = m.cases.find(_.id == "object-transform").get // no streamingScript
+    Manifest.resolveStreamingScript(m, obj) shouldBe Manifest.resolveScript(m, obj)
+  }
 }
