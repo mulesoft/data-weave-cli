@@ -113,6 +113,22 @@ object Emit {
 
   def main(args: Array[String]): Unit = {
     require(args.length >= 3, "usage: Emit <corpusDir> <resultsDir> <repoRoot>")
-    run(new File(args(0)), new File(args(1)), new File(args(2)))
+    // The weave runtime starts non-daemon "data-weave" threads (backing the
+    // deferred streaming PipedInputStream) that it exposes no way to shut down,
+    // so the JVM will NOT exit on its own once main returns — it hangs with the
+    // result already written. That stalls the sequential :benchmarkCompare, which
+    // waits for this process before running the node/python runners. Exit
+    // explicitly, mirroring native-cli's DWCLI. Exit non-zero on failure too:
+    // once those threads exist, an uncaught exception would hang rather than
+    // surface a failing exit code.
+    try {
+      run(new File(args(0)), new File(args(1)), new File(args(2)))
+      System.out.flush()
+      System.exit(0)
+    } catch {
+      case t: Throwable =>
+        t.printStackTrace()
+        System.exit(1)
+    }
   }
 }
