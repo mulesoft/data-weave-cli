@@ -79,6 +79,10 @@ class TestManifest(unittest.TestCase):
             manifest.read_script(self.m, obj),
         )
 
+    def test_streaming_uses_deferred_variant(self):
+        map_scale = next(c for c in self.m["cases"] if c["id"] == "map-scale")
+        self.assertIn("deferred=true", manifest.resolve_streaming_script(self.m, map_scale))
+
     def test_resolve_inputs_reads_bytes_mime_charset(self):
         xml = next(c for c in self.m["cases"] if c["id"] == "xml-to-csv")
         resolved = manifest.resolve_inputs(self.m, xml)

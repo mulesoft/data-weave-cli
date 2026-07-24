@@ -4,7 +4,7 @@ matching Node — unlike the engine's 2000-iter floor."""
 
 import time
 
-from manifest import cases_for_metric, read_script, resolve_inputs
+from manifest import cases_for_metric, read_script, resolve_inputs, resolve_streaming_script
 from stats import compute_stats, to_mbps
 
 
@@ -48,7 +48,7 @@ def run_warm_and_streaming(api, manifest, warmup_cap=None, warm_cap=None, stream
                      "stats": compute_stats(samples), "iterations": iters})
 
     for c in cases_for_metric(manifest, "streaming"):
-        script = read_script(manifest, c)
+        script = resolve_streaming_script(manifest, c)
         resolved = resolve_inputs(manifest, c)
         primary_name, primary = next(iter(resolved.items()))
         iters = streaming_cap if streaming_cap is not None \
