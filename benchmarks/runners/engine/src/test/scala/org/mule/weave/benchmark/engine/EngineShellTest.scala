@@ -55,7 +55,8 @@ class EngineShellTest extends AnyFreeSpec with Matchers {
     val shell = new EngineShell()
     val drained = shell.runStreaming(
       Manifest.resolveStreamingScript(manifest, c),
-      resolved.name,
+      EngineShell.safeName(c.id),   // scriptName — unique per case
+      resolved.name,                // inputName — matches what the script reads (payload)
       new ChunkedInputStream(resolved.bytes, 65536),
       "application/json",
       None)

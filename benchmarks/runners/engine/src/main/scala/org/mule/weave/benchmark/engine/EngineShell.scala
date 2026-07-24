@@ -70,17 +70,19 @@ class EngineShell {
     * runtime reads it incrementally), compiles the deferred script, and drains
     * the deferred PipedInputStream result in a read loop. Returns the number of
     * output bytes drained. Throws on compile/exec failure or a non-InputStream
-    * (non-deferred) result, so a script that forgot `deferred=true` fails loudly. */
-  def runStreaming(script: String, name: String, input: InputStream, inMime: String, inCharset: Option[String]): Long = {
+    * (non-deferred) result, so a script that forgot `deferred=true` fails loudly.
+    * `inputName` must match the binding the script reads (e.g. "payload");
+    * `scriptName` is a unique compilation identifier (e.g. from `safeName(caseId)`). */
+  def runStreaming(script: String, scriptName: String, inputName: String, input: InputStream, inMime: String, inCharset: Option[String]): Long = {
     val bindings = new ScriptingBindings()
     val charset = Charset.forName(inCharset.getOrElse("UTF-8"))
     val bv = new BindingValue(input, Some(inMime), Map.empty[String, Any], charset)
-    bindings.addBinding(name, bv)
+    bindings.addBinding(inputName, bv)
 
     val config = engine.newConfig()
       .withScript(script)
-      .withNameIdentifier(NameIdentifier(name))
-      .withInputs(Array(new InputType(name, None)))
+      .withNameIdentifier(NameIdentifier(scriptName))
+      .withInputs(Array(new InputType(inputName, None)))
       .withDefaultOutputType("application/json")
 
     val compiled: DataWeaveScript = engine.compileWith(config)
