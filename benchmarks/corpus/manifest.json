@@ -18,6 +18,7 @@
     {
       "id": "map-scale",
       "script": "scripts/map-scale.dwl",
+      "streamingScript": "scripts/map-scale.stream.dwl",
       "inputs": {
         "payload": { "file": "inputs/generated/records-large.json", "mimeType": "application/json", "generated": true }
       },
@@ -36,6 +37,7 @@
     {
       "id": "json-stream",
       "script": "scripts/json-stream.dwl",
+      "streamingScript": "scripts/json-stream.stream.dwl",
       "inputs": {
         "payload": { "file": "inputs/generated/records-large.json", "mimeType": "application/json", "generated": true }
       },
