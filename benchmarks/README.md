@@ -57,7 +57,15 @@ Or directly, once the wrapper is built (`./gradlew native-lib:buildNodePackage`)
     node runners/node/emit.mjs                            # writes results/node-<ts>.json
     node report/report.mjs results/*.json                 # renders the table
 
-Results are local-only; no history is accumulated (see the design spec).
+Results (`results/*.json`) are local-only and gitignored; no history is accumulated (see the
+design spec). To publish a snapshot, render a self-contained Markdown report with charts:
+
+    node report/report.mjs results/*.json --markdown report/RESULTS.md
+
+`RESULTS.md` stamps the commit and run date from the result files and embeds a Mermaid bar
+chart per corpus case (one bar per runner) that renders on GitHub — a case's metrics differ in
+unit/scale, so each metric is its own single-unit chart under the case. It is a committed
+snapshot, so it reflects one run on one machine — regenerate it to refresh.
 
 ## Adding a runner
 

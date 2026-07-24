@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadManifest } from "../lib/manifest.mjs";
@@ -74,17 +74,106 @@ function fmt(n) {
   return n === undefined ? "—" : Number(n).toFixed(2);
 }
 
+/** Sanitize a label for use inside a Mermaid xychart quoted string. */
+function mermaidLabel(s) {
+  return `"${String(s).replace(/"/g, "'")}"`;
+}
+
+/** Distinct runner names from the table header (between the fixed cols and the Δ col). */
+function runnersOf(table) {
+  return table.header.slice(3, table.header.length - 1);
+}
+
+/**
+ * Mermaid xychart-beta charts grouped by corpus case: one chart per (case,
+ * metric), with x-axis = runners and one bar per runner. A single case can span
+ * metrics of different units and scales (e.g. warm ms vs streaming MB/s), so
+ * each metric is its own single-unit chart under the case's heading. Runners
+ * missing a value render as 0 so the bar series length matches the x-axis
+ * (Mermaid requires it). Cases and metrics follow manifest order.
+ */
+export function renderMermaidCharts(table) {
+  const runners = runnersOf(table);
+  const cases = [];
+  for (const row of table.rows) if (!cases.includes(row.id)) cases.push(row.id);
+
+  const blocks = [];
+  for (const id of cases) {
+    const rows = table.rows.filter((r) => r.id === id);
+    const charts = [];
+    for (const row of rows) {
+      const better = row.lowerIsBetter ? "lower is better" : "higher is better";
+      const bars = runners.map((r) => {
+        const v = row.values[r];
+        return v === undefined ? 0 : Number(v.toFixed(3));
+      });
+      const lines = ["```mermaid", "xychart-beta"];
+      lines.push(`    title ${mermaidLabel(`${id} — ${row.metric} (${row.unit}, ${better})`)}`);
+      lines.push(`    x-axis [${runners.map(mermaidLabel).join(", ")}]`);
+      lines.push(`    y-axis ${mermaidLabel(row.unit)}`);
+      lines.push(`    bar [${bars.join(", ")}]`);
+      lines.push("```");
+      charts.push(lines.join("\n"));
+    }
+    blocks.push(`### ${id}\n\n${charts.join("\n\n")}`);
+  }
+  return blocks.join("\n\n");
+}
+
+/**
+ * A self-contained Markdown report: provenance (commit + date), the numeric
+ * table, then a Mermaid bar chart per (case, metric) — one bar per runner.
+ * `stamp` carries { commit, date } so a committed report says exactly which run
+ * it reflects.
+ */
+export function renderMarkdown(table, results, { baselineRunner, stamp }) {
+  const out = [];
+  out.push("# DataWeave benchmark results", "");
+  out.push(`_Generated from commit \`${stamp.commit}\` on ${stamp.date}._`, "");
+  const envs = results
+    .map((r) => `\`${r.runner}\` — ${r.env.runtimeVersion}, weave ${r.env.weaveVersion}`)
+    .join("  \n");
+  out.push(`**Environment** (${results[0]?.env.cpu ?? "?"}, ${results[0]?.env.os ?? "?"}):  \n${envs}`, "");
+  out.push(
+    "> Indicative only — timings are from a single run on one machine, not a dedicated bench box.",
+    ""
+  );
+
+  out.push("## Table", "");
+  out.push("| " + table.header.join(" | ") + " |");
+  out.push("| " + table.header.map(() => "---").join(" | ") + " |");
+  for (const row of table.rows) {
+    const runnerCols = table.header.slice(3, table.header.length - 1).map((r) => fmt(row.values[r]));
+    const deltaStr = row.delta === null ? "—" : `${row.delta > 0 ? "+" : ""}${row.delta.toFixed(1)}%`;
+    out.push(`| ${row.id} | ${row.metric} | ${row.unit} | ${runnerCols.join(" | ")} | ${deltaStr} |`);
+  }
+  out.push("");
+
+  out.push("## Charts", "");
+  out.push(
+    `One chart per corpus case, one bar per runner (${runnersOf(table).map((r) => `\`${r}\``).join(", ")}). ` +
+      `A case's metrics differ in unit and scale, so each metric is a separate single-unit chart. ` +
+      `\`${baselineRunner}\` is the table's delta baseline.`,
+    ""
+  );
+  out.push(renderMermaidCharts(table));
+  out.push("");
+  return out.join("\n");
+}
+
 export function main(argv) {
   const files = [];
   let baseline = null;
   let emit = null;
+  let markdown = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--baseline") baseline = argv[++i];
     else if (argv[i] === "--emit") emit = argv[++i];
+    else if (argv[i] === "--markdown") markdown = argv[++i];
     else files.push(argv[i]);
   }
   if (emit) throw new Error(`--emit ${emit} not implemented (exporter seam reserved for future history/dashboard)`);
-  if (files.length === 0) throw new Error("usage: report.mjs <result.json...> [--baseline <runner>]");
+  if (files.length === 0) throw new Error("usage: report.mjs <result.json...> [--baseline <runner>] [--markdown <file>]");
 
   let results = files.map((f) => JSON.parse(readFileSync(f, "utf-8")));
   results = dedupeLatestByRunner(results);
@@ -97,13 +186,25 @@ export function main(argv) {
     console.log("");
   }
 
-  const { header, rows } = buildTable(manifest, results, baselineRunner);
+  const table = buildTable(manifest, results, baselineRunner);
+  const { header, rows } = table;
   console.log("| " + header.join(" | ") + " |");
   console.log("| " + header.map(() => "---").join(" | ") + " |");
   for (const row of rows) {
     const runnerCols = header.slice(3, header.length - 1).map((runner) => fmt(row.values[runner]));
     const deltaStr = row.delta === null ? "—" : `${row.delta > 0 ? "+" : ""}${row.delta.toFixed(1)}%`;
     console.log(`| ${row.id} | ${row.metric} | ${row.unit} | ${runnerCols.join(" | ")} | ${deltaStr} |`);
+  }
+
+  if (markdown) {
+    // Provenance from the data itself: commit is stamped into every result's env
+    // (all runners share it in a clean run); date = latest result timestamp, so
+    // the report is tied to the run, not to when it was rendered.
+    const commit = results.find((r) => r.env?.commit)?.env.commit ?? "unknown";
+    const date = results.map((r) => r.timestamp).sort().at(-1) ?? "unknown";
+    const md = renderMarkdown(table, results, { baselineRunner, stamp: { commit, date } });
+    writeFileSync(markdown, md);
+    console.log(`\nwrote ${markdown}`);
   }
 }
 
