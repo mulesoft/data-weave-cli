@@ -33,37 +33,38 @@ object WarmBench {
     }
   }
 
-  /** Streaming throughput: measures MB/s over full compile+write per iteration.
-    *
-    * Methodology asymmetry: the engine measures throughput over a full shell.run
-    * (compile+write) of the whole input, whereas the Node runner's streaming uses an
-    * incrementally-chunked runTransform. The streaming delta across runners is NOT
-    * strictly like-for-like.
-    *
-    * Engine streaming relies on JIT warmth from runWarm having run first on the same
-    * shell (every current streaming case also declares warm). For future streaming-only
-    * cases that do NOT also declare warm, a lightweight warmup runs first.
+  /** Streaming throughput: feeds the primary input in 64KB chunks via a
+    * ChunkedInputStream (mirroring the native-lib runners) and drains the
+    * deferred output InputStream per iteration. MB/s is over the primary input
+    * bytes. The streaming-script variant (deferred=true) is resolved via
+    * Manifest.resolveStreamingScript so warm/first-run keep the base script.
     */
   def runStreaming(shell: EngineShell, m: Manifest, iterCap: Option[Int] = None): Seq[Row] = {
     Manifest.casesForMetric(m, "streaming").map { c =>
-      val script = Manifest.resolveScript(m, c)
+      val script = Manifest.resolveStreamingScript(m, c)
       val inputs = Manifest.resolveInputs(m, c)
-      val name = EngineShell.safeName(c.id)
-      val primaryBytes = inputs.head.bytes.length.toLong
+      val scriptName = EngineShell.safeName(c.id)
+      val primary = inputs.head
+      val primaryBytes = primary.bytes.length.toLong
       val iters = iterCap.getOrElse(c.streaming)
 
-      // Guard: if this case does NOT declare warm, warmup first so streaming isn't JIT-cold.
+      // Guard: if this case does NOT declare warm, warm up first so streaming isn't JIT-cold.
+      // Warmup uses the deferred streaming path too, over a fresh ChunkedInputStream each time.
       if (!c.metrics.contains("warm")) {
         println(s"[streaming] ${c.id}: streaming-only, warming up first ($WARMUP_FLOOR iters)")
         var w = 0
-        while (w < WARMUP_FLOOR) { shell.run(script, name, inputs, new CountingOutputStream()); w += 1 }
+        while (w < WARMUP_FLOOR) {
+          shell.runStreaming(script, scriptName, primary.name, new ChunkedInputStream(primary.bytes, 65536), primary.mimeType, primary.charset)
+          w += 1
+        }
       }
 
       val mbps = new Array[Double](iters)
       var i = 0
       while (i < iters) {
+        val in = new ChunkedInputStream(primary.bytes, 65536)
         val start = nowNs()
-        shell.run(script, name, inputs, new CountingOutputStream())
+        shell.runStreaming(script, scriptName, primary.name, in, primary.mimeType, primary.charset)
         mbps(i) = Stats.toMBps(primaryBytes, msSince(start))
         i += 1
       }

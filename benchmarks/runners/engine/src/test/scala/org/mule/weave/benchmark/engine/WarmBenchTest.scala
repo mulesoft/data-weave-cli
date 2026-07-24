@@ -19,7 +19,7 @@ class WarmBenchTest extends AnyFreeSpec with Matchers {
     all (rows.map(_.iterations)) shouldBe 3
   }
 
-  "streaming rows are produced with MB/s unit" in {
+  "streaming rows are produced with MB/s unit via the deferred variant" in {
     if (!TestSupport.ensureGeneratedInputs(corpus)) cancel("generated input unavailable (node missing?)")
     val shell = new EngineShell()
     val rows = WarmBench.runStreaming(shell, manifest, iterCap = Some(2))
