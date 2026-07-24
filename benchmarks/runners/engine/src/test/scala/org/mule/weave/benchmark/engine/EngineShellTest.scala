@@ -62,4 +62,19 @@ class EngineShellTest extends AnyFreeSpec with Matchers {
       None)
     drained should be > 0L
   }
+
+  "runStreaming rejects a non-deferred script (tightened guard)" in {
+    val shell = new EngineShell()
+    val nonDeferredScript = "output application/json\n---\npayload"
+    val input = "[1,2,3]".getBytes("UTF-8")
+    an [Exception] should be thrownBy {
+      shell.runStreaming(
+        nonDeferredScript,
+        "bench_non_deferred_test",
+        "payload",
+        new ChunkedInputStream(input, 65536),
+        "application/json",
+        None)
+    }
+  }
 }

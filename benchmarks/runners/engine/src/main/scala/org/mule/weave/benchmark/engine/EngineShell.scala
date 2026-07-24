@@ -69,10 +69,11 @@ class EngineShell {
   /** Streaming variant of `run`: binds `input` as a lazy InputStream (so the
     * runtime reads it incrementally), compiles the deferred script, and drains
     * the deferred PipedInputStream result in a read loop. Returns the number of
-    * output bytes drained. Throws on compile/exec failure or a non-InputStream
-    * (non-deferred) result, so a script that forgot `deferred=true` fails loudly.
-    * `inputName` must match the binding the script reads (e.g. "payload");
-    * `scriptName` is a unique compilation identifier (e.g. from `safeName(caseId)`). */
+    * output bytes drained. Throws on compile/exec failure or a non-PipedInputStream
+    * result — a materialized result is rejected, so a script that forgot
+    * `deferred=true` fails loudly. `inputName` must match the binding the script
+    * reads (e.g. "payload"); `scriptName` is a unique compilation identifier
+    * (e.g. from `safeName(caseId)`). */
   def runStreaming(script: String, scriptName: String, inputName: String, input: InputStream, inMime: String, inCharset: Option[String]): Long = {
     val bindings = new ScriptingBindings()
     val charset = Charset.forName(inCharset.getOrElse("UTF-8"))
@@ -86,9 +87,9 @@ class EngineShell {
       .withDefaultOutputType("application/json")
 
     val compiled: DataWeaveScript = engine.compileWith(config)
-    val result: DataWeaveResult = compiled.write(bindings, serviceManager, "application/json", Option.empty[Any])
+    val result: DataWeaveResult = compiled.write(bindings, serviceManager, Option.empty[Any])
     result.getContent match {
-      case is: InputStream =>
+      case is: java.io.PipedInputStream =>
         try {
           val buf = new Array[Byte](65536)
           var total = 0L
@@ -100,7 +101,7 @@ class EngineShell {
         }
       case other =>
         throw new RuntimeException(
-          s"streaming result is not an InputStream (did the script declare deferred=true?): ${other.getClass.getName}")
+          s"streaming result is not a deferred PipedInputStream (did the script declare deferred=true?): ${other.getClass.getName}")
     }
   }
 }
