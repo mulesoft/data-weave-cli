@@ -82,16 +82,27 @@ object Emit {
     pb.redirectErrorStream(true)
     val t0 = System.nanoTime()
     val p = pb.start()
+    // We never write to the child; close its stdin pipe immediately so that FD is
+    // not held for the process lifetime.
+    p.getOutputStream.close()
     // Read line-by-line (not toList) so we can stamp the clock the instant READY
-    // arrives, before the child runs the script.
+    // arrives, before the child runs the script. Close the Source (and thus the
+    // stdout pipe FD) deterministically — otherwise ~195 spawns leak FDs until GC
+    // and can trip macOS's default `ulimit -n` of 256 mid-benchmark.
     var coldStartMs: Option[Double] = None
     var jsonLine: Option[String] = None
     val src = scala.io.Source.fromInputStream(p.getInputStream)
-    for (line <- src.getLines()) {
-      if (line == "READY") coldStartMs = Some((System.nanoTime() - t0) / 1e6)
-      else if (line.startsWith("{")) jsonLine = Some(line)
-    }
-    val code = p.waitFor()
+    val code =
+      try {
+        for (line <- src.getLines()) {
+          if (line == "READY") coldStartMs = Some((System.nanoTime() - t0) / 1e6)
+          else if (line.startsWith("{")) jsonLine = Some(line)
+        }
+        p.waitFor()
+      } finally {
+        src.close()    // release the stdout pipe FD (Scala 2.12: no Using)
+        p.destroy()    // reclaim the child + its FDs even if the read loop threw
+      }
     if (code != 0) throw new RuntimeException(s"EngineChild failed for case '$caseId' (exit $code)")
     val cold = coldStartMs.getOrElse(
       throw new RuntimeException(s"EngineChild for case '$caseId' never printed READY"))

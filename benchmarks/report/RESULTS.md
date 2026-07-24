@@ -20,12 +20,12 @@ _Generated from commit `0cd78a1` on 2026-07-24T14:33:03.805941Z._
 | object-transform | warm | ms | 0.28 | 0.23 | 0.22 | -18.1% |
 | map-scale | first-run | ms | 764.13 | 140.45 | 144.91 | -81.6% |
 | map-scale | warm | ms | 35.58 | 117.66 | 117.99 | +230.6% |
-| map-scale | streaming | MB/s | 59.03 | 29.71 | 29.56 | -49.7% |
+| map-scale | streaming | MB/s | 59.03 | 29.71 | 29.56 | n/a |
 | xml-to-csv | first-run | ms | 337.29 | 8.63 | 9.48 | -97.4% |
 | xml-to-csv | warm | ms | 0.10 | 0.13 | 0.09 | +29.9% |
 | json-stream | first-run | ms | 717.85 | 122.23 | 127.18 | -83.0% |
 | json-stream | warm | ms | 26.62 | 99.34 | 100.08 | +273.1% |
-| json-stream | streaming | MB/s | 77.89 | 37.92 | 37.83 | -51.3% |
+| json-stream | streaming | MB/s | 77.89 | 37.92 | 37.83 | n/a |
 | compile-heavy | first-run | ms | 646.98 | 17.02 | 18.00 | -97.4% |
 | compile-heavy | warm | ms | 1.02 | 0.84 | 1.06 | -17.9% |
 | csv-to-json | first-run | ms | 616.73 | 16.28 | 17.50 | -97.4% |
@@ -36,6 +36,8 @@ _Generated from commit `0cd78a1` on 2026-07-24T14:33:03.805941Z._
 | deep-selector | warm | ms | 0.08 | 0.11 | 0.10 | +33.4% |
 | group-by | first-run | ms | 842.98 | 193.86 | 197.31 | -77.0% |
 | group-by | warm | ms | 71.51 | 171.33 | 169.72 | +139.6% |
+
+> `n/a` deltas mark metrics that are not like-for-like across runners: the engine's `streaming` times a full compile+write of the whole input per iteration, while native-lib runners time an incrementally-chunked transform. Compare each runner's absolute `streaming` throughput, not the delta.
 
 ## Charts
 

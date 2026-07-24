@@ -6,10 +6,31 @@ import { loadManifest } from "../lib/manifest.mjs";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CORPUS = join(__dirname, "..", "corpus");
 
+/**
+ * Metrics whose cross-runner numbers are NOT like-for-like, so a Δ between
+ * runners is meaningless and must not be printed. `streaming` qualifies: the
+ * engine times a full compile+write of the whole input per iteration, while the
+ * Node runner times an incrementally-chunked runTransform (see
+ * WarmBench.scala:36-46). warm/first-run/cold-start ARE comparable.
+ */
+const NON_COMPARABLE_METRICS = new Set(["streaming"]);
+
 /** Raw percent change of value vs baseline. Sign interpretation is per-unit (caller decides). */
 export function computeDelta(value, baseline, _unit) {
   if (baseline === 0) return NaN;
   return ((value - baseline) / baseline) * 100;
+}
+
+/**
+ * Delta cell text for a table row. Distinguishes three states so the report is
+ * never misleading: `n/a` = metric is not comparable across runners (methodology
+ * differs), `—` = comparison not possible (missing baseline or only one runner),
+ * else the signed percent.
+ */
+export function formatDelta(row) {
+  if (!row.comparable) return "n/a";
+  if (row.delta === null) return "—";
+  return `${row.delta > 0 ? "+" : ""}${row.delta.toFixed(1)}%`;
 }
 
 /** Distinct weaveVersions across results; length > 1 means the comparison spans versions. */
@@ -60,11 +81,14 @@ export function buildTable(manifest, results, baselineRunner) {
         }
       }
       if (Object.keys(values).length === 0) continue; // metric declared but no runner ran it
+      const comparable = !NON_COMPARABLE_METRICS.has(metric);
       const base = values[baselineRunner];
       const other = runners.find((r) => r !== baselineRunner && values[r] !== undefined);
       const delta =
-        base !== undefined && other !== undefined ? computeDelta(values[other], base, unit) : null;
-      rows.push({ id: c.id, metric, unit, values, delta, lowerIsBetter: lowerIsBetter(unit) });
+        comparable && base !== undefined && other !== undefined
+          ? computeDelta(values[other], base, unit)
+          : null;
+      rows.push({ id: c.id, metric, unit, values, delta, comparable, lowerIsBetter: lowerIsBetter(unit) });
     }
   }
   return { header: ["case", "metric", "unit", ...runners, `Δ vs ${baselineRunner}`], rows };
@@ -144,10 +168,18 @@ export function renderMarkdown(table, results, { baselineRunner, stamp }) {
   out.push("| " + table.header.map(() => "---").join(" | ") + " |");
   for (const row of table.rows) {
     const runnerCols = table.header.slice(3, table.header.length - 1).map((r) => fmt(row.values[r]));
-    const deltaStr = row.delta === null ? "—" : `${row.delta > 0 ? "+" : ""}${row.delta.toFixed(1)}%`;
-    out.push(`| ${row.id} | ${row.metric} | ${row.unit} | ${runnerCols.join(" | ")} | ${deltaStr} |`);
+    out.push(`| ${row.id} | ${row.metric} | ${row.unit} | ${runnerCols.join(" | ")} | ${formatDelta(row)} |`);
   }
   out.push("");
+  if (table.rows.some((r) => !r.comparable)) {
+    out.push(
+      "> `n/a` deltas mark metrics that are not like-for-like across runners: " +
+        "the engine's `streaming` times a full compile+write of the whole input per " +
+        "iteration, while native-lib runners time an incrementally-chunked transform. " +
+        "Compare each runner's absolute `streaming` throughput, not the delta.",
+      ""
+    );
+  }
 
   out.push("## Charts", "");
   out.push(
@@ -192,8 +224,11 @@ export function main(argv) {
   console.log("| " + header.map(() => "---").join(" | ") + " |");
   for (const row of rows) {
     const runnerCols = header.slice(3, header.length - 1).map((runner) => fmt(row.values[runner]));
-    const deltaStr = row.delta === null ? "—" : `${row.delta > 0 ? "+" : ""}${row.delta.toFixed(1)}%`;
-    console.log(`| ${row.id} | ${row.metric} | ${row.unit} | ${runnerCols.join(" | ")} | ${deltaStr} |`);
+    console.log(`| ${row.id} | ${row.metric} | ${row.unit} | ${runnerCols.join(" | ")} | ${formatDelta(row)} |`);
+  }
+  if (rows.some((r) => !r.comparable)) {
+    console.log("");
+    console.log("note: `n/a` deltas mark metrics not comparable across runners (e.g. streaming — different methodology); compare absolute throughput, not the delta.");
   }
 
   if (markdown) {
