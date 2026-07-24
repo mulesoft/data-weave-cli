@@ -7,13 +7,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CORPUS = join(__dirname, "..", "corpus");
 
 /**
- * Metrics whose cross-runner numbers are NOT like-for-like, so a Δ between
- * runners is meaningless and must not be printed. `streaming` qualifies: the
- * engine times a full compile+write of the whole input per iteration, while the
- * Node runner times an incrementally-chunked runTransform (see
- * WarmBench.scala:36-46). warm/first-run/cold-start ARE comparable.
+ * Metrics whose cross-runner numbers are not like-for-like. Empty since the
+ * streaming methodology was aligned across runners (chunked input + deferred
+ * output) — the streaming delta is meaningful again. Kept as a seam for any
+ * future non-comparable metric.
  */
-const NON_COMPARABLE_METRICS = new Set(["streaming"]);
+const NON_COMPARABLE_METRICS = new Set();
 
 /** Raw percent change of value vs baseline. Sign interpretation is per-unit (caller decides). */
 export function computeDelta(value, baseline, _unit) {
@@ -171,16 +170,6 @@ export function renderMarkdown(table, results, { baselineRunner, stamp }) {
     out.push(`| ${row.id} | ${row.metric} | ${row.unit} | ${runnerCols.join(" | ")} | ${formatDelta(row)} |`);
   }
   out.push("");
-  if (table.rows.some((r) => !r.comparable)) {
-    out.push(
-      "> `n/a` deltas mark metrics that are not like-for-like across runners: " +
-        "the engine's `streaming` times a full compile+write of the whole input per " +
-        "iteration, while native-lib runners time an incrementally-chunked transform. " +
-        "Compare each runner's absolute `streaming` throughput, not the delta.",
-      ""
-    );
-  }
-
   out.push("## Charts", "");
   out.push(
     `One chart per corpus case, one bar per runner (${runnersOf(table).map((r) => `\`${r}\``).join(", ")}). ` +
@@ -225,10 +214,6 @@ export function main(argv) {
   for (const row of rows) {
     const runnerCols = header.slice(3, header.length - 1).map((runner) => fmt(row.values[runner]));
     console.log(`| ${row.id} | ${row.metric} | ${row.unit} | ${runnerCols.join(" | ")} | ${formatDelta(row)} |`);
-  }
-  if (rows.some((r) => !r.comparable)) {
-    console.log("");
-    console.log("note: `n/a` deltas mark metrics not comparable across runners (e.g. streaming — different methodology); compare absolute throughput, not the delta.");
   }
 
   if (markdown) {

@@ -40,26 +40,21 @@ test("buildTable joins by (id, metric) with a delta vs baseline", () => {
   assert.equal(trivialWarm.delta, -50); // node is 50% lower (faster) than engine baseline
 });
 
-test("streaming metric is non-comparable — no cross-runner delta is printed", () => {
+test("streaming metric now carries a real cross-runner delta", () => {
   const manifest = loadManifest(CORPUS);
   const results = [load("node-a.json"), load("engine-b.json")];
   const { rows } = buildTable(manifest, results, "engine");
 
-  // Both fixtures report map-scale streaming (300 vs 150 MB/s) — a naive delta
-  // would print +100%, which is meaningless given the methodology asymmetry.
+  // Fixtures: map-scale streaming node=300 vs engine=150 MB/s. With aligned
+  // methodology this is a real +100% delta, no longer suppressed.
   const streaming = rows.find((r) => r.id === "map-scale" && r.metric === "streaming");
   assert.ok(streaming, "fixture should exercise a streaming row");
-  assert.equal(streaming.comparable, false);
-  assert.equal(streaming.delta, null);
-  assert.equal(formatDelta(streaming), "n/a");
-
-  // A comparable metric (warm) still gets a real delta.
-  const warm = rows.find((r) => r.id === "trivial" && r.metric === "warm");
-  assert.equal(warm.comparable, true);
-  assert.equal(formatDelta(warm), "-50.0%");
+  assert.equal(streaming.comparable, true);
+  assert.equal(streaming.delta, 100);
+  assert.equal(formatDelta(streaming), "+100.0%");
 });
 
-test("renderMarkdown footnotes the n/a delta when a non-comparable metric is present", () => {
+test("renderMarkdown emits no streaming non-comparable footnote", () => {
   const manifest = loadManifest(CORPUS);
   const results = [load("node-a.json"), load("engine-b.json")];
   const table = buildTable(manifest, results, "engine");
@@ -68,9 +63,7 @@ test("renderMarkdown footnotes the n/a delta when a non-comparable metric is pre
     stamp: { commit: "abc1234", date: "2026-07-24T14:33:03Z" },
   });
   assert.ok(md.includes("| map-scale | streaming | MB/s |"), "streaming row is present");
-  assert.ok(/\| n\/a \|/.test(md), "streaming delta cell reads n/a");
-  assert.ok(!md.includes("+100.0%"), "no misleading streaming delta is printed");
-  assert.ok(md.includes("not like-for-like across runners"), "footnote explains why");
+  assert.ok(!md.includes("not like-for-like across runners"), "footnote removed");
 });
 
 test("renderMermaidCharts emits one chart per (case, metric) with a bar per runner", () => {
