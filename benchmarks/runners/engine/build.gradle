@@ -1,0 +1,41 @@
+plugins {
+    id "com.github.maiflai.scalatest" version "${scalaTestPluginVersion}"
+}
+
+dependencies {
+    api group: 'org.mule.weave', name: 'runtime', version: weaveVersion
+    api group: 'org.mule.weave', name: 'core-modules', version: weaveVersion
+    implementation group: 'org.mule.weave', name: 'parser', version: weaveVersion
+    implementation group: 'org.mule.weave', name: 'wlang', version: weaveVersion
+    implementation 'org.json:json:20240303'
+
+    testImplementation group: 'org.scalatest', name: 'scalatest_2.12', version: scalaTestVersion
+    testRuntimeOnly 'com.vladsch.flexmark:flexmark-all:0.62.2'
+}
+
+def benchmarksDir = "${rootDir}/benchmarks"
+
+// Regenerate the shared large input via the existing Node generator (idempotent,
+// deterministic). Keeps the engine consuming the SAME bytes as other runners.
+tasks.register('genBenchInputs', Exec) {
+    onlyIf { project.findProperty('benchmark')?.toString()?.toBoolean() == true }
+    workingDir(benchmarksDir)
+    if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+        commandLine('cmd', '/c', 'node corpus/gen-inputs.mjs')
+    } else {
+        commandLine('bash', '-c', 'node corpus/gen-inputs.mjs')
+    }
+}
+
+// Opt-in only: skipped unless -Pbenchmark=true. Never part of build/test.
+// Tagged `benchmarkRunner` so the root :benchmarkCompare aggregator discovers and
+// runs it automatically — no edit to that task is needed to include this runner.
+tasks.register('benchmarkEngine', JavaExec) {
+    onlyIf { project.findProperty('benchmark')?.toString()?.toBoolean() == true }
+    ext.benchmarkRunner = true
+    dependsOn tasks.named('genBenchInputs'), tasks.named('classes')
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'org.mule.weave.benchmark.engine.Emit'
+    args("${benchmarksDir}/corpus", "${benchmarksDir}/results", "${rootDir}")
+    jvmArgs = ['-Xmx6G']
+}

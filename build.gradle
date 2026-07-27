@@ -66,3 +66,50 @@ subprojects {
         t.outputs.dir("${project.buildDir}/native/nativeCompile")
     }
 }
+
+// ── Benchmark aggregator ─────────────────────────────────────────────────────
+// `benchmarkCompare` runs EVERY registered benchmark runner and then renders the
+// cross-runner comparison table (benchmarks/report/report.mjs). Opt-in only
+// (-Pbenchmark=true); never part of build/test.
+//
+// A runner integrates ITSELF — no edit to this task is required to add one. To
+// register a new runner (e.g. a future Python runner):
+//   1. In the runner's module, register a Gradle task that runs the runner and
+//      writes its result file to benchmarks/results/<runner>-<timestamp>.json,
+//      conforming to benchmarks/schema/result.schema.json (the runner's `runner`
+//      field is the column name and dedupe key in the report).
+//   2. Tag that task with `ext.benchmarkRunner = true`.
+// benchmarkCompare auto-discovers all tagged tasks across every subproject, runs
+// them, then runs the report once over results/*.json. report.mjs keeps only the
+// latest result per runner, so re-runs don't produce duplicate columns.
+def benchmarkOptIn = { project.findProperty('benchmark')?.toString()?.toBoolean() == true }
+
+// Resolved lazily (during task-graph construction, after all subprojects are
+// configured) so ordinary builds never realize every subproject's tasks.
+def benchmarkRunnerTasks = {
+    subprojects.collectMany { sp ->
+        sp.tasks.matching { t -> t.ext.has('benchmarkRunner') && t.ext.get('benchmarkRunner') == true }
+    }
+}
+
+tasks.register('benchmarkReport', Exec) {
+    group = 'benchmark'
+    description = 'Renders the cross-runner comparison table from benchmarks/results/*.json. Opt-in: -Pbenchmark=true.'
+    onlyIf benchmarkOptIn
+    mustRunAfter benchmarkRunnerTasks
+    workingDir("${rootDir}/benchmarks")
+    def script = 'node report/report.mjs results/*.json'
+    if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+        commandLine('cmd', '/c', script)
+    } else {
+        commandLine('bash', '-c', script)
+    }
+}
+
+tasks.register('benchmarkCompare') {
+    group = 'benchmark'
+    description = 'Runs every registered benchmark runner (tag: ext.benchmarkRunner) and prints the comparison table. Opt-in: -Pbenchmark=true.'
+    onlyIf benchmarkOptIn
+    dependsOn benchmarkRunnerTasks
+    dependsOn tasks.named('benchmarkReport')
+}

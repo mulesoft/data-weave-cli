@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DataWeave benchmark result",
+  "type": "object",
+  "required": ["schemaVersion", "runner", "env", "timestamp", "cases"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "runner": { "type": "string" },
+    "timestamp": { "type": "string" },
+    "env": {
+      "type": "object",
+      "required": ["os", "cpu", "runtimeVersion", "weaveVersion", "commit", "dwlibBuildId"],
+      "additionalProperties": true,
+      "properties": {
+        "os": { "type": "string" },
+        "cpu": { "type": "string" },
+        "runtimeVersion": { "type": "string" },
+        "weaveVersion": { "type": "string" },
+        "commit": { "type": "string" },
+        "dwlibBuildId": { "type": "string" }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "metric", "unit", "stats", "iterations"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "metric": { "enum": ["cold-start", "first-run", "warm", "streaming"] },
+          "unit": { "enum": ["ms", "MB/s"] },
+          "iterations": { "type": "integer" },
+          "stats": {
+            "type": "object",
+            "required": ["median"],
+            "additionalProperties": false,
+            "properties": {
+              "min": { "type": "number" },
+              "median": { "type": "number" },
+              "p90": { "type": "number" },
+              "p99": { "type": "number" },
+              "mean": { "type": "number" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

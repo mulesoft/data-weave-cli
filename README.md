@@ -53,13 +53,14 @@ brew install dw
 
 ### Build and Install
 
-To build the project, you need to run gradlew with the graalVM distribution based on Java 11. You can download it
-at https://github.com/graalvm/graalvm-ce-builds/releases
-Set:
+To build the project, you need a GraalVM (`graalvm-community`) distribution with `native-image`,
+Java 21+ (the pinned build version is `graalvmVersion` in `gradle.properties`). You can run
+`./install-graalvm.sh`, which downloads a distribution into `.graalvm/` and exports the vars, or
+download one from https://github.com/graalvm/graalvm-ce-builds/releases and set them yourself:
 
 ```bash
-export GRAALVM_HOME=`pwd`/.graalvm/graalvm-ce-java11-22.3.0/Contents/Home
-export JAVA_HOME=`pwd`/.graalvm/graalvm-ce-java11-22.3.0/Contents/Home
+export GRAALVM_HOME=/path/to/graalvm-community
+export JAVA_HOME=$GRAALVM_HOME
 ```
 
 Execute the gradle task `nativeCompile`
@@ -265,6 +266,23 @@ dw run -p myName=Julian "output json --- { name : params.myName }"
 }
 ```
 
+
+## Benchmarks
+
+A language-agnostic benchmark harness lives in [`benchmarks/`](benchmarks/README.md). It runs a
+shared corpus of DataWeave scripts through multiple runners — the Node and Python native-lib
+wrappers plus a JVM engine baseline — each emitting the same JSON schema so the results are
+directly comparable. It measures cold-start, first-run, warm/steady-state, and streaming
+throughput, then renders a cross-runner comparison table.
+
+Benchmarks are opt-in and never part of the normal build/test:
+
+```bash
+./gradlew benchmarkCompare -Pbenchmark=true   # run every runner + print the comparison table
+```
+
+See [`benchmarks/README.md`](benchmarks/README.md) for the corpus, metrics, per-runner tasks, and
+how to add a new runner.
 
 ## Contributions Welcome
 

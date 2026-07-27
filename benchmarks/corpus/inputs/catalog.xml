@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<catalog>
+  <book><title>DataWeave</title><price>42</price></book>
+  <book><title>Streaming</title><price>17</price></book>
+  <book><title>Native Image</title><price>29</price></book>
+</catalog>

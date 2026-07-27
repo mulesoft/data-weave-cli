@@ -733,16 +733,35 @@ class DataWeave:
                 return -1
 
         input_iter = iter(input_stream)
+        # Stateful reader to handle chunks larger than native buffer size.
+        # Mirrors Node binding's createChunkReader: maintains current chunk + offset,
+        # returns at most buf_size bytes per call, advances to next chunk only when
+        # current chunk is fully consumed.
+        read_state = {"current_chunk": b"", "offset": 0, "done": False}
 
         @READ_CALLBACK
         def _read_cb(_ctx, buf, buf_size):
             try:
-                data = next(input_iter, b"")
-                if not data:
-                    return 0
-                n = min(len(data), buf_size)
-                ctypes.memmove(buf, data, n)
-                return n
+                while True:
+                    # If we have buffered data, return what we can
+                    if read_state["offset"] < len(read_state["current_chunk"]):
+                        chunk = read_state["current_chunk"]
+                        offset = read_state["offset"]
+                        n = min(len(chunk) - offset, buf_size)
+                        ctypes.memmove(buf, chunk[offset:offset+n], n)
+                        read_state["offset"] += n
+                        return n
+                    # Current chunk exhausted and iterator done -> EOF
+                    if read_state["done"]:
+                        return 0
+                    # Pull next chunk
+                    data = next(input_iter, None)
+                    if data is None or not data:
+                        read_state["done"] = True
+                        return 0
+                    read_state["current_chunk"] = data
+                    read_state["offset"] = 0
+                    # Loop back to serve from the new chunk
             except Exception:
                 return -1
 
