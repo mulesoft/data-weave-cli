@@ -93,4 +93,12 @@ class BenchmarkHarnessTest extends AnyFreeSpec with Matchers {
   }
 
   private def capturePs(): PrintStream = new PrintStream(new ByteArrayOutputStream(), true, "UTF-8")
+
+  "BenchmarkMode.ENABLED" - {
+    "is false in a normal (non -Pbenchmark) build" in {
+      // Tests run without -Pbenchmark, so the generated constant must be false —
+      // proving the harness is dead code / stripped from a production image.
+      org.mule.weave.cli.BenchmarkMode.ENABLED shouldBe false
+    }
+  }
 }
