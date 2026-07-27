@@ -91,13 +91,20 @@ jobs:
 
       # Run the Node.js TCK conformance lane (only on master to save CI time on
       # PRs — mirrors the native-cli regression gating). Stages the DataWeave
-      # test-suite corpus, then runs the tck vitest project against the built
-      # package. The Node package was already built by "Create Native Lib Node
-      # Package" above.
-      - name: Run Node.js TCK Conformance
+      # tck@zip corpus per supported version and runs the tck vitest project
+      # against the built package. The Node package was already built by "Create
+      # Native Lib Node Package" above; dwlib is the single 2.13.0 build and the
+      # 2.12.2 corpus replays against it (the binding exposes no language-level).
+      - name: Run Node.js TCK Conformance 2.12.2-SNAPSHOT
         if: github.ref == 'refs/heads/master'
         run: |
-          ./gradlew --stacktrace --no-problems-report native-lib:stageTckSuites
+          ./gradlew --stacktrace --no-problems-report -PweaveTestSuiteVersion=2.12.2-SNAPSHOT native-lib:stageTckSuites
+          cd native-lib/node && npm run test:tck
+        shell: bash
+      - name: Run Node.js TCK Conformance 2.13.0-SNAPSHOT
+        if: github.ref == 'refs/heads/master'
+        run: |
+          ./gradlew --stacktrace --no-problems-report -PweaveTestSuiteVersion=2.13.0-SNAPSHOT native-lib:stageTckSuites
           cd native-lib/node && npm run test:tck
         shell: bash
 
