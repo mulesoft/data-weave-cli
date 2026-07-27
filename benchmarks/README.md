@@ -13,6 +13,12 @@ Language-agnostic benchmark harness for the DataWeave native-lib wrappers.
   (Scala/Gradle subproject `:benchmarks-engine`, depends on `org.mule.weave:runtime` at
   the same `weaveVersion` the native image is built from). `runners/python/` is the
   Python runner (stdlib scripts under `native-lib`, wrapping the same staged `dwlib` as Node).
+  `runners/cli/` is the CLI runner: a Node parent that spawns the `dw` native
+  binary (built with `-Pbenchmark=true`, which compiles in an in-binary
+  benchmark harness gated by `BenchmarkMode.ENABLED` and dispatched via the
+  `DW_BENCH` env var — the shipped `dw` contains none of it). It emits
+  `cold-start`, `first-run`, and `warm`; it does **not** emit `streaming`
+  (the `dw run` path has no chunked-input FFI like the library's).
 - `report/report.mjs` — joins result files against the manifest and prints a comparison table.
 - `results/` — gitignored per-run output.
 
@@ -39,6 +45,10 @@ and `JAVA_HOME` set to it (see the root README / `CLAUDE.md`). The pinned build 
 `graalvmVersion` in `gradle.properties`. The **engine runner alone** drives the JVM
 `DataWeaveScriptingEngine` and runs on any JDK — no native image required.
 
+The **CLI runner** requires the bench-enabled binary
+(`./gradlew native-cli:nativeCompile -Pbenchmark=true`); set `DW_BENCH_BIN` to
+point at a prebuilt one. Like the library runners it needs the GraalVM toolchain.
+
 ## Running
 
 The one-shot cross-runner comparison — runs **every** registered runner and prints the table:
@@ -50,6 +60,7 @@ Single-runner options:
     ./gradlew native-lib:benchmark -Pbenchmark=true              # Node only: build wrapper, run, report
     ./gradlew benchmarks-engine:benchmarkEngine -Pbenchmark=true # engine (JVM) only: writes results/engine-<ts>.json
     ./gradlew native-lib:benchmarkPython -Pbenchmark=true        # Python only: writes results/python-<ts>.json
+    ./gradlew native-cli:benchmarkCli -Pbenchmark=true            # CLI only: writes results/cli-<ts>.json
 
 Or directly, once the wrapper is built (`./gradlew native-lib:buildNodePackage`):
 
