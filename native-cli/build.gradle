@@ -188,3 +188,23 @@ tasks.compileJava.classpath += files(sourceSets.main.scala.classesDirectory)
 //tasks.named("nativeCompile") {
 //    classpathJar = file("${buildDir}/libs/native-cli-" + nativeVersion + "-all.jar")
 //}
+
+// The CLI runner as an aggregator-registered runner: emits its result file but
+// does NOT render the report (the root :benchmarkCompare renders once over all
+// runners). Tagged `benchmarkRunner` so :benchmarkCompare discovers it automatically.
+// Requires the bench-enabled binary — nativeCompile must run with -Pbenchmark=true so
+// BenchmarkMode.ENABLED is true and BenchmarkHarness is reachable in dw.
+tasks.register('benchmarkCli', Exec) {
+    onlyIf { project.findProperty('benchmark')?.toString()?.toBoolean() == true }
+    ext.benchmarkRunner = true
+
+    dependsOn tasks.named('nativeCompile')
+    workingDir("${rootDir}/benchmarks")
+
+    def script = 'node corpus/gen-inputs.mjs && node runners/cli/emit.mjs'
+    if (System.getProperty('os.name').toLowerCase().contains('windows')) {
+        commandLine('cmd', '/c', script)
+    } else {
+        commandLine('bash', '-c', script)
+    }
+}

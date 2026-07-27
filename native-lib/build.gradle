@@ -310,7 +310,8 @@ tasks.register('benchmarkJsUnitTest', Exec) {
   }
   workingDir("${rootDir}/benchmarks")
   def files = 'lib/stats.test.mjs lib/manifest.test.mjs lib/env.test.mjs ' +
-    'report/report.test.mjs runners/node/emit.test.mjs'
+    'report/report.test.mjs runners/node/emit.test.mjs ' +
+    'runners/cli/locate.test.mjs runners/cli/emit.test.mjs'
   def script = 'node --test ' + files
   if (System.getProperty('os.name').toLowerCase().contains('windows')) {
     commandLine('cmd', '/c', script)
