@@ -95,32 +95,22 @@ class TCKCliTest extends AnyFunSpec with Matchers
         var accept = false
         if (acceptScenario(pathname)) {
           if (pathname.isDirectory && !pathname.getName.endsWith("wip")) {
-            // Ignore more than one dwl file by test case
+            // TCK directories follow the pattern: <scenario>-out.<ext>
+            // Each should contain exactly one transform.dwl
             val dwlFiles = pathname.list((_: File, name: String) => {
-              val extension = FilenameUtils.getExtension(name)
-              val isInput = INPUT_FILE_PATTERN.matcher(name).matches()
-              val isOutput = OUTPUT_FILE_PATTERN.matcher(name).matches()
-              "dwl" == extension && !isInput && !isOutput
+              "transform.dwl" == name
             })
 
-            // Ignore test case with inX-config.properties or outX-config.properties
-            val inputOrOutputConfigProperties: Array[String] = pathname.list((_: File, name: String) => {
-              val isInput = INPUT_FILE_CONFIG_PROPERTY_PATTERN.matcher(name).matches()
-              val isOutput = OUTPUT_FILE_CONFIG_PROPERTY_PATTERN.matcher(name).matches()
-              isInput || isOutput
-            })
-
-            // Ignore java use cases for now until we resolve classpath
+            // Keep existing filters for unsupported scenarios
             val javaCases: Array[String] = pathname.list((_: File, name: String) => {
               name.endsWith("groovy")
             })
 
-            // Ignore config.properties test cases
             val configPropertyCase = pathname.list((_: File, name: String) => {
               "config.properties" == name
             })
 
-            accept = dwlFiles.length == 1 && isEmpty(inputOrOutputConfigProperties) && isEmpty(javaCases) && isEmpty(configPropertyCase)
+            accept = dwlFiles.length == 1 && isEmpty(javaCases) && isEmpty(configPropertyCase)
           }
         }
         accept
