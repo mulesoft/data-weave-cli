@@ -36,9 +36,7 @@ class TCKCliTest extends AnyFunSpec with Matchers
   private val versionString: String = DataWeaveVersion(weaveVersion).toString()
 
   val testSuites = Seq(
-    TestSuite("runtime-tests", loadTestZipFile(s"weave-suites/runtime-$weaveVersion-test.zip")),
-    TestSuite("yaml-tests", loadTestZipFile(s"weave-suites/yaml-module-$weaveVersion-test.zip")),
-    TestSuite("core-modules-tests", loadTestZipFile(s"weave-suites/core-modules-$weaveVersion-test.zip"))
+    TestSuite("tck-tests", loadTestZipFile(s"weave-suites/runtime-$weaveVersion-tck.zip"))
   )
 
   private def loadTestZipFile(testSuiteExample: String): File = {
