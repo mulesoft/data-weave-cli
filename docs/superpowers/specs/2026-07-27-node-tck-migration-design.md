@@ -114,15 +114,20 @@ runtime), all others default to UTF-8.
 
 - `tck.test.ts` reads the optional `encoding` sidecar (trimmed) alongside the
   case files and passes the charset into the comparison call.
-- `compare.ts` accepts an optional charset for the *expected* side. For the
-  text/structural strategies (json, xml, csv, txt, dwl, properties, urlencoded)
-  it decodes the expected bytes via `decodeBytes()` (exported from
-  `src/result.ts:24`, which already handles IANA names, UTF-16 BOM/byte-order,
-  and fallback) instead of a hardcoded `toString("utf-8")`. `bin` stays a raw
-  byte compare (encoding is irrelevant to octet-stream).
-- The actual output produced by `run()` is compared as-is; the sidecar governs
-  only how the *expected fixture* is decoded, mirroring the CLI's `maybeEncoding`
-  → `AssertionHelper` contract.
+- `compare.ts` accepts an optional charset and decodes **both** the actual and
+  the expected bytes with it, matching the CLI's `AssertionHelper.doAssert`,
+  which decodes both sides via `new String(bytes, encoding)` /
+  `readFile(expectedFile, encoding)` (default `UTF-8`). This matters for the
+  `UTF-16` case: dwlib emits UTF-16 output bytes, so decoding only the expected
+  side would compare a UTF-16 actual string against a UTF-16 expected string
+  decoded correctly — a false mismatch. For the text/structural strategies
+  (json, xml, csv, txt, dwl, properties, urlencoded) both sides decode via
+  `decodeBytes()` (exported from `src/result.ts:24`, which already handles IANA
+  names, UTF-16 BOM/byte-order, and fallback) instead of a hardcoded
+  `toString("utf-8")`. `bin` stays a raw byte compare (encoding is irrelevant to
+  octet-stream).
+- When no sidecar is present the charset defaults to `UTF-8`, so existing
+  behavior is unchanged for the ~99% of cases without one.
 
 ### 5. `ignore-list.ts` — re-key and re-derive
 
