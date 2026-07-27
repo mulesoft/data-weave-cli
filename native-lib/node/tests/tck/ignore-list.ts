@@ -1,10 +1,10 @@
-// Cases the TCK harness skips, keyed by case name with a documented reason.
+// Cases the TCK harness skips, keyed by full scenario directory name with a documented reason.
 //
-// Seeded empirically: each name below was observed to fail when replayed
-// through this dwlib build (weaveTestSuiteVersion in gradle.properties) across
-// the runtime and core-modules suites, grouped by root cause. The set overlaps
-// heavily with the CLI's TCKCliTest.ignoreTests() — the same runtime and
-// harness limitations apply to the binding.
+// Seeded empirically against the tck@zip corpus (2.13.0-SNAPSHOT) after
+// removing the transform normalizer. Keys are full "<scenario>-out.<ext>"
+// directory names matching scenario ids under the new naming (Task 3).
+// The set overlaps heavily with the CLI's TCKCliTest.ignoreTests() — the
+// same runtime and harness limitations apply to the binding.
 //
 // Reasons:
 //   unresolved-module — needs a DW library/resource not compiled into dwlib
@@ -14,14 +14,12 @@
 //   dw::Runtime       — needs dw::Runtime run/orElseTry behavior not in dwlib.
 //   dwl-output-format — application/dw output formatting (quoting, @(…) metadata)
 //                       differs from the expected DWL fixture.
-//   multipart         — multipart writing edge cases (empty parts, binary parts)
-//                       not supported / not comparable here.
-//   nondeterministic  — output embeds a timestamp or otherwise varies per run.
+//   multipart         — multipart writing edge cases (empty parts, binary parts,
+//                       boundary nondeterminism).
+//   nondeterministic  — output embeds a timestamp or varies by environment (DST).
+//   slow              — passes but risks exceeding the 30s test timeout on CI.
 //   coercion/runtime  — runtime coercion/streaming behavior, also CLI-ignored.
-//
-// (do-block and output-format-mismatch cases are no longer skipped — see
-// transform.ts: the normalizer splits on a column-0 `---` and replaces a
-// conflicting output mime, recovering them.)
+//   xml               — attribute selector runtime behavior or namespace differences.
 
 export interface IgnoreEntry {
   reason: string;
@@ -29,91 +27,88 @@ export interface IgnoreEntry {
 
 export const IGNORED_CASES: Readonly<Record<string, IgnoreEntry>> = {
   // unresolved-module — library/resource not present in dwlib
-  "dw-binary": { reason: "unresolved-module: readUrl/classpath resource" },
-  "full-qualified-name-ref": { reason: "unresolved-module: org::mule::weave::v2::libs" },
-  "import-component-alias-lib": { reason: "unresolved-module: import lib not in dwlib" },
-  "import-lib": { reason: "unresolved-module: import lib not in dwlib" },
-  "import-lib-with-alias": { reason: "unresolved-module: import lib not in dwlib" },
-  "import-named-lib": { reason: "unresolved-module: import lib not in dwlib" },
-  "import-star": { reason: "unresolved-module: import lib not in dwlib" },
-  "is-empty-using-empty-stream": { reason: "unresolved-module: dw::Client" },
-  "module-singleton": { reason: "unresolved-module: lib not in dwlib" },
-  "read_lines": { reason: "unresolved-module: readUrl/classpath resource" },
-  "read-binary-files": { reason: "unresolved-module: readUrl/classpath resource" },
-  "sql_date_mapping": { reason: "unresolved-module: java/sql date mapping" },
-  "streaming_binary_inside_value": { reason: "unresolved-module: dw::Client" },
-  try: { reason: "unresolved-module: resource not in dwlib" },
-  underflow: { reason: "unresolved-module: resource not in dwlib" },
-  urlEncodeDecode: { reason: "unresolved-module: resource not in dwlib" },
-  "try-handle-attribute-delegate-with-failures": { reason: "unresolved-module: resource not in dwlib" },
-  "try-handle-materialized-object-with-failures": { reason: "unresolved-module: resource not in dwlib" },
-  "private_scope_directives": { reason: "unresolved-module: resource not in dwlib" },
-  "try-handle-array-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
-  "try-handle-attributes-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
-  "try-handle-binary-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
-  "try-handle-delegate-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
-  "try-handle-key-value-pair-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
-  "try-handle-name-value-pair-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
-  "try-handle-schema-property-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
-  "try-handle-schema-value-with-failures": { reason: "unresolved-module: resource not in dwlib" },
+  "dw-binary-out.dwl": { reason: "unresolved-module: readUrl/classpath resource" },
+  "full-qualified-name-ref-out.json": { reason: "unresolved-module: org::mule::weave::v2::libs" },
+  "import-component-alias-lib-out.json": { reason: "unresolved-module: import lib not in dwlib" },
+  "import-lib-out.json": { reason: "unresolved-module: import lib not in dwlib" },
+  "import-lib-with-alias-out.json": { reason: "unresolved-module: import lib not in dwlib" },
+  "import-named-lib-out.json": { reason: "unresolved-module: import lib not in dwlib" },
+  "import-star-out.json": { reason: "unresolved-module: import lib not in dwlib" },
+  "is-empty-using-empty-stream-out.json": { reason: "unresolved-module: dw::Client streaming" },
+  "module-singleton-out.json": { reason: "unresolved-module: lib not in dwlib" },
+  "private_scope_directives-out.xml": { reason: "unresolved-module: resource not in dwlib" },
+  "read-binary-files-out.bin": { reason: "unresolved-module: readUrl/classpath resource" },
+  "read_lines-out.json": { reason: "unresolved-module: readUrl/classpath resource" },
+  "sql_date_mapping-out.json": { reason: "unresolved-module: java/sql date mapping" },
+  "streaming_binary_inside_value-out.json": { reason: "unresolved-module: dw::Client streaming" },
+  "try-out.json": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-array-value-with-failures-out.json": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-attribute-delegate-with-failures-out.json": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-attributes-value-with-failures-out.json": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-binary-value-with-failures-out.json": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-delegate-value-with-failures-out.json": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-key-value-pair-value-with-failures-out.json": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-materialized-object-with-failures-out.json": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-name-value-pair-value-with-failures-out.json": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-schema-property-value-with-failures-out.json": { reason: "unresolved-module: resource not in dwlib" },
+  "try-handle-schema-value-with-failures-out.json": { reason: "unresolved-module: resource not in dwlib" },
+  "underflow-out.json": { reason: "unresolved-module: resource not in dwlib" },
+  "urlEncodeDecode-out.json": { reason: "unresolved-module: resource not in dwlib" },
 
   // java — Java module / java:: interop
-  "java-big-decimal": { reason: "java: java::lang interop" },
-  "java-field-ref": { reason: "java: java module" },
-  "java-interop-enum": { reason: "java: java module" },
-  "java-interop-function-call": { reason: "java: java module" },
-  "write-function-with-null": { reason: "java: java module" },
-  "runtime_run_null_java": { reason: "java: java module" },
-
-  // Previously-skipped cases that now run after ensureOutputDirective was
-  // strengthened: splitting on a column-0 `---` recovered the do-block cases
-  // (do-1, do-block, csv-streaming, range-selector, …), and replacing a
-  // conflicting output mime recovered format-mismatch cases (recursive_mapObject,
-  // xml-root-with-text, groupby-complex's application/java, tree-filter*,
-  // bad-inline, string_interpolation_selection, overload-functions,
-  // dynamic_attribute_name). Remaining try-handle-*/private_scope_directives
-  // fail on unresolved-module and are grouped above.
+  "java-big-decimal-out.xml": { reason: "java: java::lang interop" },
+  "java-field-ref-out.json": { reason: "java: java module" },
+  "java-interop-enum-out.json": { reason: "java: java module" },
+  "java-interop-function-call-out.json": { reason: "java: java module" },
+  "java_epoch_bridge-out.json": { reason: "java: java module epoch bridge" },
+  "runtime_run_null_java-out.json": { reason: "java: java module null handling" },
+  "write-function-with-null-out.xml": { reason: "java: application/java format not in dwlib" },
 
   // dw::Runtime module cases — the run/orElseTry/dataFormatsDescriptors behavior
   // isn't available in this dwlib (not a directive issue).
-  "runtime_orElseTry": { reason: "dw::Runtime: run/orElseTry behavior not in dwlib" },
-  "runtime_run": { reason: "dw::Runtime: run behavior not in dwlib" },
-  "runtime_run_coercionException": { reason: "dw::Runtime: run behavior not in dwlib" },
-  "runtime_run_fibo": { reason: "dw::Runtime: run behavior not in dwlib" },
-  "try-recursive-call": { reason: "dw::Runtime: run behavior not in dwlib" },
-  "runtime_dataFormatsDescriptors": { reason: "dw::Runtime: internal data-format descriptors" },
+  "runtime_dataFormatsDescriptors-out.json": { reason: "dw::Runtime: internal data-format descriptors" },
+  "runtime_orElseTry-out.json": { reason: "dw::Runtime: run/orElseTry behavior not in dwlib" },
+  "runtime_run-out.json": { reason: "dw::Runtime: run behavior not in dwlib (also slow)" },
+  "runtime_run_coercionException-out.json": { reason: "dw::Runtime: run behavior not in dwlib" },
+  "runtime_run_fibo-out.json": { reason: "dw::Runtime: run behavior not in dwlib" },
+  "try-recursive-call-out.json": { reason: "dw::Runtime: run behavior not in dwlib" },
 
   // dwl-output-format — application/dw formatting differs from expected DWL
-  "coerciones_toString": { reason: "dwl-output-format: application/dw formatting differs" },
+  "coerciones_toString-out.json": { reason: "dwl-output-format: application/dw formatting differs" },
 
-  // multipart — multipart writing edge cases
-  "multipart-binary": { reason: "multipart: binary part comparison unsupported" },
-  "multipart-class-cast-issue": { reason: "multipart: writing edge case" },
-  "multipart-empty-part": { reason: "multipart: empty part handling" },
-  "multipart-mixed-message": { reason: "multipart: empty parts / structural" },
-  "multipart-write-binary": { reason: "multipart: binary part write" },
-  "multipart-write-message": { reason: "multipart: empty parts / structural" },
-  "multipart-write-subtype-override": { reason: "multipart: subtype override" },
+  // multipart — multipart writing edge cases (boundary nondeterminism, binary parts, empty parts)
+  "multipart-binary-out.multipart": { reason: "multipart: boundary nondeterminism + binary part encoding" },
+  "multipart-class-cast-issue-out.multipart": { reason: "multipart: boundary nondeterminism" },
+  "multipart-empty-part-out.multipart": { reason: "multipart: boundary nondeterminism + empty part handling" },
+  "multipart-mixed-message-out.multipart": { reason: "multipart: empty parts / structural" },
+  "multipart-write-binary-out.json": { reason: "multipart: binary part write" },
+  "multipart-write-message-out.multipart": { reason: "multipart: empty parts / structural" },
+  "multipart-write-subtype-override-out.multipart": { reason: "multipart: subtype override" },
 
-  // slow — pathological type-checking stress case; passes but is far too slow
-  // (~13s locally, ~34s on the Windows CI runner, exceeding the tck 30s
-  // testTimeout). The CLI ignores it for the same "takes too long" reason.
-  "big_intersection": { reason: "slow: 500-way intersection type exceeds the test timeout" },
+  // slow — passes but risks exceeding the 30s test timeout on CI
+  "big_intersection-out.json": { reason: "slow: 500-way intersection type exceeds the test timeout" },
 
-  // nondeterministic — output embeds a timestamp
-  "properties-writer": { reason: "nondeterministic: properties output embeds a timestamp comment" },
-  "properties-passthrough": { reason: "nondeterministic: properties output embeds a timestamp comment" },
+  // nondeterministic — output embeds a timestamp or varies by environment (DST)
+  "dates_atBeginningOfDay-out.json": { reason: "nondeterministic: DST timezone offset varies by environment" },
+  "dates_atBeginningOfMonth-out.json": { reason: "nondeterministic: DST timezone offset varies by environment" },
+  "dates_atBeginningOfWeek-out.json": { reason: "nondeterministic: DST timezone offset varies by environment" },
+  "dates_atBeginningOfYear-out.json": { reason: "nondeterministic: DST timezone offset varies by environment" },
+  "properties-passthrough-out.properties": { reason: "nondeterministic: properties output embeds a timestamp comment" },
+  "properties-writer-out.properties": { reason: "nondeterministic: properties output embeds a timestamp comment" },
 
   // coercion/runtime behavior (also CLI-ignored)
-  "access_raw_value": { reason: "coercion/runtime: Cannot coerce Null to String" },
-  "read-concat": { reason: "coercion/runtime: Cannot coerce Null to String" },
-  "csv-invalid-utf8": { reason: "coercion/runtime: csv invalid utf8 handling" },
+  "access_raw_value-out.json": { reason: "coercion/runtime: Cannot coerce Null to String" },
+  "csv-invalid-utf8-out.csv": { reason: "coercion/runtime: csv invalid utf8 handling" },
+  "read-concat-out.json": { reason: "coercion/runtime: Cannot coerce Null to String" },
+  "update-op-out.dwl": { reason: "coercion/runtime: Cannot coerce Null to Number" },
 
-  // residual xml cases with irreconcilable serialization or namespace scoping
-  "xml-escaped-data": { reason: "xml: escaping differs from fixture" },
-  "xml-value-selector": { reason: "xml: namespace scoping in fixture" },
-  "xml-streaming-selectors": { reason: "xml: streaming selector serialization" },
-  "xml_empty_namespace": { reason: "xml: empty namespace serialization" },
+  // xml — attribute selector runtime behavior or serialization differences
+  "multi_attribute_selector_after_empty_filter_slot-out.json": { reason: "xml: attribute selector runtime behavior" },
+  "repeated_attribute_selector_map_slot_permutations-out.json": { reason: "xml: attribute selector runtime behavior" },
+  "xml-escaped-data-out.xml": { reason: "xml: escaping differs from fixture" },
+  "xml-streaming-selectors-out.xml": { reason: "xml: streaming selector serialization" },
+  "xml-value-selector-out.xml": { reason: "xml: namespace scoping in fixture" },
+  "xml_empty_namespace-out.xml": { reason: "xml: empty namespace serialization" },
 };
 
 /** Whether a case is on the ignore list. */
