@@ -2,19 +2,7 @@ package org.mule.weave.clinative
 
 import org.apache.commons.io.FileUtils
 import org.apache.commons.io.FilenameUtils
-import org.mule.weave.v2.codegen.CodeGenerator
-import org.mule.weave.v2.codegen.CodeGeneratorSettings
-import org.mule.weave.v2.codegen.InfixOptions
 import org.mule.weave.v2.helper.FolderBasedTest
-import org.mule.weave.v2.model.EvaluationContext
-import org.mule.weave.v2.module.DataFormatManager
-import org.mule.weave.v2.parser.MappingParser
-import org.mule.weave.v2.parser.ast.header.directives.ContentType
-import org.mule.weave.v2.parser.ast.header.directives.DirectiveNode
-import org.mule.weave.v2.parser.ast.header.directives.OutputDirective
-import org.mule.weave.v2.parser.ast.structure.StringNode
-import org.mule.weave.v2.sdk.ParsingContextFactory
-import org.mule.weave.v2.sdk.WeaveResourceFactory
 import org.mule.weave.v2.utils.DataWeaveVersion
 import org.mule.weave.v2.version.ComponentVersion
 import org.scalatest.funspec.AnyFunSpec
