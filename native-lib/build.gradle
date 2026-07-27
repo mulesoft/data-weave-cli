@@ -174,8 +174,8 @@ configurations {
 }
 
 dependencies {
-  weaveTckSuite "org.mule.weave:runtime:${weaveTestSuiteVersion}:test@zip"
-  weaveTckSuite "org.mule.weave:core-modules:${weaveTestSuiteVersion}:test@zip"
+  weaveTckSuite "org.mule.weave:runtime:${weaveTestSuiteVersion}:tck@zip"
+  weaveTckSuite "org.mule.weave:core-modules:${weaveTestSuiteVersion}:tck@zip"
 }
 
 def tckSuitesDir = "${projectDir}/node/tests/tck/suites"
