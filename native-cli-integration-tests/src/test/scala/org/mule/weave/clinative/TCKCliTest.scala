@@ -173,11 +173,17 @@ class TCKCliTest extends AnyFunSpec with Matchers
   }
 
   override def ignoreTests(): Array[String] = {
-    // Encoding issues
-    val baseArray = Array("csv-invalid-utf8", "splitBy-regex", "splitBy-string", "xml-encoding-decl-near", "xml-encoding-decl-far") ++
-      // Fail in java11 because broken backwards
+    // Base scenarios to ignore - updated for TCK naming convention
+    // TCK directories are named like: <scenario>-out.<ext>
+    // Test names are derived from directory names, so ignore patterns match directory prefixes
+
+    val baseArray =
+      // Encoding issues
+      Array("csv-invalid-utf8", "splitBy-regex", "splitBy-string",
+            "xml-encoding-decl-near", "xml-encoding-decl-far") ++
+      // Fail in java11 because of backwards compatibility
       Array("coerciones_toString", "date-coercion") ++
-      // Use resources (dwl files) that is present in the Tests but not in Cli (e.g: org::mule::weave::v2::libs::)
+      // Use resources (dwl files) present in Tests but not in CLI (e.g: org::mule::weave::v2::libs::)
       Array("full-qualified-name-ref",
         "import-component-alias-lib",
         "import-lib",
@@ -192,7 +198,7 @@ class TCKCliTest extends AnyFunSpec with Matchers
         "underflow",
         "try",
         "urlEncodeDecode") ++
-      // Uses resource name that is different on Cli than in the Tests
+      // Uses resource name that is different on CLI than in Tests
       Array("try-recursive-call", "runtime_orElseTry") ++
       // Use readUrl from classpath
       Array("dw-binary", "read_lines") ++
@@ -205,21 +211,19 @@ class TCKCliTest extends AnyFunSpec with Matchers
         "runtime_run_fibo",
         "runtime_run_null_java",
         "sql_date_mapping",
-        "write-function-with-null"
-      ) ++
+        "write-function-with-null") ++
       // Multipart Object has empty `parts` and expects at least one part
-      Array("multipart-mixed-message", "multipart-write-message", "multipart-write-subtype-override") ++
+      Array("multipart-mixed-message", "multipart-write-message",
+            "multipart-write-subtype-override") ++
       // Fail pattern match on complex object
       Array("pattern-match-complex-type") ++
-      // DataFormats
+      // DataFormats descriptor query
       Array("runtime_dataFormatsDescriptors") ++
       // Cannot coerce Null (null) to Number
       Array("update-op") ++
-      // Take too long time
-      Array("array-concat") ++
-      Array("big_intersection") ++
-      Array("sql_date_mapping") ++
-      Array("runtime_run") ++
+      // Takes too long
+      Array("array-concat", "big_intersection", "sql_date_mapping", "runtime_run") ++
+      // Streaming/try-handle scenarios that take too long
       Array("is-empty-using-empty-stream",
         "streaming_binary_inside_value",
         "try-handle-array-value-with-failures",
@@ -231,64 +235,11 @@ class TCKCliTest extends AnyFunSpec with Matchers
         "try-handle-materialized-object-with-failures",
         "try-handle-name-value-pair-value-with-failures",
         "try-handle-schema-property-value-with-failures",
-        "try-handle-schema-value-with-failures"
-      )
+        "try-handle-schema-value-with-failures")
 
-    val testToIgnore = if (versionString == "2.4") {
-      baseArray ++
-        // A change to json streaming in 2.5.0 breaks this test
-        Array("default_with_extended_null_type") ++
-        // Change in validations in 2.5.0 breaks these tests
-        Array("logical-and",
-          "logical-or"
-        ) ++
-        Array("coerciones_toBinary") ++
-        // 2.5.0 dwl now prints metadata breaking these tests
-        Array("dfl-inline-default-namespace",
-          "dfl-inline-namespace",
-          "dfl-maxCollectionSize",
-          "dfl-overwrite-namespace",
-          "multipart-base64-to-multipart",
-          "xml-nill-multiple-attributes-nested",
-          "xml-nill-multiple-attributes",
-          "read_scalar_values"
-        ) ++
-        // A change of positions on dw::Core 2.5.0 breaks this test
-        Array(
-          "runtime_run_unhandled_compilation_exception"
-        ) ++
-        Array("as-operator",
-          "type-equality"
-        ) ++
-        Array("xml_doctype", "stringutils_unwrap", "weave_ast_module")
-    } else if (versionString == "2.5") {
-      baseArray ++
-        Array("xml_doctype", "stringutils_unwrap")
-    } else if (versionString == "2.6") {
-      baseArray ++
-        Array("weave_ast_module")
-    } else if (versionString == "2.7") {
-      baseArray ++
-        Array("weave_ast_module")
-    } else if (versionString == "2.9") {
-      baseArray ++
-        Array(
-          "math-toRadians",
-          "try-handle-lazy-values-with-failures",
-          "weave_ast_example",
-          "weave_ast_module"
-        )
-    } else if (versionString == "2.10") {
-      baseArray ++
-        Array(
-          "try-handle-lazy-values-with-failures",
-          "weave_ast_example",
-          "weave_ast_module"
-        )
-    } else {
-      baseArray
-    }
-    testToIgnore
+    // Only 2.12.2-SNAPSHOT and 2.13.0-SNAPSHOT are supported
+    // No version-specific filtering needed
+    baseArray
   }
 
 
