@@ -11,7 +11,6 @@ import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { DataWeave } from "../../src/index";
 import { parseCase, MAIN_TRANSFORM, type TckScenario } from "./case-loader";
-import { ensureOutputDirective } from "./transform";
 import { compareOutput } from "./compare";
 import { isIgnored, ignoreReason } from "./ignore-list";
 
@@ -76,8 +75,7 @@ if (!existsSync(SUITES_DIR)) {
         const testFn = ignored ? it.skip : it;
         const label = ignored ? `${scenario.name} [skip: ${ignoreReason(c.caseName)}]` : scenario.name;
         testFn(label, () => {
-          const src = readFileSync(join(c.dir, MAIN_TRANSFORM), "utf-8");
-          const script = ensureOutputDirective(src, scenario.outputMime);
+          const script = readFileSync(join(c.dir, MAIN_TRANSFORM), "utf-8");
 
           const inputs = Object.fromEntries(
             scenario.inputs.map((i) => [
@@ -91,7 +89,11 @@ if (!existsSync(SUITES_DIR)) {
 
           const actual = result.getBytes()!;
           const expected = readFileSync(join(c.dir, scenario.outputFileName));
-          const cmp = compareOutput(scenario.outputExtension, actual, expected);
+          const encodingFile = join(c.dir, "encoding");
+          const charset = existsSync(encodingFile)
+            ? readFileSync(encodingFile, "utf-8").trim()
+            : null;
+          const cmp = compareOutput(scenario.outputExtension, actual, expected, charset);
           expect(cmp.match, cmp.detail).toBe(true);
         });
       }

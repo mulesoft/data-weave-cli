@@ -125,3 +125,28 @@ describe("deepEqual", () => {
     expect(deepEqual("a", "b")).toBe(false);
   });
 });
+
+describe("compareOutput — encoding sidecar", () => {
+  const utf16le = (s: string) => Buffer.from(s, "utf16le");
+
+  it("decodes both sides as UTF-16 when charset is supplied (json)", () => {
+    const actual = utf16le(JSON.stringify({ v: "café" }));
+    const expected = utf16le(JSON.stringify({ v: "café" }));
+    // Without the charset these UTF-16 bytes would parse as garbage → mismatch.
+    expect(compareOutput("json", actual, expected, "UTF-16").match).toBe(true);
+  });
+
+  it("decodes both sides as UTF-16 for xml", () => {
+    const actual = utf16le("<a>x</a>");
+    const expected = utf16le("<a>x</a>");
+    expect(compareOutput("xml", actual, expected, "UTF-16").match).toBe(true);
+  });
+
+  it("defaults to UTF-8 when no charset is given", () => {
+    expect(compareOutput("json", Buffer.from('{"a":1}', "utf-8"), Buffer.from('{"a":1}', "utf-8")).match).toBe(true);
+  });
+
+  it("ignores charset for bin (raw bytes)", () => {
+    expect(compareOutput("bin", Buffer.from([0, 1]), Buffer.from([0, 1]), "UTF-16").match).toBe(true);
+  });
+});

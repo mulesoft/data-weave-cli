@@ -20,7 +20,7 @@ describe("extensionOf", () => {
 
 describe("parseCase — happy paths", () => {
   it("parses a single-input single-output case", () => {
-    const r = parseCase("as-operator", [MAIN_TRANSFORM, "in0.json", "out.json"]);
+    const r = parseCase("as-operator-out.json", [MAIN_TRANSFORM, "in0.json", "out.json"]);
     expect(r.kind).toBe("scenarios");
     if (r.kind !== "scenarios") return;
     expect(r.scenarios).toHaveLength(1);
@@ -32,21 +32,17 @@ describe("parseCase — happy paths", () => {
   });
 
   it("binds multiple inputs by base name, sorted", () => {
-    const r = parseCase("multi", [MAIN_TRANSFORM, "in1.xml", "in0.json", "out.json"]);
+    const r = parseCase("multi-out.json", [MAIN_TRANSFORM, "in1.xml", "in0.json", "out.json"]);
     if (r.kind !== "scenarios") throw new Error("expected scenarios");
+    expect(r.scenarios[0].name).toBe("multi-out.json");
     expect(r.scenarios[0].inputs.map((i) => i.name)).toEqual(["in0", "in1"]);
     expect(r.scenarios[0].inputs.map((i) => i.mimeType)).toEqual(["application/json", "application/xml"]);
   });
 
-  it("emits one scenario per output file", () => {
-    const r = parseCase("multi-out", [MAIN_TRANSFORM, "in0.json", "out.json", "out.xml"]);
+  it("names the scenario after the case directory", () => {
+    const r = parseCase("literal-out.json", [MAIN_TRANSFORM, "out.json"]);
     if (r.kind !== "scenarios") throw new Error("expected scenarios");
-    expect(r.scenarios.map((s) => s.name).sort()).toEqual(["multi-out-out.json", "multi-out-out.xml"]);
-  });
-
-  it("supports a no-input case", () => {
-    const r = parseCase("literal", [MAIN_TRANSFORM, "out.json"]);
-    if (r.kind !== "scenarios") throw new Error("expected scenarios");
+    expect(r.scenarios[0].name).toBe("literal-out.json");
     expect(r.scenarios[0].inputs).toEqual([]);
   });
 });

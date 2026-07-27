@@ -34,21 +34,3 @@ export function mimeForExtension(ext: string): string | undefined {
 export function isSupportedExtension(ext: string): boolean {
   return mimeForExtension(ext) !== undefined;
 }
-
-/**
- * Maps a MIME type to a coarse format family used to compare two output
- * directives. Any `multipart/*` subtype collapses to `multipart` (so a pinned
- * `multipart/mixed` isn't confused with `multipart/form-data`); known MIME
- * types map to their extension key; anything else returns the MIME unchanged.
- *
- * @param mime - A MIME type (e.g. from an `output` directive or an expected file).
- * @returns A family token for equality comparison.
- */
-export function familyForMime(mime: string): string {
-  const m = mime.toLowerCase();
-  if (m.startsWith("multipart/")) return "multipart";
-  for (const [ext, knownMime] of Object.entries(EXTENSION_TO_MIME)) {
-    if (knownMime === m) return ext;
-  }
-  return m;
-}

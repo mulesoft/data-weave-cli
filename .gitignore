@@ -25,3 +25,8 @@ grimoires/
 
 .windsurf/
 .claude/
+
+# Superpowers SDD scratch workspace (briefs, reports, review packages, ledger)
+.superpowers/
+# Superpowers implementation plans — kept local, not committed (specs are committed)
+docs/superpowers/plans/

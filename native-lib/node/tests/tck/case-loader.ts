@@ -39,7 +39,7 @@ export interface TckInput {
 
 /** One runnable scenario: the transform plus its inputs and a single expected output. */
 export interface TckScenario {
-  /** Scenario id: `<case>-<outputFileName>`. */
+  /** Scenario id: the case directory name (`<scenario>-out.<ext>`). */
   name: string;
   inputs: TckInput[];
   /** Expected-output file name (e.g. `out.json`). */
@@ -116,7 +116,7 @@ export function parseCase(caseName: string, fileNames: string[]): CaseParseResul
     .map((outputFileName) => {
       const outputExtension = extensionOf(outputFileName);
       return {
-        name: `${caseName}-${outputFileName}`,
+        name: caseName,
         inputs,
         outputFileName,
         outputExtension,
