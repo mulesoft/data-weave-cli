@@ -17,14 +17,13 @@ sourceSets {
 dependencies {
     api(project(":native-cli"))
 
-    weaveSuite "org.mule.weave:runtime:${weaveTestSuiteVersion}:test@zip"
-    weaveSuite "org.mule.weave:yaml-module:${weaveTestSuiteVersion}:test@zip"
-    weaveSuite "org.mule.weave:core-modules:${weaveTestSuiteVersion}:test@zip"
+    weaveSuite "org.mule.weave:runtime:${weaveTestSuiteVersion}:tck@zip"
     testRuntimeOnly 'com.vladsch.flexmark:flexmark-all:0.64.8'
     // https://mvnrepository.com/artifact/org.scalatest/scalatest
     testImplementation group: 'org.scalatest', name: 'scalatest_2.12', version: '3.2.19'
 
-    testImplementation "org.mule.weave:parser:${weaveVersion}"
+    // Remove parser dependency - no longer needed for AST manipulation
+    // testImplementation "org.mule.weave:parser:${weaveVersion}"
     testImplementation "org.mule.weave:test-helpers:${weaveVersion}"
     testImplementation 'commons-io:commons-io:2.11.0'
     testImplementation 'com.sun.mail:jakarta.mail:1.6.4'
@@ -41,6 +40,14 @@ tasks.register('cleanTestSuites', Delete) {
 tasks.register('downloadTestSuites', Copy) {
     from configurations.weaveSuite
     into "$projectDir/build/resources/weave-suites"
+    // Rename the downloaded tck zip for easier reference
+    rename { filename ->
+        if (filename.endsWith(".zip")) {
+            "runtime-${weaveTestSuiteVersion}-tck.zip"
+        } else {
+            filename
+        }
+    }
 }
 
 tasks.named('processTestResources') {
