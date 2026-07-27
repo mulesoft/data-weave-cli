@@ -2,19 +2,7 @@ package org.mule.weave.clinative
 
 import org.apache.commons.io.FileUtils
 import org.apache.commons.io.FilenameUtils
-import org.mule.weave.v2.codegen.CodeGenerator
-import org.mule.weave.v2.codegen.CodeGeneratorSettings
-import org.mule.weave.v2.codegen.InfixOptions
 import org.mule.weave.v2.helper.FolderBasedTest
-import org.mule.weave.v2.model.EvaluationContext
-import org.mule.weave.v2.module.DataFormatManager
-import org.mule.weave.v2.parser.MappingParser
-import org.mule.weave.v2.parser.ast.header.directives.ContentType
-import org.mule.weave.v2.parser.ast.header.directives.DirectiveNode
-import org.mule.weave.v2.parser.ast.header.directives.OutputDirective
-import org.mule.weave.v2.parser.ast.structure.StringNode
-import org.mule.weave.v2.sdk.ParsingContextFactory
-import org.mule.weave.v2.sdk.WeaveResourceFactory
 import org.mule.weave.v2.utils.DataWeaveVersion
 import org.mule.weave.v2.version.ComponentVersion
 import org.scalatest.funspec.AnyFunSpec
@@ -22,7 +10,6 @@ import org.scalatest.matchers.should.Matchers
 
 import java.io.File
 import java.io.FileFilter
-import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -47,10 +34,10 @@ class TCKCliTest extends AnyFunSpec with Matchers
   println(s"****** Running with weaveSuiteVersion: $weaveVersion *******")
   private val versionString: String = DataWeaveVersion(weaveVersion).toString()
 
-  val testSuites = Seq(
-    TestSuite("runtime-tests", loadTestZipFile(s"weave-suites/runtime-$weaveVersion-test.zip")),
-    TestSuite("yaml-tests", loadTestZipFile(s"weave-suites/yaml-module-$weaveVersion-test.zip")),
-    TestSuite("core-modules-tests", loadTestZipFile(s"weave-suites/core-modules-$weaveVersion-test.zip"))
+  private val testSuites = Seq(
+    TestSuite("runtime-tck-tests", loadTestZipFile(s"weave-suites/runtime-$weaveVersion-tck.zip")),
+    TestSuite("yaml-tck-tests", loadTestZipFile(s"weave-suites/yaml-module-$weaveVersion-tck.zip")),
+    TestSuite("core-modules-tck-tests", loadTestZipFile(s"weave-suites/core-modules-$weaveVersion-tck.zip"))
   )
 
   private def loadTestZipFile(testSuiteExample: String): File = {
@@ -109,7 +96,8 @@ class TCKCliTest extends AnyFunSpec with Matchers
         var accept = false
         if (acceptScenario(pathname)) {
           if (pathname.isDirectory && !pathname.getName.endsWith("wip")) {
-            // Ignore more than one dwl file by test case
+            // Ignore more than one dwl file by test case (a case may bundle
+            // imported modules; those are not runnable standalone here)
             val dwlFiles = pathname.list((_: File, name: String) => {
               val extension = FilenameUtils.getExtension(name)
               val isInput = INPUT_FILE_PATTERN.matcher(name).matches()
@@ -147,12 +135,10 @@ class TCKCliTest extends AnyFunSpec with Matchers
 
 
   def runTestCase(testFolders: Array[File]): Unit = {
-    val unsortedScenarios = for {
-      testFolder <- testFolders
-      output <- outputFiles(testFolder)
-    } yield {
+    val unsortedScenarios = testFolders.map(testFolder => {
+      val output = testFolder.listFiles.find(f => isOutput(f)).orNull
       Scenario(scenarioName(testFolder, output), testFolder, inputFiles(testFolder), new File(testFolder, mainTestFile), output, configProperty(testFolder))
-    }
+    })
     val scenarios = unsortedScenarios.sortBy(_.name)
     scenarios.foreach {
       scenario =>
@@ -172,196 +158,95 @@ class TCKCliTest extends AnyFunSpec with Matchers
           val outputPath = Path.of(scenario.testFolder.getPath, s"cli-out.$outputExtension")
           args = args :+ s"--output=${outputPath.toString}"
 
-          // Add transformation
-          val weaveResource = WeaveResourceFactory.fromFile(scenario.transform)
-          val parser = MappingParser.parse(MappingParser.parsingPhase(), weaveResource, ParsingContextFactory.createParsingContext())
-          val documentNode = parser.getResult().astNode
+          // Use transform.dwl directly - it already has the correct output directive
+          val transformFile = new File(scenario.testFolder, "transform.dwl")
+          args = args :+ s"--file=${transformFile.getAbsolutePath}"
 
-          val headerDirectives: Seq[DirectiveNode] = documentNode.header.directives
-
-          val maybeOutputDirective = headerDirectives.find(dn => dn.isInstanceOf[OutputDirective]).map(_.asInstanceOf[OutputDirective])
-
-          var maybeEncoding: Option[String] = None
-          var directives = headerDirectives
-          implicit val ctx: EvaluationContext = EvaluationContext()
-          val maybeDefaultDataFormat = DataFormatManager.byExtension(s".$outputExtension")
-          val defaultDataFormat = maybeDefaultDataFormat.getOrElse(throw new IllegalArgumentException("Unable to find data-format for extension `" + outputExtension + "`"))
-          val defaultMimeType = defaultDataFormat.defaultMimeType.toString()
-          if (maybeOutputDirective.isEmpty) {
-            val newOutputDirective = OutputDirective(None, Some(ContentType(defaultMimeType)), None, None)
-            directives = directives :+ newOutputDirective
-          } else {
-            val outputDirective = maybeOutputDirective.get
-            maybeEncoding = getEncodingFromOutputDirective(outputDirective)
-
-            if (outputDirective.mime.isDefined) {
-              val currentContentType = outputDirective.mime.get
-              val maybeCurrentDataFormat = DataFormatManager.byContentType(currentContentType.mime)
-              // Replace output directive if:
-              // 1- declared data-format at output directive that's not exits or
-              // 2- declared data-format at output directive is different from the data-format obtained by the file extension
-              if (maybeCurrentDataFormat.isEmpty || maybeCurrentDataFormat.get.defaultMimeType.toString() != defaultMimeType) {
-                val newOutputDirective = OutputDirective(None, Some(ContentType(defaultMimeType)), None, None)
-                val index = directives.indexOf(outputDirective)
-                directives = directives.take(index) ++ directives.drop(index + 1)
-                directives = directives :+ newOutputDirective
-                maybeEncoding = getEncodingFromOutputDirective(newOutputDirective)
-              }
-            }
-          }
-
-          documentNode.header.directives = directives
-          val settings = CodeGeneratorSettings(InfixOptions.KEEP, alwaysInsertVersion = false, newLineBetweenFunctions = true, orderDirectives = false)
-          val code = CodeGenerator.generate(documentNode, settings)
-          val cliTransform = new File(scenario.testFolder, s"cli-transform-$outputExtension.dwl")
-
-          try {
-            Files.write(cliTransform.toPath, code.getBytes(StandardCharsets.UTF_8))
-          } catch {
-            case ioe: IOException =>
-              throw ioe
-          }
-
-
-          args = args :+ s"--file=${cliTransform.getAbsolutePath}"
           val languageLevel = versionString
           args = args :+ "--language-level=" + languageLevel
 
           val (exitCode, _, error) = NativeCliITTestRunner(args).execute(TIMEOUT._1, TIMEOUT._2)
 
           assert(exitCode == 0, error)
+
+          // Read encoding from sidecar file if present
+          val encodingFile = new File(scenario.testFolder, "encoding")
+          val maybeEncoding: Option[String] = if (encodingFile.exists()) {
+            Some(new String(Files.readAllBytes(encodingFile.toPath), StandardCharsets.UTF_8).trim)
+          } else {
+            None
+          }
+
           AssertionHelper.doAssert(outputPath.toFile, scenario.output, maybeEncoding)
         }
     }
   }
 
-  private def getEncodingFromOutputDirective(outputDirective: OutputDirective): Option[String] = {
-    val maybeEncodingOption = outputDirective.options.flatMap(opts => {
-      opts.find(opt => {
-        "encoding" == opt.name.name
-      })
-    })
-    maybeEncodingOption.map(d => d.value.asInstanceOf[StringNode].literalValue)
-  }
-
   override def ignoreTests(): Array[String] = {
+    // Scenarios to ignore. acceptScenario() matches these against the scenario
+    // directory name, which in the TCK is "<scenario>-out.<ext>", so every
+    // entry must be the FULL directory name (not the bare scenario name).
+    // Only 2.12.2-SNAPSHOT and 2.13.0-SNAPSHOT are supported, so there is no
+    // version-conditional handling.
+
     // Encoding issues
-    val baseArray = Array("csv-invalid-utf8", "splitBy-regex", "splitBy-string", "xml-encoding-decl-near", "xml-encoding-decl-far") ++
-      // Fail in java11 because broken backwards
-      Array("coerciones_toString", "date-coercion") ++
-      // Use resources (dwl files) that is present in the Tests but not in Cli (e.g: org::mule::weave::v2::libs::)
-      Array("full-qualified-name-ref",
-        "import-component-alias-lib",
-        "import-lib",
-        "import-lib-with-alias",
-        "import-named-lib",
-        "import-star",
-        "lazy_metadata_definition",
-        "module-singleton",
-        "multipart-write-binary",
-        "private_scope_directives",
-        "read-binary-files",
-        "underflow",
-        "try",
-        "urlEncodeDecode") ++
-      // Uses resource name that is different on Cli than in the Tests
-      Array("try-recursive-call", "runtime_orElseTry") ++
+    Array("csv-invalid-utf8-out.csv", "splitBy-regex-out.json", "splitBy-string-out.json") ++
+      // Fail in java11 because of broken backwards compatibility
+      Array("coerciones_toString-out.json", "date-coercion-out.json") ++
+      // Use resources (dwl files) present in the Tests but not in the CLI (e.g. org::mule::weave::v2::libs::)
+      Array("full-qualified-name-ref-out.json",
+        "import-component-alias-lib-out.json",
+        "import-lib-out.json",
+        "import-lib-with-alias-out.json",
+        "import-named-lib-out.json",
+        "import-star-out.json",
+        "module-singleton-out.json",
+        "private_scope_directives-out.xml",
+        "underflow-out.json",
+        "try-out.json",
+        "urlEncodeDecode-out.json") ++
+      // Uses resource name that is different on the CLI than in the Tests
+      Array("try-recursive-call-out.json", "runtime_orElseTry-out.json") ++
       // Use readUrl from classpath
-      Array("dw-binary", "read_lines") ++
+      Array("dw-binary-out.dwl", "read_lines-out.json") ++
       // Uses java module
-      Array("java-big-decimal",
-        "java-field-ref",
-        "java-interop-enum",
-        "java-interop-function-call",
-        "runtime_run_coercionException",
-        "runtime_run_fibo",
-        "runtime_run_null_java",
-        "sql_date_mapping",
-        "write-function-with-null"
-      ) ++
-      // Multipart Object has empty `parts` and expects at least one part
-      Array("multipart-mixed-message", "multipart-write-message", "multipart-write-subtype-override") ++
+      Array("java-big-decimal-out.xml",
+        "java-field-ref-out.json",
+        "java-interop-enum-out.json",
+        "java-interop-function-call-out.json",
+        "java_epoch_bridge-out.json",
+        "runtime_run_coercionException-out.json",
+        "runtime_run_fibo-out.json",
+        "runtime_run_null_java-out.json",
+        "sql_date_mapping-out.json",
+        "write-function-with-null-out.xml") ++
+      // Multipart Object has empty `parts` and expects at least one part / binary parts
+      Array("multipart-mixed-message-out.multipart",
+        "multipart-write-message-out.multipart",
+        "multipart-write-subtype-override-out.multipart",
+        "multipart-write-binary-out.json") ++
+      // Reads binary files from classpath
+      Array("read-binary-files-out.bin") ++
       // Fail pattern match on complex object
-      Array("pattern-match-complex-type") ++
-      // DataFormats
-      Array("runtime_dataFormatsDescriptors") ++
+      Array("pattern-match-complex-type-out.json") ++
+      // DataFormats descriptor query
+      Array("runtime_dataFormatsDescriptors-out.json") ++
       // Cannot coerce Null (null) to Number
-      Array("update-op") ++
-      // Take too long time
-      Array("array-concat") ++
-      Array("big_intersection") ++
-      Array("sql_date_mapping") ++
-      Array("runtime_run") ++
-      Array("is-empty-using-empty-stream",
-        "streaming_binary_inside_value",
-        "try-handle-array-value-with-failures",
-        "try-handle-attribute-delegate-with-failures",
-        "try-handle-attributes-value-with-failures",
-        "try-handle-binary-value-with-failures",
-        "try-handle-delegate-value-with-failures",
-        "try-handle-key-value-pair-value-with-failures",
-        "try-handle-materialized-object-with-failures",
-        "try-handle-name-value-pair-value-with-failures",
-        "try-handle-schema-property-value-with-failures",
-        "try-handle-schema-value-with-failures"
-      )
-
-    val testToIgnore = if (versionString == "2.4") {
-      baseArray ++
-        // A change to json streaming in 2.5.0 breaks this test
-        Array("default_with_extended_null_type") ++
-        // Change in validations in 2.5.0 breaks these tests
-        Array("logical-and",
-          "logical-or"
-        ) ++
-        Array("coerciones_toBinary") ++
-        // 2.5.0 dwl now prints metadata breaking these tests
-        Array("dfl-inline-default-namespace",
-          "dfl-inline-namespace",
-          "dfl-maxCollectionSize",
-          "dfl-overwrite-namespace",
-          "multipart-base64-to-multipart",
-          "xml-nill-multiple-attributes-nested",
-          "xml-nill-multiple-attributes",
-          "read_scalar_values"
-        ) ++
-        // A change of positions on dw::Core 2.5.0 breaks this test
-        Array(
-          "runtime_run_unhandled_compilation_exception"
-        ) ++
-        Array("as-operator",
-          "type-equality"
-        ) ++
-        Array("xml_doctype", "stringutils_unwrap", "weave_ast_module")
-    } else if (versionString == "2.5") {
-      baseArray ++
-        Array("xml_doctype", "stringutils_unwrap")
-    } else if (versionString == "2.6") {
-      baseArray ++
-        Array("weave_ast_module")
-    } else if (versionString == "2.7") {
-      baseArray ++
-        Array("weave_ast_module")
-    } else if (versionString == "2.9") {
-      baseArray ++
-        Array(
-          "math-toRadians",
-          "try-handle-lazy-values-with-failures",
-          "weave_ast_example",
-          "weave_ast_module"
-        )
-    } else if (versionString == "2.10") {
-      baseArray ++
-        Array(
-          "try-handle-lazy-values-with-failures",
-          "weave_ast_example",
-          "weave_ast_module"
-        )
-    } else {
-      baseArray
-    }
-    testToIgnore
+      Array("update-op-out.dwl") ++
+      // Takes too long (fast locally but exceeds the 30s harness timeout on CI runners)
+      Array("array-concat-out.json", "big_intersection-out.json", "runtime_run-out.json") ++
+      // Streaming/try-handle scenarios that take too long
+      Array("is-empty-using-empty-stream-out.json",
+        "streaming_binary_inside_value-out.json",
+        "try-handle-array-value-with-failures-out.json",
+        "try-handle-attribute-delegate-with-failures-out.json",
+        "try-handle-attributes-value-with-failures-out.json",
+        "try-handle-binary-value-with-failures-out.json",
+        "try-handle-delegate-value-with-failures-out.json",
+        "try-handle-key-value-pair-value-with-failures-out.json",
+        "try-handle-materialized-object-with-failures-out.json",
+        "try-handle-name-value-pair-value-with-failures-out.json",
+        "try-handle-schema-property-value-with-failures-out.json",
+        "try-handle-schema-value-with-failures-out.json")
   }
-
-
 }
