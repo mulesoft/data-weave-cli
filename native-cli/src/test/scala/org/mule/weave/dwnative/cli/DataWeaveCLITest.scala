@@ -219,6 +219,18 @@ class DataWeaveCLITest extends AnyFreeSpec with Matchers {
     maybeError.isEmpty shouldBe false
   }
 
+  "should run with input file using name=path form" in {
+    val tmpFile = java.io.File.createTempFile("test-input", ".json")
+    tmpFile.deleteOnExit()
+    java.nio.file.Files.writeString(tmpFile.toPath, """{"greeting":"hello"}""")
+    val stream = new ByteArrayOutputStream()
+    val console = new TestConsole(System.in, stream)
+    val dwcli = createCommandLine(console)
+    val exitCode = dwcli.execute("run", "-i", s"payload=${tmpFile.getAbsolutePath}", "output application/json --- payload.greeting")
+    exitCode shouldBe 0
+    Source.fromBytes(stream.toByteArray, "UTF-8").mkString.trim shouldBe "\"hello\""
+  }
+
   "should run using parameter" in {
     val stream = new ByteArrayOutputStream()
     val testConsole = new TestConsole(System.in, stream)
