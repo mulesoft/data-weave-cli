@@ -127,7 +127,7 @@ class TCKCliTest extends AnyFunSpec with Matchers
       testFolder <- testFolders
       output <- outputFiles(testFolder)
     } yield {
-      Scenario(scenarioName(testFolder, output), testFolder, inputFiles(testFolder), new File(testFolder, mainTestFile), output, configProperty(testFolder))
+      Scenario(scenarioName(testFolder, output), testFolder, inputFiles(testFolder), new File(testFolder, "transform.dwl"), output, configProperty(testFolder))
     }
     val scenarios = unsortedScenarios.sortBy(_.name)
     scenarios.foreach {
@@ -148,76 +148,28 @@ class TCKCliTest extends AnyFunSpec with Matchers
           val outputPath = Path.of(scenario.testFolder.getPath, s"cli-out.$outputExtension")
           args = args :+ s"--output=${outputPath.toString}"
 
-          // Add transformation
-          val weaveResource = WeaveResourceFactory.fromFile(scenario.transform)
-          val parser = MappingParser.parse(MappingParser.parsingPhase(), weaveResource, ParsingContextFactory.createParsingContext())
-          val documentNode = parser.getResult().astNode
+          // Use transform.dwl directly - it already has the correct output directive
+          val transformFile = new File(scenario.testFolder, "transform.dwl")
+          args = args :+ s"--file=${transformFile.getAbsolutePath}"
 
-          val headerDirectives: Seq[DirectiveNode] = documentNode.header.directives
-
-          val maybeOutputDirective = headerDirectives.find(dn => dn.isInstanceOf[OutputDirective]).map(_.asInstanceOf[OutputDirective])
-
-          var maybeEncoding: Option[String] = None
-          var directives = headerDirectives
-          implicit val ctx: EvaluationContext = EvaluationContext()
-          val maybeDefaultDataFormat = DataFormatManager.byExtension(s".$outputExtension")
-          val defaultDataFormat = maybeDefaultDataFormat.getOrElse(throw new IllegalArgumentException("Unable to find data-format for extension `" + outputExtension + "`"))
-          val defaultMimeType = defaultDataFormat.defaultMimeType.toString()
-          if (maybeOutputDirective.isEmpty) {
-            val newOutputDirective = OutputDirective(None, Some(ContentType(defaultMimeType)), None, None)
-            directives = directives :+ newOutputDirective
-          } else {
-            val outputDirective = maybeOutputDirective.get
-            maybeEncoding = getEncodingFromOutputDirective(outputDirective)
-
-            if (outputDirective.mime.isDefined) {
-              val currentContentType = outputDirective.mime.get
-              val maybeCurrentDataFormat = DataFormatManager.byContentType(currentContentType.mime)
-              // Replace output directive if:
-              // 1- declared data-format at output directive that's not exits or
-              // 2- declared data-format at output directive is different from the data-format obtained by the file extension
-              if (maybeCurrentDataFormat.isEmpty || maybeCurrentDataFormat.get.defaultMimeType.toString() != defaultMimeType) {
-                val newOutputDirective = OutputDirective(None, Some(ContentType(defaultMimeType)), None, None)
-                val index = directives.indexOf(outputDirective)
-                directives = directives.take(index) ++ directives.drop(index + 1)
-                directives = directives :+ newOutputDirective
-                maybeEncoding = getEncodingFromOutputDirective(newOutputDirective)
-              }
-            }
-          }
-
-          documentNode.header.directives = directives
-          val settings = CodeGeneratorSettings(InfixOptions.KEEP, alwaysInsertVersion = false, newLineBetweenFunctions = true, orderDirectives = false)
-          val code = CodeGenerator.generate(documentNode, settings)
-          val cliTransform = new File(scenario.testFolder, s"cli-transform-$outputExtension.dwl")
-
-          try {
-            Files.write(cliTransform.toPath, code.getBytes(StandardCharsets.UTF_8))
-          } catch {
-            case ioe: IOException =>
-              throw ioe
-          }
-
-
-          args = args :+ s"--file=${cliTransform.getAbsolutePath}"
           val languageLevel = versionString
           args = args :+ "--language-level=" + languageLevel
 
           val (exitCode, _, error) = NativeCliITTestRunner(args).execute(TIMEOUT._1, TIMEOUT._2)
 
           assert(exitCode == 0, error)
+
+          // Read encoding from sidecar file if present
+          val encodingFile = new File(scenario.testFolder, "encoding")
+          val maybeEncoding: Option[String] = if (encodingFile.exists()) {
+            Some(new String(Files.readAllBytes(encodingFile.toPath), StandardCharsets.UTF_8).trim)
+          } else {
+            None
+          }
+
           AssertionHelper.doAssert(outputPath.toFile, scenario.output, maybeEncoding)
         }
     }
-  }
-
-  private def getEncodingFromOutputDirective(outputDirective: OutputDirective): Option[String] = {
-    val maybeEncodingOption = outputDirective.options.flatMap(opts => {
-      opts.find(opt => {
-        "encoding" == opt.name.name
-      })
-    })
-    maybeEncodingOption.map(d => d.value.asInstanceOf[StringNode].literalValue)
   }
 
   override def ignoreTests(): Array[String] = {
