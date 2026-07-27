@@ -47,11 +47,11 @@ object BenchmarkHarness {
         case "--warmup"     => warmup = value.toInt
         case "--iters"      => iters = value.toInt
         case "--input"      =>
-          // value = <name>=<file>:<mimeType>[:<charset>]
+          // value = <name>=<file>\t<mimeType>[\t<charset>]
           val nameSep = value.indexOf('=')
           val name = value.substring(0, nameSep)
           val rest = value.substring(nameSep + 1)
-          val parts = rest.split(":", 3)
+          val parts = rest.split("\t", 3)
           val file = parts(0)
           val mimeType = parts(1)
           val charset = if (parts.length > 2 && parts(2).nonEmpty) parts(2) else "utf-8"
@@ -90,18 +90,18 @@ object BenchmarkHarness {
     val script = readScript(a)
     val b = bindings(a)
     val rt = newRuntime()          // engine init — measured externally as cold-start
-    out.println("READY"); out.flush()
+    out.print("READY\n"); out.flush()
     val start = nowNs()
     assertOk(rt.run(script, "bench", b, sink, "application/json", None))
     val firstRunMs = msSince(start)
-    out.println("{\"firstRunMs\":" + firstRunMs + "}")
+    out.print("{\"firstRunMs\":" + firstRunMs + "}\n")
   }
 
   def runWarm(a: BenchArgs, out: PrintStream, sink: OutputStream): Unit = {
     val script = readScript(a)
     val b = bindings(a)
     val rt = newRuntime()
-    out.println("READY"); out.flush()
+    out.print("READY\n"); out.flush()
     var i = 0
     while (i < a.warmup) { assertOk(rt.run(script, "bench", b, sink, "application/json", None)); i += 1 }
     val samples = new Array[Double](a.iters)
@@ -112,7 +112,7 @@ object BenchmarkHarness {
       samples(i) = msSince(start)
       i += 1
     }
-    out.println("{\"warmMs\":[" + samples.mkString(",") + "]}")
+    out.print("{\"warmMs\":[" + samples.mkString(",") + "]}\n")
   }
 
   def main(args: Array[String]): Unit = {

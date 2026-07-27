@@ -4,13 +4,13 @@ import { casesForMetric } from "../../lib/manifest.mjs";
 import { computeStats } from "../../lib/stats.mjs";
 import { locateBinary } from "./locate.mjs";
 
-/** Build `--input=name=file:mime:charset` args for a case (absolute paths). */
+/** Build `--input=name=file\tmime\tcharset` args for a case (absolute paths). */
 function inputArgs(manifest, c) {
   const args = [];
   for (const [name, inp] of Object.entries(c.inputs ?? {})) {
     const file = join(manifest.corpusDir, inp.file);
     const charset = inp.charset ?? "utf-8";
-    args.push(`--input=${name}=${file}:${inp.mimeType}:${charset}`);
+    args.push(`--input=${name}=${file}\t${inp.mimeType}\t${charset}`);
   }
   return args;
 }

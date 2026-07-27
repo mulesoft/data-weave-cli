@@ -28,7 +28,7 @@ class BenchmarkHarnessTest extends AnyFreeSpec with Matchers {
       val a = BenchmarkHarness.parseArgs(Array(
         "--bench-mode=coldfirst",
         "--script=/tmp/x.dwl",
-        "--input=payload=/tmp/p.json:application/json:utf-8"))
+        "--input=payload=/tmp/p.json\tapplication/json\tutf-8"))
       a.mode shouldBe "coldfirst"
       a.scriptFile shouldBe "/tmp/x.dwl"
       a.inputs should have size 1
@@ -47,7 +47,7 @@ class BenchmarkHarnessTest extends AnyFreeSpec with Matchers {
     "handles a mimeType-only input (charset defaults to utf-8)" in {
       val a = BenchmarkHarness.parseArgs(Array(
         "--bench-mode=coldfirst", "--script=/tmp/x.dwl",
-        "--input=payload=/tmp/p.json:application/json"))
+        "--input=payload=/tmp/p.json\tapplication/json"))
       a.inputs.head.charset shouldBe "utf-8"
     }
   }
