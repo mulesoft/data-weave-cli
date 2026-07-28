@@ -8,6 +8,9 @@ graal_dir=.graalvm
 
 [[ $(uname -a) =~ Darwin ]] && os=darwin || os=linux
 
+[[ $os == darwin ]] && archive_os=macos || archive_os=linux
+graalvmDist=graalvm-community-jdk-${graalvmVersion}_${archive_os}-x64_bin.tar.gz
+
 setUpEnvironmentVariables() {
   echo "Setup GRAALVM_HOME and JAVA_HOME environment variables"  
   if [[ $os == darwin ]]
@@ -19,9 +22,8 @@ setUpEnvironmentVariables() {
   export JAVA_HOME=${GRAALVM_HOME}
 }
 
-if [[ ! -d ${graal_dir}/graalvm-community-jdk-${graalvmVersion}_macos-x64_bin.tar.gz ]]
+if [[ ! -f ${graal_dir}/${graalvmDist} ]]
   then
-    graalvmDist=graalvm-community-jdk-${graalvmVersion}_macos-x64_bin.tar.gz
     echo "Installing GraalVM: ${graalvmDist}"
     mkdir -p ${graal_dir}
     pushd ${graal_dir}
