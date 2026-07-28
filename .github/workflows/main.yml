@@ -110,28 +110,49 @@ jobs:
 
       # Upload the artifact file
       - name: Upload generated script
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
-          name: dw-${{env.NATIVE_VERSION}}-${{runner.os}}
+          # archive:false skips the redundant outer zip (the distro is already a
+          # .zip) and names the artifact after the file — which already carries
+          # ${matrix.script_name}, so the matrix legs don't collide. No `name:`:
+          # it would be ignored under archive:false.
           path: native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.script_name }}.zip
+          archive: false
 
       # Upload the Python wheel
       - name: Upload Python wheel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
-          name: dw-python-wheel-${{env.NATIVE_VERSION}}-${{runner.os}}
+          # archive:false skips the redundant outer zip and names the artifact
+          # after the wheel — whose platform tag (manylinux/win_amd64/…) is
+          # already OS-unique, so the matrix legs don't collide. No `name:`: it
+          # would be ignored under archive:false.
           path: native-lib/python/dist/dataweave_native-0.0.1-py3-*.whl
+          archive: false
+
+      # npm pack emits the same filename (dataweave-native-0.0.1.tgz) on every
+      # OS. With archive:false the file NAME becomes the artifact name (the
+      # `name:` input is ignored), so copy to an OS-qualified name first to keep
+      # the matrix legs from colliding.
+      - name: Stage OS-qualified Node package
+        run: cp native-lib/node/dataweave-native-0.0.1.tgz "native-lib/node/dataweave-native-0.0.1-${{ runner.os }}.tgz"
+        shell: bash
 
       # Upload the Node.js package
       - name: Upload Node package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
-          name: dw-node-package-${{env.NATIVE_VERSION}}-${{runner.os}}
-          path: native-lib/node/dataweave-native-0.0.1.tgz
+          path: native-lib/node/dataweave-native-0.0.1-${{ runner.os }}.tgz
+          # Single .tgz (already gzip-compressed); skip the redundant outer zip
+          # (v7+ feature). archive:false ignores `name:` and uses the file name,
+          # which the copy above made OS-unique.
+          archive: false
 
-      # Upload the native shared library + header together per OS
+      # Upload the native shared library + header together per OS. Multiple
+      # files, so this stays archived (archive:false allows only one file); the
+      # zip is wanted here and `name:` still applies.
       - name: Upload native shared library
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: dwlib-${{env.NATIVE_VERSION}}-${{runner.os}}
           path: |
