@@ -25,6 +25,7 @@ grimoires/
 
 .windsurf/
 .claude/
+.vscode/
 
 # Superpowers SDD scratch workspace (briefs, reports, review packages, ledger)
 .superpowers/

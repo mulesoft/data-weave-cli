@@ -1,24 +1,35 @@
 import { spawn } from "node:child_process";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { casesForMetric } from "../../lib/manifest.mjs";
 import { computeStats } from "../../lib/stats.mjs";
+import { locateBinary } from "./locate.mjs";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const CHILD = join(__dirname, "coldstart-child.mjs");
+/** Build `--input=name=file\tmime\tcharset` args for a case (absolute paths). */
+function inputArgs(manifest, c) {
+  const args = [];
+  for (const [name, inp] of Object.entries(c.inputs ?? {})) {
+    const file = join(manifest.corpusDir, inp.file);
+    const charset = inp.charset ?? "utf-8";
+    args.push(`--input=${name}=${file}\t${inp.mimeType}\t${charset}`);
+  }
+  return args;
+}
 
 /**
- * Spawn one fresh process and measure true cold-start: wall-clock from just
- * before spawn to the child's "READY" marker (process launch + module/addon load
- * + isolate init). first-run is timed in-process by the child. Rejects on a
+ * Spawn one fresh dw process in coldfirst mode. Cold-start = wall-clock from just
+ * before spawn to the child's "READY" marker (process launch + native image load +
+ * NativeRuntime init). first-run is timed in-process by the child. Rejects on a
  * non-zero exit or a missing READY/JSON line so a failed sample never records a
  * bogus timing.
  */
-function sampleOnce(corpusDir, caseId) {
+function sampleOnce(bin, manifest, c) {
+  const scriptPath = join(manifest.corpusDir, c.script);
+  const args = ["--bench-mode=coldfirst", `--script=${scriptPath}`, ...inputArgs(manifest, c)];
   return new Promise((resolve, reject) => {
     const t0 = process.hrtime.bigint();
-    const child = spawn(process.execPath, [CHILD, corpusDir, caseId], {
+    const child = spawn(bin, args, {
       stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, DW_BENCH: "1" },
     });
     let coldStartMs;
     let stdout = "";
@@ -27,8 +38,6 @@ function sampleOnce(corpusDir, caseId) {
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
       if (coldStartMs === undefined && stdout.includes("READY\n")) {
-        // Stamp the moment the runtime reported ready. Everything before this
-        // line (launch, load, init) is the cold-start cost.
         coldStartMs = Number(process.hrtime.bigint() - t0) / 1e6;
       }
     });
@@ -37,23 +46,23 @@ function sampleOnce(corpusDir, caseId) {
     child.on("error", reject);
     child.on("close", (code) => {
       if (code !== 0) {
-        reject(new Error(`coldstart child failed for '${caseId}' (exit ${code})\n${stderr}`));
+        reject(new Error(`cli coldfirst failed for '${c.id}' (exit ${code})\n${stderr}`));
         return;
       }
       if (coldStartMs === undefined) {
-        reject(new Error(`coldstart child for '${caseId}' never printed READY\n${stderr}`));
+        reject(new Error(`cli coldfirst for '${c.id}' never printed READY\n${stderr}`));
         return;
       }
       const jsonLine = stdout.split("\n").filter((l) => l && l !== "READY").pop();
       if (!jsonLine) {
-        reject(new Error(`coldstart child for '${caseId}' printed no result line\n${stderr}`));
+        reject(new Error(`cli coldfirst for '${c.id}' printed no result line\n${stderr}`));
         return;
       }
       let firstRunMs;
       try {
         ({ firstRunMs } = JSON.parse(jsonLine));
       } catch (error) {
-        reject(new Error(`coldstart child for '${caseId}' printed invalid JSON: ${jsonLine}`, { cause: error }));
+        reject(new Error(`cli coldfirst for '${c.id}' printed invalid JSON: ${jsonLine}`, { cause: error }));
         return;
       }
       resolve({ coldStartMs, firstRunMs });
@@ -61,10 +70,9 @@ function sampleOnce(corpusDir, caseId) {
   });
 }
 
-/**
- * @returns {Promise<Array<{id,metric,unit,stats,iterations}>>}
- */
+/** @returns {Promise<Array<{id,metric,unit,stats,iterations}>>} */
 export async function runColdStartAndFirstRun(manifest, { samplesOverride } = {}) {
+  const bin = locateBinary();
   const rows = [];
   const ids = new Set([
     ...casesForMetric(manifest, "cold-start").map((c) => c.id),
@@ -77,7 +85,7 @@ export async function runColdStartAndFirstRun(manifest, { samplesOverride } = {}
     const colds = [];
     const firsts = [];
     for (let i = 0; i < n; i++) {
-      const { coldStartMs, firstRunMs } = await sampleOnce(manifest.corpusDir, id);
+      const { coldStartMs, firstRunMs } = await sampleOnce(bin, manifest, c);
       colds.push(coldStartMs);
       firsts.push(firstRunMs);
     }
