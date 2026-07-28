@@ -5,6 +5,7 @@
 //
 // Pure and unit-testable: takes strings/Buffers, returns a match result.
 import { XMLParser } from "fast-xml-parser";
+import { decodeBytes } from "../../src/result";
 
 /** Outcome of comparing one scenario's actual output against the expected. */
 export interface CompareResult {
@@ -28,17 +29,24 @@ const fail = (detail: string): CompareResult => ({ match: false, detail });
  * @param extension - The expected output file's extension (no dot), case-insensitive.
  * @param actual - The produced output bytes.
  * @param expected - The expected output bytes.
+ * @param charset - Optional charset (from a case's `encoding` sidecar) used to
+ *                  decode BOTH sides; defaults to UTF-8. Ignored for `bin`.
  * @returns Whether they match, with a detail message on mismatch.
  */
-export function compareOutput(extension: string, actual: Buffer, expected: Buffer): CompareResult {
+export function compareOutput(
+  extension: string,
+  actual: Buffer,
+  expected: Buffer,
+  charset?: string | null
+): CompareResult {
   const ext = extension.replace(/^\./, "").toLowerCase();
 
   if (ext === "bin") {
     return actual.equals(expected) ? ok : fail(`binary mismatch: ${actual.length} vs ${expected.length} bytes`);
   }
 
-  const a = actual.toString("utf-8");
-  const e = expected.toString("utf-8");
+  const a = decodeBytes(actual, charset ?? null);
+  const e = decodeBytes(expected, charset ?? null);
 
   switch (ext) {
     case "json":
