@@ -119,6 +119,10 @@ tasks.register('stagePythonNativeLib', Copy) {
   dependsOn tasks.named('stripNativeLibrary')
   from("${layout.buildDirectory.get().asFile}/native/nativeCompile") {
     include('dwlib.*')
+    // Exclude GraalVM's separate debug-info file (e.g. dwlib.so.debug on Linux):
+    // it's dev-only crash-symbolication data the runtime never loads, and would
+    // otherwise bloat the distributed wheel. Kept in the build dir for debugging.
+    exclude('*.debug')
   }
   into("${projectDir}/python/src/dataweave/native")
 }
@@ -160,6 +164,10 @@ tasks.register('stageNodeNativeLib', Copy) {
   dependsOn tasks.named('stripNativeLibrary')
   from("${layout.buildDirectory.get().asFile}/native/nativeCompile") {
     include('dwlib.*')
+    // Exclude GraalVM's separate debug-info file (e.g. dwlib.so.debug on Linux):
+    // it's dev-only crash-symbolication data the runtime never loads, and would
+    // otherwise bloat the packed .tgz. Kept in the build dir for debugging.
+    exclude('*.debug')
   }
   into("${projectDir}/node/native")
 }
