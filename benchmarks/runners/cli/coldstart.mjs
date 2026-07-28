@@ -58,7 +58,13 @@ function sampleOnce(bin, manifest, c) {
         reject(new Error(`cli coldfirst for '${c.id}' printed no result line\n${stderr}`));
         return;
       }
-      const { firstRunMs } = JSON.parse(jsonLine);
+      let firstRunMs;
+      try {
+        ({ firstRunMs } = JSON.parse(jsonLine));
+      } catch (error) {
+        reject(new Error(`cli coldfirst for '${c.id}' printed invalid JSON: ${jsonLine}`, { cause: error }));
+        return;
+      }
       resolve({ coldStartMs, firstRunMs });
     });
   });

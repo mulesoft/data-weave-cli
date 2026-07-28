@@ -48,7 +48,13 @@ function warmSamples(bin, manifest, c) {
         reject(new Error(`cli warm for '${c.id}' printed no result line\n${stderr}`));
         return;
       }
-      const { warmMs } = JSON.parse(jsonLine);
+      let warmMs;
+      try {
+        ({ warmMs } = JSON.parse(jsonLine));
+      } catch (error) {
+        reject(new Error(`cli warm for '${c.id}' printed invalid JSON: ${jsonLine}`, { cause: error }));
+        return;
+      }
       if (!Array.isArray(warmMs) || warmMs.length === 0) {
         reject(new Error(`cli warm for '${c.id}' returned no samples\n${stderr}`));
         return;

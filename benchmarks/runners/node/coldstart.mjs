@@ -49,7 +49,13 @@ function sampleOnce(corpusDir, caseId) {
         reject(new Error(`coldstart child for '${caseId}' printed no result line\n${stderr}`));
         return;
       }
-      const { firstRunMs } = JSON.parse(jsonLine);
+      let firstRunMs;
+      try {
+        ({ firstRunMs } = JSON.parse(jsonLine));
+      } catch (error) {
+        reject(new Error(`coldstart child for '${caseId}' printed invalid JSON: ${jsonLine}`, { cause: error }));
+        return;
+      }
       resolve({ coldStartMs, firstRunMs });
     });
   });
