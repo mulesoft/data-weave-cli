@@ -18,11 +18,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        os: [ ubuntu-latest, windows-2022, macos-latest ]
         include:
           - os: ubuntu-latest
             script_name: linux
-          - os: windows-latest
+          - os: windows-2022
             script_name: windows
           - os: macos-latest
             script_name: macos
@@ -68,7 +68,7 @@ jobs:
 
       # Install Python build dependencies (setuptools/wheel may be missing on Windows runners)
       - name: Install Python build dependencies
-        run: python3 -m pip install --upgrade setuptools wheel
+        run: python3 -m pip install --break-system-packages --upgrade setuptools wheel
         shell: bash
 
       # Generate native-lib python wheel
