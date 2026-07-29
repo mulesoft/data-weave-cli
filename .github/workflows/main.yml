@@ -16,6 +16,7 @@ jobs:
   # This workflow contains a single job called "build"
   BUILD:
     strategy:
+      fail-fast: false
       matrix:
         os: [ ubuntu-latest, windows-latest, macos-latest ]
         include:
