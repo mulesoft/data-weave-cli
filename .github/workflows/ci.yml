@@ -3,8 +3,6 @@ name: CI Native CLI
 on:
   schedule:
     - cron: '0 12 * * 3' # This runs the workflow every wednesday day at 12:00 UTC
-env:
-  NATIVE_VERSION: 100.100.100
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:

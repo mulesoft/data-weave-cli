@@ -66,6 +66,11 @@ jobs:
         shell: bash
 
       # Install Python build dependencies (setuptools/wheel may be missing on Windows runners)
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install Python build dependencies
         run: python3 -m pip install --upgrade setuptools wheel
         shell: bash
@@ -112,7 +117,7 @@ jobs:
 
       # Derive lowercase OS + runtime arch tokens for artifact names.
       # OS comes from matrix.script_name (linux/windows); arch from uname -m
-      # (x86_64 today; stays correct if an arm64 runner is ever added).
+      # (x86_64 on linux/windows, arm64 on macos).
       - name: Derive platform tokens
         run: echo "ARCH=$(uname -m)" >> "$GITHUB_ENV"
         shell: bash
