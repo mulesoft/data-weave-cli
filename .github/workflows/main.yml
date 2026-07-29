@@ -67,11 +67,6 @@ jobs:
         shell: bash
 
       # Install Python build dependencies (setuptools/wheel may be missing on Windows runners)
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
       - name: Install Python build dependencies
         run: python3 -m pip install --upgrade setuptools wheel
         shell: bash
