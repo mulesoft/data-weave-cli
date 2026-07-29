@@ -17,12 +17,14 @@ jobs:
   BUILD:
     strategy:
       matrix:
-        os: [ mulesoft-ubuntu, mulesoft-windows ]
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
         include:
-          - os: mulesoft-ubuntu
+          - os: ubuntu-latest
             script_name: linux
-          - os: mulesoft-windows
+          - os: windows-latest
             script_name: windows
+          - os: macos-latest
+            script_name: macos
     runs-on: ${{ matrix.os }}
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
