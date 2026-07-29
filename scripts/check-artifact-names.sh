@@ -43,8 +43,16 @@ check_ci_file() {
 }
 
 check_release_file() {
-  # Filled in by Task 3.
-  echo "OK [$file]: release checks not yet implemented"
+  no_runner_os_in_names
+  present 'ARCH=$(uname -m)' "missing arch derivation (ARCH=\$(uname -m))"
+  present 'env.ARCH'         "asset names do not reference env.ARCH"
+  present 'dw-cli-'          "missing dw-cli- asset base name"
+  present 'dataweave-node-'  "missing dataweave-node- asset base name"
+  present 'file_glob: true'  "wheel upload missing file_glob: true (needed for the * glob)"
+  absent  'dw-python-wheel'  "stale dw-python-wheel asset name still present"
+  absent  'dw-node-package'  "stale dw-node-package asset name still present"
+  absent  '-py3-none-any.whl' "wheel file path still hardcodes -any.whl (should match the platform tag)"
+  echo "OK [$file]: release naming convention"
 }
 
 case "$(basename "$file")" in

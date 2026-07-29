@@ -38,6 +38,7 @@ jobs:
       - name: Guess Extension Version
         run: |
           echo "NATIVE_VERSION=$(echo '${{github.ref}}' | sed -e 's,.*/v\(.*\),\1,')" >> $GITHUB_ENV
+          echo "ARCH=$(uname -m)" >> $GITHUB_ENV
         shell: bash
 
       # Runs a single command using the runners shell
@@ -83,7 +84,7 @@ jobs:
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.script_name }}.zip
-          asset_name: dw-${{env.NATIVE_VERSION}}-${{runner.os}}
+          asset_name: dw-cli-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}.zip
           tag: ${{ github.ref }}
           overwrite: true
 
@@ -92,8 +93,8 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: native-lib/python/dist/dataweave_native-0.0.1-py3-none-any.whl
-          asset_name: dw-python-wheel-${{env.NATIVE_VERSION}}-${{runner.os}}.whl
+          file: native-lib/python/dist/dataweave_native-0.0.1-py3-none-*.whl
+          file_glob: true
           tag: ${{ github.ref }}
           overwrite: true
 
@@ -103,7 +104,7 @@ jobs:
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: native-lib/node/dataweave-native-0.0.1.tgz
-          asset_name: dw-node-package-${{env.NATIVE_VERSION}}-${{runner.os}}.tgz
+          asset_name: dataweave-node-0.0.1-${{ matrix.script_name }}-${{ env.ARCH }}.tgz
           tag: ${{ github.ref }}
           overwrite: true
 
@@ -114,7 +115,7 @@ jobs:
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: native-lib/python/src/dataweave/native/dwlib.so
-          asset_name: dwlib-${{env.NATIVE_VERSION}}-${{runner.os}}.so
+          asset_name: dwlib-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}.so
           tag: ${{ github.ref }}
           overwrite: true
 
@@ -124,7 +125,7 @@ jobs:
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: native-lib/python/src/dataweave/native/dwlib.dll
-          asset_name: dwlib-${{env.NATIVE_VERSION}}-${{runner.os}}.dll
+          asset_name: dwlib-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}.dll
           tag: ${{ github.ref }}
           overwrite: true
 
