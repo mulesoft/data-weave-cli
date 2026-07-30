@@ -1,0 +1,88 @@
+name: Native shared library artifact
+description: >-
+  Stages and publishes the raw dwlib shared library (dwlib.so/.dll/.dylib) and
+  its C header (dwlib.h) — the FFI surface both the Python and Node bindings
+  embed, published here as standalone downloads. Requires build-foundation
+  earlier in the same job.
+inputs:
+  native-version:
+    description: -PnativeVersion value; empty omits the flag.
+    required: false
+    default: ''
+  publish:
+    description: "'none' | 'artifact' | 'release'."
+    required: false
+    default: 'none'
+  repo-token:
+    description: Token for svenstaro release upload (publish=release).
+    required: false
+    default: ''
+  arch:
+    description: Runtime arch token for artifact/asset names.
+    required: false
+    default: ''
+  script-name:
+    description: OS naming token (linux/windows/macos) for artifact/asset names.
+    required: false
+    default: ''
+  tag:
+    description: Release tag (publish=release).
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Stage native shared library
+      run: ./gradlew --stacktrace --no-problems-report native-lib:stagePythonNativeLib ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
+      shell: bash
+
+    - name: Upload native shared library (artifact)
+      if: inputs.publish == 'artifact'
+      uses: actions/upload-artifact@v7.0.1
+      with:
+        name: dwlib-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}
+        path: |
+          native-lib/python/src/dataweave/native/dwlib.dylib
+          native-lib/python/src/dataweave/native/dwlib.so
+          native-lib/python/src/dataweave/native/dwlib.dll
+          native-lib/python/src/dataweave/native/dwlib.h
+
+    - name: Upload native shared library to release (Linux)
+      if: inputs.publish == 'release' && runner.os == 'Linux'
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ inputs.repo-token }}
+        file: native-lib/python/src/dataweave/native/dwlib.so
+        asset_name: dwlib-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}.so
+        tag: ${{ inputs.tag }}
+        overwrite: true
+
+    - name: Upload native shared library to release (Windows)
+      if: inputs.publish == 'release' && runner.os == 'Windows'
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ inputs.repo-token }}
+        file: native-lib/python/src/dataweave/native/dwlib.dll
+        asset_name: dwlib-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}.dll
+        tag: ${{ inputs.tag }}
+        overwrite: true
+
+    - name: Upload native shared library to release (macOS)
+      if: inputs.publish == 'release' && runner.os == 'macOS'
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ inputs.repo-token }}
+        file: native-lib/python/src/dataweave/native/dwlib.dylib
+        asset_name: dwlib-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}.dylib
+        tag: ${{ inputs.tag }}
+        overwrite: true
+
+    - name: Upload native library header to release
+      if: inputs.publish == 'release'
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ inputs.repo-token }}
+        file: native-lib/python/src/dataweave/native/dwlib.h
+        asset_name: dwlib-${{ inputs.native-version }}.h
+        tag: ${{ inputs.tag }}
+        overwrite: true
