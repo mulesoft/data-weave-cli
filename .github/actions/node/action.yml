@@ -1,0 +1,87 @@
+name: Node artifact
+description: >-
+  Sets up Node.js, builds the DataWeave Node package (which embeds dwlib), and
+  runs the Node unit/integration tests (always). Optionally runs the master-only
+  Node TCK conformance lane, and optionally publishes the .tgz as a CI artifact
+  (main) or a release asset (release). Requires build-foundation earlier in the
+  same job.
+inputs:
+  native-version:
+    description: -PnativeVersion value; empty omits the flag.
+    required: false
+    default: ''
+  run-tck:
+    description: When 'true', run the master-only Node TCK conformance lane.
+    required: false
+    default: 'false'
+  publish:
+    description: "'none' | 'artifact' | 'release'."
+    required: false
+    default: 'none'
+  repo-token:
+    description: Token for svenstaro release upload (publish=release).
+    required: false
+    default: ''
+  arch:
+    description: Runtime arch token for artifact/asset names.
+    required: false
+    default: ''
+  script-name:
+    description: OS naming token (linux/windows/macos) for artifact/asset names.
+    required: false
+    default: ''
+  tag:
+    description: Release tag (publish=release).
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Create Native Lib Node Package
+      run: ./gradlew --stacktrace --no-problems-report native-lib:buildNodePackage ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
+      shell: bash
+
+    - name: Run Node.js Tests
+      run: ./gradlew --stacktrace --no-problems-report native-lib:nodeTest ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
+      shell: bash
+
+    - name: Run Node.js TCK Conformance 2.12.2-SNAPSHOT
+      if: inputs.run-tck == 'true'
+      run: |
+        ./gradlew --stacktrace --no-problems-report -PweaveTestSuiteVersion=2.12.2-SNAPSHOT native-lib:stageTckSuites
+        cd native-lib/node && npm run test:tck
+      shell: bash
+
+    - name: Run Node.js TCK Conformance 2.13.0-SNAPSHOT
+      if: inputs.run-tck == 'true'
+      run: |
+        ./gradlew --stacktrace --no-problems-report -PweaveTestSuiteVersion=2.13.0-SNAPSHOT native-lib:stageTckSuites
+        cd native-lib/node && npm run test:tck
+      shell: bash
+
+    - name: Stage OS-qualified Node package
+      if: inputs.publish == 'artifact'
+      run: cp native-lib/node/dataweave-native-0.0.1.tgz "native-lib/node/dataweave-node-0.0.1-${{ inputs.script-name }}-${{ inputs.arch }}.tgz"
+      shell: bash
+
+    - name: Upload Node package (artifact)
+      if: inputs.publish == 'artifact'
+      uses: actions/upload-artifact@v7.0.1
+      with:
+        path: native-lib/node/dataweave-node-0.0.1-${{ inputs.script-name }}-${{ inputs.arch }}.tgz
+        archive: false
+
+    - name: Upload Node package to release
+      if: inputs.publish == 'release'
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ inputs.repo-token }}
+        file: native-lib/node/dataweave-native-0.0.1.tgz
+        asset_name: dataweave-node-0.0.1-${{ inputs.script-name }}-${{ inputs.arch }}.tgz
+        tag: ${{ inputs.tag }}
+        overwrite: true

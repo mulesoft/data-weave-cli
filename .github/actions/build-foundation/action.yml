@@ -1,0 +1,33 @@
+name: Build DataWeave foundation
+description: >-
+  Shared foundation for the DataWeave CLI workflows: sets up Gradle and GraalVM,
+  then runs the single `gradlew build` that compiles both native images (the CLI
+  `dw` and the `dwlib` shared library). Callers must run actions/checkout BEFORE
+  this action, then invoke the per-artifact actions (cli/python/node/native-lib)
+  AFTER it in the same job so Gradle up-to-date checks reuse the compiled images.
+inputs:
+  github-token:
+    description: Token for graalvm/setup-graalvm component downloads.
+    required: true
+  native-version:
+    description: >-
+      Value passed as -PnativeVersion to Gradle. Empty string omits the flag
+      (the build then uses the nativeVersion default).
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+
+    - name: Setup Graalvm
+      uses: graalvm/setup-graalvm@v1
+      with:
+        java-version: '24'
+        distribution: 'graalvm-community'
+        github-token: ${{ inputs.github-token }}
+
+    - name: Run Build
+      run: ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true build ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
+      shell: bash
