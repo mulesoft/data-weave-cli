@@ -1,0 +1,64 @@
+name: Build DataWeave native artifacts
+description: >-
+  Shared build prefix for the DataWeave CLI workflows: sets up Gradle, GraalVM,
+  and Node, then builds the CLI distro, the Python wheel, and the Node package,
+  and runs the Node tests. Callers must run actions/checkout BEFORE this action
+  and add their own upload/release tail AFTER it.
+inputs:
+  github-token:
+    description: Token for graalvm/setup-graalvm component downloads.
+    required: true
+  native-version:
+    description: >-
+      Value passed as -PnativeVersion to Gradle. Empty string omits the flag
+      (the build then uses the nativeVersion default).
+    required: false
+    default: ''
+  break-system-packages:
+    description: >-
+      When 'true', add --break-system-packages to the pip install (required on
+      GitHub-hosted macOS per PEP 668; not needed on the self-hosted mulesoft
+      runners).
+    required: false
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+
+    - name: Setup Graalvm
+      uses: graalvm/setup-graalvm@v1
+      with:
+        java-version: '24'
+        distribution: 'graalvm-community'
+        github-token: ${{ inputs.github-token }}
+
+    - name: Run Build
+      run: ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true build ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
+      shell: bash
+
+    - name: Create Distro
+      run: ./gradlew --stacktrace --no-problems-report native-cli:distro ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
+      shell: bash
+
+    - name: Install Python build dependencies
+      run: python3 -m pip install ${{ inputs.break-system-packages == 'true' && '--break-system-packages' || '' }} --upgrade setuptools wheel
+      shell: bash
+
+    - name: Create Native Lib Python Wheel
+      run: ./gradlew --stacktrace --no-problems-report native-lib:buildPythonWheel ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
+      shell: bash
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Create Native Lib Node Package
+      run: ./gradlew --stacktrace --no-problems-report native-lib:buildNodePackage ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
+      shell: bash
+
+    - name: Run Node.js Tests
+      run: ./gradlew --stacktrace --no-problems-report native-lib:nodeTest ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
+      shell: bash
