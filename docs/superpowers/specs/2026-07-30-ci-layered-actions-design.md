@@ -1,190 +1,214 @@
-# CI Layered Actions: Foundation + Per-Artifact Packaging
+# CI Layered Actions: Foundation + Per-Artifact Actions
 
 **Date:** 2026-07-30
 
 ## Goal
 
-Restructure the CI build orchestration from one monolithic `build-native`
-composite action into a **two-layer** design:
+Restructure CI so **adding a new product artifact touches the workflows as
+little as possible** and **everything about one artifact lives in one place**.
 
-- **One shared foundation action** — the parts every artifact needs (Gradle +
-  GraalVM setup, the single `gradlew build` that compiles both native images).
-- **One packaging action per product artifact** — CLI, Python, Node today; Go,
-  Rust, etc. later — each owning its own toolchain setup and build/test steps.
+Two layers:
 
-This makes each artifact an independently-composable unit so a future binding
-is *one new action file + one line per workflow that wants it*, dragging in no
-setup it doesn't need.
+- **One shared foundation action** — Gradle + GraalVM setup and the single
+  `gradlew build` that compiles both native images.
+- **One action per artifact** (`cli`, `python`, `node`, later `go`/`rust`) —
+  each owns its full lifecycle (produce → optional test/tck → optional
+  publish), with the phases selected by inputs.
+
+Target outcome: a workflow reads `checkout → build-foundation → cli → python →
+node`, one call per artifact, and adding **Go** is *one new action directory +
+one line per workflow that wants it*.
 
 ## Context & motivation
 
-PR #150 (`build-native` composite action) removed the byte-for-byte duplicated
-build prefix across `ci.yml`/`main.yml`/`release.yml`. It is correct but
-monolithic: it bakes **Node-specific** (`actions/setup-node`) and
-**Python-specific** (`pip install … --break-system-packages`) setup into a
-block that presents as generic. That is invisible today because all three
-workflows build all three artifacts — but the roadmap adds Go/Rust bindings,
-at which point a binding-specific build would drag in unrelated toolchains and
-new bindings would mean editing one growing action.
+PR #150 (`build-native`) removed the duplicated build prefix but is a monolith
+that bakes Node- and Python-specific setup into a "generic" block. The roadmap
+adds Go/Rust bindings; we want new artifacts to be drop-in. This evolves PR #150
+in place (branch `ci-composite-action`, PR #150) — master never carries the
+monolith.
 
-PR #150 is **not yet merged**, so this evolves that PR in place — master never
-carries the monolith. Same branch (`ci-composite-action`), same PR (#150).
+### GitHub Actions constraint (decisive for the shape)
+
+A composite action is **one directory / one `action.yml` / one callable unit** —
+you cannot define several named sub-actions (`produce-cli`, `upload-cli`, …) in
+one file. The other primitive, a reusable *workflow* (`workflow_call`), runs as
+its **own job on its own runner**, so it would not see the native images the
+foundation compiled without uploading/downloading them between jobs — which
+breaks "build once, package many."
+
+Therefore each artifact is **one composite action** that performs all its
+phases, gated by inputs (Shape A). Naming is **by artifact, not phase** (`cli`,
+not `produce-cli`), because the action does more than produce.
 
 ### Gradle dependency facts (verified in `native-lib/build.gradle`)
 
-The layering is safe because the packaging tasks already declare their own
-dependencies back to compilation:
+The layering is safe because packaging/test tasks declare their own
+dependencies back to compilation, and Gradle up-to-date checks prevent
+recompilation:
 
-- `native-cli:distro` dependsOn `nativeCompile` (the CLI image).
-- `native-lib:buildPythonWheel` dependsOn `stagePythonNativeLib` →
-  `stripNativeLibrary` → `nativeCompile` (the `dwlib` shared library).
-- `native-lib:buildNodePackage` dependsOn `stageNodeNativeLib` →
+- `native-cli:distro` → `nativeCompile` (CLI image).
+- `native-lib:buildPythonWheel` → `stagePythonNativeLib` → `stripNativeLibrary`
+  → `nativeCompile` (`dwlib`).
+- `native-lib:buildNodePackage` / `nodeTest` → `stageNodeNativeLib` →
   `stripNativeLibrary` → `nativeCompile`.
 
-So the foundation's `gradlew build` compiles both native images once; each
-packaging action is a thin layer Gradle will not recompile (up-to-date checks
-short-circuit the native builds). `setup-gradle`/`setup-graalvm` configure the
-**job** environment (PATH, `JAVA_HOME`), so packaging actions later in the same
-job invoke `./gradlew` with no re-setup.
+`gradlew build` in the foundation compiles both native images once;
+`setup-gradle`/`setup-graalvm` configure the **job** env (PATH, `JAVA_HOME`),
+so later actions in the same job invoke `./gradlew` with no re-setup. The
+foundation must run before any artifact action.
 
-## Current state (PR #150, to be evolved)
+### Per-artifact test/tck phases are asymmetric (verified)
 
-`.github/actions/build-native/action.yml` — one composite action, 9 steps:
-Setup Gradle, Setup GraalVM, Run Build, Create Distro, Install Python deps,
-Create Python Wheel, Setup Node, Create Node Package, Run Node Tests. Inputs:
-`github-token`, `native-version`, `break-system-packages`.
+- **CLI:** regression/TCK = `native-cli-integration-tests:test` (a *separate*
+  Gradle module), master-only, two weave suite versions (2.12.2-SNAPSHOT,
+  2.13.0-SNAPSHOT).
+- **Node:** `nodeTest` (unit/integration, always) **plus** a master-only TCK
+  conformance lane (`stageTckSuites` + `npm run test:tck`, two suite versions).
+- **Python:** a `pythonTest` Gradle task exists but is **not** wired into any
+  workflow today — no tck phase.
 
-Workflows call it as: `checkout → build-native(...) → <tail>`.
+A rigid produce→tck→upload triple would misfit this. Each artifact action
+therefore encodes *its own* test/tck phase (or none), gated by `run-tck`.
+This spec preserves today's exact test wiring — it does not add Python tests or
+change which tests run.
 
 ## Design
 
 ### Layer 1 — foundation action
 
-`.github/actions/build-foundation/action.yml` (composite). Renamed from
-`build-native`.
+`.github/actions/build-foundation/action.yml` (composite; renamed from
+`build-native`).
 
-Steps:
-1. Setup Gradle (`gradle/actions/setup-gradle@v3`)
-2. Setup GraalVM (`graalvm/setup-graalvm@v1`, Java 24, `graalvm-community`,
-   `github-token: ${{ inputs.github-token }}`)
-3. Run Build — `./gradlew --stacktrace --no-problems-report -PskipNodeTests=true build <version>`
+Steps: Setup Gradle → Setup GraalVM (Java 24, `graalvm-community`,
+`github-token`) → Run Build (`./gradlew … -PskipNodeTests=true build
+<version>`).
 
-Inputs:
-- `github-token` (required) — for graalvm setup component downloads.
-- `native-version` (default `''`) — empty omits `-PnativeVersion`.
-
-The conditional version arg: `${{ inputs.native-version != '' &&
+Inputs: `github-token` (required); `native-version` (default `''`, empty omits
+`-PnativeVersion`). Version arg: `${{ inputs.native-version != '' &&
 format('-PnativeVersion={0}', inputs.native-version) || '' }}`.
 
-### Layer 2 — per-artifact packaging actions
+### Layer 2 — per-artifact actions
 
-Each is a composite action; each `run` step declares `shell: bash`; each takes
-`native-version` (default `''`) and applies the same conditional version arg.
+Each is one composite action named for the artifact; every `run` step declares
+`shell: bash`; each applies the version-arg conditional. Common inputs:
 
-**`.github/actions/package-cli/action.yml`**
-- Step: Create Distro — `./gradlew … native-cli:distro <version>`
-- Inputs: `native-version`.
+- `native-version` (default `''`).
+- `run-tck` (default `'false'`) — when `'true'`, run this artifact's
+  master-only test/tck phase in addition to its always-on tests.
+- `publish` (default `'none'`) — `'none' | 'artifact' | 'release'`, selecting
+  the publish phase. `'artifact'` = `actions/upload-artifact@v7` (main.yml CI
+  retention, incl. any staging/rename this artifact needs); `'release'` =
+  `svenstaro/upload-release-action@v2` (release assets, per-OS names, tag).
+- Publish-only inputs, consumed only when `publish != 'none'`:
+  `github-token` / `repo-token`, `native-version`, `arch`, `script-name`,
+  `distro-os`, `tag` as each artifact requires. (Exact per-artifact input set
+  is finalized in the plan.)
 
-**`.github/actions/package-python/action.yml`**
-- Step: Install Python build dependencies —
-  `python3 -m pip install <break-flag> --upgrade setuptools wheel`
-- Step: Create Native Lib Python Wheel — `./gradlew … native-lib:buildPythonWheel <version>`
-- Inputs: `native-version`; `break-system-packages` (default `'false'`) — the
-  flag now lives with the artifact that needs it (macOS PEP 668), not in a
-  generic block. Conditional: `${{ inputs.break-system-packages == 'true' &&
-  '--break-system-packages' || '' }}`.
+**`.github/actions/cli/action.yml`** — produce: `native-cli:distro`; tck
+(if `run-tck`): `native-cli-integration-tests:test` × two suite versions;
+publish: distro zip (`artifact` stages `dw-cli-…` and uploads; `release`
+uploads via svenstaro with `asset_name`).
 
-**`.github/actions/package-node/action.yml`**
-- Step: Setup Node.js (`actions/setup-node@v4`, node 18)
-- Step: Create Native Lib Node Package — `./gradlew … native-lib:buildNodePackage <version>`
-- Step: Run Node.js Tests — `./gradlew … native-lib:nodeTest <version>`
-- Inputs: `native-version`.
+**`.github/actions/python/action.yml`** — produce: pip deps (owns
+`--break-system-packages`, gated by a `break-system-packages` input, default
+`'false'`) + `native-lib:buildPythonWheel`; tck: none (preserves today);
+publish: the wheel.
 
-**Future** `package-go`, `package-rust`: same shape — own toolchain setup +
-build/test — added without touching foundation or the other packaging actions.
+**`.github/actions/node/action.yml`** — produce: `setup-node` +
+`native-lib:buildNodePackage` + `nodeTest` (always); tck (if `run-tck`):
+`stageTckSuites` + `npm run test:tck` × two suite versions; publish: the `.tgz`
+(`artifact` stages OS-qualified name; `release` via svenstaro).
 
-### Workflow composition
+**dwlib (raw `.so`/`.dll`/`.dylib` + `.h`)** is a 4th uploaded thing today,
+separate from the wheel/tgz that embed it. Whether it becomes its own
+`native-lib` artifact action or rides along with one binding is **deferred to
+the implementation plan.**
 
-Every calling job stays: `actions/checkout@v4` first (local `uses:` needs the
-workspace on disk), then the pipeline, then that workflow's divergent tail.
+**Future** `go`, `rust`: same shape, added without touching foundation or other
+artifact actions.
 
-**`ci.yml`** (self-hosted mulesoft matrix, no tail):
+### Workflow composition (target)
+
+Checkout stays first (local `uses:` needs the workspace). Foundation second.
+
+**`ci.yml`** (mulesoft matrix; produce only, no tck, no publish):
 ```
 checkout
-build-foundation      (github-token)
-package-cli
-package-python        (break-system-packages omitted → 'false')
-package-node
+build-foundation   (github-token)
+cli                (defaults: run-tck false, publish none)
+python             (break-system-packages omitted → false)
+node
 ```
 
-**`main.yml`** (ubuntu-latest/windows-2022/macos-latest):
+**`main.yml`** (ubuntu-latest / windows-2022 / macos-latest):
 ```
 checkout
-build-foundation      (github-token)
-package-cli
-package-python        (break-system-packages: 'true')
-package-node
-<master-only regression 2.12.2 / 2.13.0>
-<master-only Node TCK 2.12.2 / 2.13.0>
-<Derive platform tokens, staging, upload-artifact steps>
+build-foundation   (github-token)
+cli                (run-tck: master?, publish: 'artifact', + arch/script-name/distro-os)
+python             (break-system-packages: 'true', publish: 'artifact')
+node               (run-tck: master?, publish: 'artifact', + arch/script-name)
 ```
+`run-tck` is passed `${{ github.ref == 'refs/heads/master' }}` so the tck phase
+stays master-only, matching today.
 
 **`release.yml`** (tag builds):
 ```
 checkout
-Guess Extension Version           (sets NATIVE_VERSION, ARCH — must precede)
-build-foundation      (github-token, native-version: ${{ env.NATIVE_VERSION }})
-package-cli           (native-version: ${{ env.NATIVE_VERSION }})
-package-python        (native-version: …, break-system-packages: 'true')
-package-node          (native-version: …)
-<svenstaro upload steps: binaries, wheel, node, per-OS dwlib, header>
+Guess Extension Version   (sets NATIVE_VERSION, ARCH — must precede foundation)
+build-foundation   (github-token, native-version: ${{ env.NATIVE_VERSION }})
+cli                (native-version, publish: 'release', repo-token, tag, arch, script-name, distro-os)
+python             (native-version, break-system-packages: 'true', publish: 'release', repo-token, tag)
+node               (native-version, publish: 'release', repo-token, tag, arch, script-name)
 ```
+Plus whatever the dwlib decision (planning) yields, and the shared header
+upload.
 
 ### Behavioral equivalence
 
-The rendered commands per workflow must be **identical** to PR #150's current
-(green) state — this is a pure restructuring, no behavior change:
-- `native-version` empty for ci/main, `${{ env.NATIVE_VERSION }}` for release
-  (on foundation + all three packaging actions).
-- `--break-system-packages` present only on main/release `package-python`,
-  absent on ci `package-python`.
-- Regression/TCK/upload tails byte-identical to today.
+Pure restructuring — the effective commands, the artifacts produced, their
+names, and which tests run per trigger must be **identical** to PR #150's
+current green state:
+
+- version arg: empty for ci/main, `${{ env.NATIVE_VERSION }}` for release.
+- `--break-system-packages`: only on main/release python.
+- master-only tck: CLI regression + Node TCK gated exactly as today; Python
+  still has none.
+- publish: ci none; main `upload-artifact` (same staged names); release
+  svenstaro (same `asset_name`s, per-OS dwlib, header).
 
 ## Naming decisions
 
-- Foundation action: **`build-foundation`** (signals shared base layer, paired
-  with `package-*`).
-- CLI gets a full **`package-cli`** action for symmetry (even though it's one
-  Gradle step), so all artifacts are uniform and equally extensible.
+- Foundation: **`build-foundation`**.
+- Artifact actions named **by artifact**: `cli`, `python`, `node` (referenced
+  `uses: ./.github/actions/cli`). Not `produce-cli` — the action owns
+  produce + tck + publish, selected by inputs.
 
 ## Risks / notes
 
-- **Local composite actions require checkout first** — already true in all
-  three workflows; unchanged.
-- **`shell: bash` mandatory** on every composite `run` step.
-- **Job-scoped setup:** foundation's `setup-gradle`/`setup-graalvm` and
-  `package-node`'s `setup-node` configure the job env; ordering guarantees each
-  `./gradlew`/npm call sees its toolchain. Foundation must run before any
-  packaging action (it produces the compiled images they package).
-- **`release.yml` ordering:** `Guess Extension Version` must stay before
-  `build-foundation` so `env.NATIVE_VERSION` is populated when action inputs
-  evaluate.
-- Slightly more files (4 actions vs 1). Justified by the stated Go/Rust
-  roadmap — this is designing a known seam, not speculative generality.
-- More actions per job = marginally more step-group overhead in the CI UI;
-  negligible next to native-image compile time.
+- **Input surface grows** on each artifact action (publish/tck knobs). This is
+  the deliberate tradeoff for one-call-per-artifact + one-file-per-artifact;
+  accepted per the goal. Keep inputs documented in each `action.yml`.
+- **Produce/publish now co-located** inside each artifact action (reverses the
+  earlier separation proposal) — a conscious choice favoring fewer workflow
+  touch-points over strict separation, reasonable for a small, stable set of
+  publish mechanisms.
+- **Local composite actions require checkout first** (unchanged). **`shell:
+  bash` mandatory** on every composite `run` step.
+- **`release.yml` ordering:** `Guess Extension Version` before
+  `build-foundation` (populates `NATIVE_VERSION`/`ARCH`).
+- **Job-scoped setup ordering:** foundation before all artifact actions.
+- More step groups per job in the CI UI; negligible vs. native-image compile
+  time.
 
 ## Testing / validation
 
 No unit tests apply. Validation:
-- YAML parse for all four action files and all three workflows.
-- Confirm rendered commands per workflow equal PR #150's: version arg presence
-  per workflow; `--break-system-packages` only on main/release python; tails
-  intact.
-- Confirm no `build-native` reference remains; foundation is `build-foundation`.
-- Confirm each workflow composes `build-foundation → package-cli →
-  package-python → package-node` in order, foundation first.
-- End-to-end: the `Build Native CLI` (`main.yml`) PR run is green on all three
-  legs (ubuntu-latest, windows-2022, macos-latest) — the live proof, same bar
-  PR #150 already cleared. `ci.yml`/`release.yml` validated by parse + command
-  inspection (they don't run on PRs).
+- YAML parse for every action file and all three workflows.
+- Rendered commands per workflow equal PR #150's green state (version arg,
+  break-system-packages, tck gating, publish mechanism + artifact names).
+- No `build-native` reference remains; foundation is `build-foundation`.
+- Each workflow composes `build-foundation → cli → python → node` (foundation
+  first), one call per artifact.
+- End-to-end: the `Build Native CLI` (`main.yml`) PR run green on all three
+  legs — the live proof, same bar PR #150 cleared. `ci.yml`/`release.yml`
+  validated by parse + command inspection (not triggered on PRs).
