@@ -34,59 +34,18 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-
-      # Setup Graalvm
-      - name: Setup Graalvm
-        uses: graalvm/setup-graalvm@v1
-        with:
-          java-version: '24'
-          distribution: 'graalvm-community'
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Guess Extension Version
         run: |
           echo "NATIVE_VERSION=$(echo '${{github.ref}}' | sed -e 's,.*/v\(.*\),\1,')" >> $GITHUB_ENV
           echo "ARCH=$(uname -m)" >> $GITHUB_ENV
         shell: bash
 
-      # Runs a single command using the runners shell
-      - name: Run Build
-        run: |
-          ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true build -PnativeVersion=${{env.NATIVE_VERSION}}
-        shell: bash
-
-      # Generate distro
-      - name: Create Distro
-        run: ./gradlew --stacktrace --no-problems-report native-cli:distro -PnativeVersion=${{env.NATIVE_VERSION}}
-        shell: bash
-
-      # Install Python build dependencies (setuptools/wheel may be missing on Windows runners)
-      - name: Install Python build dependencies
-        run: python3 -m pip install --break-system-packages --upgrade setuptools wheel
-        shell: bash
-
-      # Generate native-lib python wheel
-      - name: Create Native Lib Python Wheel
-        run: ./gradlew --stacktrace --no-problems-report native-lib:buildPythonWheel -PnativeVersion=${{env.NATIVE_VERSION}}
-        shell: bash
-
-      # Setup Node.js for native-lib Node package
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Build native artifacts
+        uses: ./.github/actions/build-native
         with:
-          node-version: '18'
-
-      # Stage the native lib and build Node package (npm install, node-gyp, tsc, npm pack)
-      - name: Create Native Lib Node Package
-        run: ./gradlew --stacktrace --no-problems-report native-lib:buildNodePackage -PnativeVersion=${{env.NATIVE_VERSION}}
-        shell: bash
-
-      # Run Node.js tests
-      - name: Run Node.js Tests
-        run: ./gradlew --stacktrace --no-problems-report native-lib:nodeTest -PnativeVersion=${{env.NATIVE_VERSION}}
-        shell: bash
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          native-version: ${{ env.NATIVE_VERSION }}
+          break-system-packages: 'true'
 
       # Upload the artifact file
       - name: Upload binaries to release
