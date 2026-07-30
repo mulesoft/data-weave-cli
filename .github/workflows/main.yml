@@ -39,109 +39,45 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      - name: Build native artifacts
-        uses: ./.github/actions/build-native
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          break-system-packages: 'true'
-
-      # Run regression tests (only on master branch to save CI time on PRs).
-      # These run after the build (Gradle caches the compiled CLI, so order
-      # relative to distro/wheel/node build does not affect results).
-      # TCK artifact available in 2.12.2-SNAPSHOT and 2.13.0-SNAPSHOT
-      - name: Run regression test 2.12.2-SNAPSHOT
-        if: github.ref == 'refs/heads/master'
-        run: |
-          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.12.2-SNAPSHOT -DweaveSuiteVersion=2.12.2-SNAPSHOT native-cli-integration-tests:test
-        shell: bash
-      - name: Run regression test 2.13.0-SNAPSHOT
-        if: github.ref == 'refs/heads/master'
-        run: |
-          ./gradlew --stacktrace -PweaveTestSuiteVersion=2.13.0-SNAPSHOT -DweaveSuiteVersion=2.13.0-SNAPSHOT native-cli-integration-tests:test
-        shell: bash
-
-      # Run the Node.js TCK conformance lane (only on master to save CI time on
-      # PRs — mirrors the native-cli regression gating). Stages the DataWeave
-      # tck@zip corpus per supported version and runs the tck vitest project
-      # against the built package. The Node package was already built by "Create
-      # Native Lib Node Package" above; dwlib is the single 2.13.0 build and the
-      # 2.12.2 corpus replays against it (the binding exposes no language-level).
-      - name: Run Node.js TCK Conformance 2.12.2-SNAPSHOT
-        if: github.ref == 'refs/heads/master'
-        run: |
-          ./gradlew --stacktrace --no-problems-report -PweaveTestSuiteVersion=2.12.2-SNAPSHOT native-lib:stageTckSuites
-          cd native-lib/node && npm run test:tck
-        shell: bash
-      - name: Run Node.js TCK Conformance 2.13.0-SNAPSHOT
-        if: github.ref == 'refs/heads/master'
-        run: |
-          ./gradlew --stacktrace --no-problems-report -PweaveTestSuiteVersion=2.13.0-SNAPSHOT native-lib:stageTckSuites
-          cd native-lib/node && npm run test:tck
-        shell: bash
-
-      # Derive lowercase OS + runtime arch tokens for artifact names.
-      # OS comes from matrix.script_name (linux/windows); arch from uname -m
-      # (x86_64 on linux/windows, arm64 on macos).
       - name: Derive platform tokens
         run: echo "ARCH=$(uname -m)" >> "$GITHUB_ENV"
         shell: bash
 
-      # archive:false makes the artifact name equal the uploaded file name.
-      # Copy the Gradle-named distro zip to the convention name so the CLI
-      # artifact reads dw-cli-<ver>-<os>-<arch>.zip.
-      - name: Stage renamed CLI distro
-        run: cp "native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.distro_os }}.zip" "native-cli/build/distributions/dw-cli-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}.zip"
-        shell: bash
-
-      # Upload the artifact file
-      - name: Upload generated script
-        uses: actions/upload-artifact@v7.0.1
+      - name: Build foundation
+        uses: ./.github/actions/build-foundation
         with:
-          # archive:false skips the redundant outer zip (the distro is already a
-          # .zip) and names the artifact after the file — which already carries
-          # ${matrix.script_name}, so the matrix legs don't collide. No `name:`:
-          # it would be ignored under archive:false.
-          path: native-cli/build/distributions/dw-cli-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}.zip
-          archive: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Upload the Python wheel
-      - name: Upload Python wheel
-        uses: actions/upload-artifact@v7.0.1
+      - name: CLI
+        uses: ./.github/actions/cli
         with:
-          # archive:false skips the redundant outer zip and names the artifact
-          # after the wheel — whose platform tag (manylinux/win_amd64/…) is
-          # already OS-unique, so the matrix legs don't collide. No `name:`: it
-          # would be ignored under archive:false.
-          path: native-lib/python/dist/dataweave_native-0.0.1-py3-*.whl
-          archive: false
+          native-version: ${{ env.NATIVE_VERSION }}
+          run-tck: ${{ github.ref == 'refs/heads/master' }}
+          publish: 'artifact'
+          arch: ${{ env.ARCH }}
+          script-name: ${{ matrix.script_name }}
+          distro-os: ${{ matrix.distro_os }}
 
-      # npm pack emits the same filename (dataweave-native-0.0.1.tgz) on every
-      # OS. With archive:false the file NAME becomes the artifact name (the
-      # `name:` input is ignored), so copy to an OS-qualified name first to keep
-      # the matrix legs from colliding.
-      - name: Stage OS-qualified Node package
-        run: cp native-lib/node/dataweave-native-0.0.1.tgz "native-lib/node/dataweave-node-0.0.1-${{ matrix.script_name }}-${{ env.ARCH }}.tgz"
-        shell: bash
-
-      # Upload the Node.js package
-      - name: Upload Node package
-        uses: actions/upload-artifact@v7.0.1
+      - name: Python
+        uses: ./.github/actions/python
         with:
-          path: native-lib/node/dataweave-node-0.0.1-${{ matrix.script_name }}-${{ env.ARCH }}.tgz
-          # Single .tgz (already gzip-compressed); skip the redundant outer zip
-          # (v7+ feature). archive:false ignores `name:` and uses the file name,
-          # which the copy above made OS-unique.
-          archive: false
+          native-version: ${{ env.NATIVE_VERSION }}
+          break-system-packages: 'true'
+          publish: 'artifact'
 
-      # Upload the native shared library + header together per OS. Multiple
-      # files, so this stays archived (archive:false allows only one file); the
-      # zip is wanted here and `name:` still applies.
-      - name: Upload native shared library
-        uses: actions/upload-artifact@v7.0.1
+      - name: Node
+        uses: ./.github/actions/node
         with:
-          name: dwlib-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}
-          path: |
-            native-lib/python/src/dataweave/native/dwlib.dylib
-            native-lib/python/src/dataweave/native/dwlib.so
-            native-lib/python/src/dataweave/native/dwlib.dll
-            native-lib/python/src/dataweave/native/dwlib.h
+          native-version: ${{ env.NATIVE_VERSION }}
+          run-tck: ${{ github.ref == 'refs/heads/master' }}
+          publish: 'artifact'
+          arch: ${{ env.ARCH }}
+          script-name: ${{ matrix.script_name }}
+
+      - name: Native library
+        uses: ./.github/actions/native-lib
+        with:
+          native-version: ${{ env.NATIVE_VERSION }}
+          publish: 'artifact'
+          arch: ${{ env.ARCH }}
+          script-name: ${{ matrix.script_name }}
