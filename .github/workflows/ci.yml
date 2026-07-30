@@ -3,13 +3,12 @@ name: CI Native CLI
 on:
   schedule:
     - cron: '0 12 * * 3' # This runs the workflow every wednesday day at 12:00 UTC
-env:
-  NATIVE_VERSION: 100.100.100
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
   CI:
     strategy:
+      fail-fast: false
       matrix:
         os: [ mulesoft-ubuntu, mulesoft-windows ]
         include:
@@ -70,70 +69,3 @@ jobs:
       - name: Run Node.js Tests
         run: ./gradlew --stacktrace --no-problems-report native-lib:nodeTest
         shell: bash
-
-      # Derive lowercase OS + runtime arch tokens for artifact names.
-      # OS comes from matrix.script_name (linux/windows); arch from uname -m
-      # (x86_64 today; stays correct if an arm64 runner is ever added).
-      - name: Derive platform tokens
-        run: echo "ARCH=$(uname -m)" >> "$GITHUB_ENV"
-        shell: bash
-
-      # archive:false makes the artifact name equal the uploaded file name.
-      # Copy the Gradle-named distro zip to the convention name so the CLI
-      # artifact reads dw-cli-<ver>-<os>-<arch>.zip.
-      - name: Stage renamed CLI distro
-        run: cp "native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.script_name }}.zip" "native-cli/build/distributions/dw-cli-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}.zip"
-        shell: bash
-
-      # Upload the artifact file
-      - name: Upload generated script
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          # archive:false skips the redundant outer zip (the distro is already a
-          # .zip) and names the artifact after the file — which already carries
-          # ${matrix.script_name}, so the matrix legs don't collide. No `name:`:
-          # it would be ignored under archive:false.
-          path: native-cli/build/distributions/dw-cli-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}.zip
-          archive: false
-
-      # Upload the Python wheel
-      - name: Upload Python wheel
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          # archive:false skips the redundant outer zip and names the artifact
-          # after the wheel — whose platform tag (manylinux/win_amd64/…) is
-          # already OS-unique, so the matrix legs don't collide. No `name:`: it
-          # would be ignored under archive:false.
-          path: native-lib/python/dist/dataweave_native-0.0.1-py3-*.whl
-          archive: false
-
-      # npm pack emits the same filename (dataweave-native-0.0.1.tgz) on every
-      # OS. With archive:false the file NAME becomes the artifact name (the
-      # `name:` input is ignored), so copy to an OS-qualified name first to keep
-      # the matrix legs from colliding.
-      - name: Stage OS-qualified Node package
-        run: cp native-lib/node/dataweave-native-0.0.1.tgz "native-lib/node/dataweave-node-0.0.1-${{ matrix.script_name }}-${{ env.ARCH }}.tgz"
-        shell: bash
-
-      # Upload the Node.js package
-      - name: Upload Node package
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          path: native-lib/node/dataweave-node-0.0.1-${{ matrix.script_name }}-${{ env.ARCH }}.tgz
-          # Single .tgz (already gzip-compressed); skip the redundant outer zip
-          # (v7+ feature). archive:false ignores `name:` and uses the file name,
-          # which the copy above made OS-unique.
-          archive: false
-
-      # Upload the native shared library + header together per OS. Multiple
-      # files, so this stays archived (archive:false allows only one file); the
-      # zip is wanted here and `name:` still applies.
-      - name: Upload native shared library
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: dwlib-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}
-          path: |
-            native-lib/python/src/dataweave/native/dwlib.dylib
-            native-lib/python/src/dataweave/native/dwlib.so
-            native-lib/python/src/dataweave/native/dwlib.dll
-            native-lib/python/src/dataweave/native/dwlib.h

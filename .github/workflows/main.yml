@@ -16,13 +16,23 @@ jobs:
   # This workflow contains a single job called "build"
   BUILD:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ mulesoft-ubuntu, mulesoft-windows ]
+        os: [ ubuntu-latest, windows-2022, macos-latest ]
         include:
-          - os: mulesoft-ubuntu
+          # script_name → artifact-name OS token (our naming convention).
+          # distro_os   → Gradle distro classifier (native-cli getOsName():
+          #               macOS is "osx", not "macos"), used for the source
+          #               filename produced by native-cli:distro.
+          - os: ubuntu-latest
             script_name: linux
-          - os: mulesoft-windows
+            distro_os: linux
+          - os: windows-2022
             script_name: windows
+            distro_os: windows
+          - os: macos-latest
+            script_name: macos
+            distro_os: osx
     runs-on: ${{ matrix.os }}
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
@@ -65,7 +75,7 @@ jobs:
 
       # Install Python build dependencies (setuptools/wheel may be missing on Windows runners)
       - name: Install Python build dependencies
-        run: python3 -m pip install --upgrade setuptools wheel
+        run: python3 -m pip install --break-system-packages --upgrade setuptools wheel
         shell: bash
 
       # Generate native-lib python wheel
@@ -110,7 +120,7 @@ jobs:
 
       # Derive lowercase OS + runtime arch tokens for artifact names.
       # OS comes from matrix.script_name (linux/windows); arch from uname -m
-      # (x86_64 today; stays correct if an arm64 runner is ever added).
+      # (x86_64 on linux/windows, arm64 on macos).
       - name: Derive platform tokens
         run: echo "ARCH=$(uname -m)" >> "$GITHUB_ENV"
         shell: bash
@@ -119,7 +129,7 @@ jobs:
       # Copy the Gradle-named distro zip to the convention name so the CLI
       # artifact reads dw-cli-<ver>-<os>-<arch>.zip.
       - name: Stage renamed CLI distro
-        run: cp "native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.script_name }}.zip" "native-cli/build/distributions/dw-cli-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}.zip"
+        run: cp "native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.distro_os }}.zip" "native-cli/build/distributions/dw-cli-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}.zip"
         shell: bash
 
       # Upload the artifact file

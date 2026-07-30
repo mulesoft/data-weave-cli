@@ -10,13 +10,23 @@ jobs:
   # This workflow contains a single job called "build"
   RELEASE_EXTENSION:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ mulesoft-ubuntu, mulesoft-windows ]
+        os: [ ubuntu-latest, windows-2022, macos-latest ]
         include:
-          - os: mulesoft-ubuntu
+          # script_name → artifact-name OS token (our naming convention).
+          # distro_os   → Gradle distro classifier (native-cli getOsName():
+          #               macOS is "osx", not "macos"), used for the source
+          #               filename produced by native-cli:distro.
+          - os: ubuntu-latest
             script_name: linux
-          - os: mulesoft-windows
+            distro_os: linux
+          - os: windows-2022
             script_name: windows
+            distro_os: windows
+          - os: macos-latest
+            script_name: macos
+            distro_os: osx
     runs-on: ${{ matrix.os }}
 
     # Steps represent a sequence of tasks that will be executed as part of the job
@@ -54,7 +64,7 @@ jobs:
 
       # Install Python build dependencies (setuptools/wheel may be missing on Windows runners)
       - name: Install Python build dependencies
-        run: python3 -m pip install --upgrade setuptools wheel
+        run: python3 -m pip install --break-system-packages --upgrade setuptools wheel
         shell: bash
 
       # Generate native-lib python wheel
@@ -83,7 +93,7 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.script_name }}.zip
+          file: native-cli/build/distributions/native-cli-${{env.NATIVE_VERSION}}-native-distro-${{ matrix.distro_os }}.zip
           asset_name: dw-cli-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}.zip
           tag: ${{ github.ref }}
           overwrite: true
@@ -126,6 +136,16 @@ jobs:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: native-lib/python/src/dataweave/native/dwlib.dll
           asset_name: dwlib-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}.dll
+          tag: ${{ github.ref }}
+          overwrite: true
+
+      - name: Upload native shared library to release (macOS)
+        if: runner.os == 'macOS'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: native-lib/python/src/dataweave/native/dwlib.dylib
+          asset_name: dwlib-${{env.NATIVE_VERSION}}-${{ matrix.script_name }}-${{ env.ARCH }}.dylib
           tag: ${{ github.ref }}
           overwrite: true
 
