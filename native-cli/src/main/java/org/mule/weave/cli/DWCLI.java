@@ -65,7 +65,7 @@ public class DWCLI {
                     "(____/\\_/\\_/(__)\\_/\\_/(_/\\_)(____)\\_/\\_/ \\__/ (____)",
             footer = "Example:\n" +
                     "\n" +
-                    " dw  run -i payload <fullPathToUser.json> \"output application/json --- payload\n" +
+                    " dw  run -i payload=<fullPathToUser.json> \"output application/json --- payload\n" +
                     "filter (item) -> item.age > 17\"\n" +
                     "\n" +
                     " Documentation reference:\n" +

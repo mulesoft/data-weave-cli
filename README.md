@@ -106,7 +106,7 @@ Commands:
   repl           Starts the DW repl.
 Example:
 
- dw  run -i payload <fullPathToUser.json> "output application/json --- payload
+ dw  run -i payload=<fullPathToUser.json> "output application/json --- payload
 filter (item) -> item.age > 17"
 
  Documentation reference:
