@@ -22,7 +22,19 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      - name: Build native artifacts
-        uses: ./.github/actions/build-native
+      - name: Build foundation
+        uses: ./.github/actions/build-foundation
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: CLI
+        uses: ./.github/actions/cli
+
+      - name: Python
+        uses: ./.github/actions/python
+
+      - name: Node
+        uses: ./.github/actions/node
+
+      - name: Native library
+        uses: ./.github/actions/native-lib
