@@ -39,23 +39,15 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-
-      # Setup Graalvm
-      - name: Setup Graalvm
-        uses: graalvm/setup-graalvm@v1
+      - name: Build native artifacts
+        uses: ./.github/actions/build-native
         with:
-          java-version: '24'
-          distribution: 'graalvm-community'
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          break-system-packages: 'true'
 
-      # Runs a single command using the runners shell
-      - name: Run Build
-        run: |
-          ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true build
-        shell: bash
-      # Run regression tests (only on master branch to save CI time on PRs)
+      # Run regression tests (only on master branch to save CI time on PRs).
+      # These run after the build (Gradle caches the compiled CLI, so order
+      # relative to distro/wheel/node build does not affect results).
       # TCK artifact available in 2.12.2-SNAPSHOT and 2.13.0-SNAPSHOT
       - name: Run regression test 2.12.2-SNAPSHOT
         if: github.ref == 'refs/heads/master'
@@ -66,37 +58,6 @@ jobs:
         if: github.ref == 'refs/heads/master'
         run: |
           ./gradlew --stacktrace -PweaveTestSuiteVersion=2.13.0-SNAPSHOT -DweaveSuiteVersion=2.13.0-SNAPSHOT native-cli-integration-tests:test
-        shell: bash
-
-      # Generate distro
-      - name: Create Distro
-        run: ./gradlew --stacktrace --no-problems-report native-cli:distro
-        shell: bash
-
-      # Install Python build dependencies (setuptools/wheel may be missing on Windows runners)
-      - name: Install Python build dependencies
-        run: python3 -m pip install --break-system-packages --upgrade setuptools wheel
-        shell: bash
-
-      # Generate native-lib python wheel
-      - name: Create Native Lib Python Wheel
-        run: ./gradlew --stacktrace --no-problems-report native-lib:buildPythonWheel
-        shell: bash
-
-      # Setup Node.js for native-lib Node package
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      # Stage the native lib and build Node package (npm install, node-gyp, tsc, npm pack)
-      - name: Create Native Lib Node Package
-        run: ./gradlew --stacktrace --no-problems-report native-lib:buildNodePackage
-        shell: bash
-
-      # Run Node.js tests
-      - name: Run Node.js Tests
-        run: ./gradlew --stacktrace --no-problems-report native-lib:nodeTest
         shell: bash
 
       # Run the Node.js TCK conformance lane (only on master to save CI time on
