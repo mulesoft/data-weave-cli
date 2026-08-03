@@ -12,16 +12,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, windows-2022, macos-latest ]
+        os: [ mulesoft-ubuntu, mulesoft-windows, macos-latest ]
         include:
           # script_name → artifact-name OS token (our naming convention).
           # distro_os   → Gradle distro classifier (native-cli getOsName():
           #               macOS is "osx", not "macos"), used for the source
           #               filename produced by native-cli:distro.
-          - os: ubuntu-latest
+          - os: mulesoft-ubuntu
             script_name: linux
             distro_os: linux
-          - os: windows-2022
+          - os: mulesoft-windows
             script_name: windows
             distro_os: windows
           - os: macos-latest
