@@ -26,10 +26,10 @@ public class CallbackWeaveResourceResolver implements WeaveResourceResolver {
 
     @Override
     public Option<WeaveResource> resolve(NameIdentifier nameIdentifier) {
-        try {
-            // Convert NameIdentifier to file path
-            String path = NameIdentifierHelper.toWeaveFilePath(nameIdentifier, "/");
+        // Convert NameIdentifier to file path (outside try block for error logging)
+        String path = NameIdentifierHelper.toWeaveFilePath(nameIdentifier, "/");
 
+        try {
             // Convert path to C string
             try (CTypeConversion.CCharPointerHolder pathHolder =
                     CTypeConversion.toCString(path)) {
@@ -56,7 +56,7 @@ public class CallbackWeaveResourceResolver implements WeaveResourceResolver {
             }
         } catch (Exception e) {
             // Log and return empty on any error
-            System.err.println("Error resolving module " + NameIdentifierHelper.toWeaveFilePath(nameIdentifier, "/") + ": " + e.getMessage());
+            System.err.println("Error resolving module " + path + ": " + e.getMessage());
             return Option.empty();
         }
     }
