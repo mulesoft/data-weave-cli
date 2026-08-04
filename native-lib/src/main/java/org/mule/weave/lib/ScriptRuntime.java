@@ -6,6 +6,7 @@ import org.mule.weave.v2.runtime.DataWeaveResult;
 import org.mule.weave.v2.runtime.DataWeaveScriptingEngine;
 import org.mule.weave.v2.runtime.ModuleComponentsFactory;
 import org.mule.weave.v2.runtime.ParserConfiguration;
+import org.mule.weave.v2.runtime.ParserConfigurationBuilder;
 import org.mule.weave.v2.runtime.ScriptingBindings;
 import org.mule.weave.v2.runtime.api.DWResult;
 import org.mule.weave.v2.runtime.api.DWScript;
@@ -17,9 +18,6 @@ import scala.Option;
 import scala.Tuple2;
 import scala.collection.immutable.Map;
 import scala.collection.immutable.Map$;
-import scala.collection.immutable.Seq;
-import scala.collection.immutable.Seq$;
-import scala.collection.mutable.HashMap;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -38,6 +36,9 @@ public class ScriptRuntime {
 
     private static final ScriptRuntime INSTANCE = new ScriptRuntime();
 
+    // Static field for callback resolver, volatile for thread-safe double-checked locking
+    private static volatile CallbackWeaveResourceResolver resolver = null;
+
     /**
      * Returns the singleton instance.
      *
@@ -50,14 +51,18 @@ public class ScriptRuntime {
     /**
      * Sets the module resolver callback and rebuilds the engine.
      * Can only be called once per process (engine is a singleton).
+     * Thread-safe but should be called early in application lifecycle before script execution.
      *
-     * @param callback Function pointer for resolving modules
+     * <p><strong>IMPORTANT:</strong> The callback function must be thread-safe if using
+     * GraalVM's threadsafe function pointers, as it may be invoked from multiple threads
+     * during concurrent module resolution.</p>
+     *
+     * @param callback Thread-safe function pointer for resolving modules
      */
-    public static void setResolver(NativeCallbacks.ResolveModuleCallback callback) {
+    public static synchronized void setResolver(NativeCallbacks.ResolveModuleCallback callback) {
         if (resolver != null) {
             System.err.println("WARNING: Module resolver already set for this process. " +
-                              "Only one resolver configuration is supported. Ignoring new resolver. " +
-                              "Use composeResolvers() to combine multiple module sources.");
+                              "Only one resolver configuration is supported. Ignoring new resolver.");
             return;
         }
 
@@ -69,11 +74,13 @@ public class ScriptRuntime {
         resolver = new CallbackWeaveResourceResolver(callback);
 
         // Rebuild engine with composite resolver (built-ins + callback)
-        INSTANCE.engine = new DataWeaveScriptingEngine(
-            ModuleComponentsFactory.apply(compositeResolver()),
-            ParserConfiguration.apply(Seq$.MODULE$.empty(), new HashMap<>(), false),
-            new Properties()
-        );
+        synchronized (INSTANCE) {
+            INSTANCE.engine = new DataWeaveScriptingEngine(
+                ModuleComponentsFactory.apply(compositeResolver()),
+                new ParserConfigurationBuilder().build(),
+                new Properties()
+            );
+        }
     }
 
     /**
@@ -83,24 +90,25 @@ public class ScriptRuntime {
     private static WeaveResourceResolver compositeResolver() {
         WeaveResourceResolver classLoaderResolver = ClassLoaderWeaveResourceResolver.apply();
 
-        if (resolver == null) {
+        CallbackWeaveResourceResolver currentResolver = resolver;
+        if (currentResolver == null) {
             return classLoaderResolver;
         }
 
         return CompositeWeaveResourceResolver.apply(
             classLoaderResolver,  // Try built-ins first
-            resolver              // Then callback for user modules
+            currentResolver       // Then callback for user modules
         );
     }
 
-    private DWScriptingEngine engine;
-    private static CallbackWeaveResourceResolver resolver = null;
+    // Instance field for the scripting engine, access synchronized in setResolver
+    private volatile DWScriptingEngine engine;
 
     private ScriptRuntime() {
-        // Build engine with composite resolver (supports callback if set)
+        // Initialize with ClassLoader-only resolver (no callback yet)
         engine = new DataWeaveScriptingEngine(
             ModuleComponentsFactory.apply(compositeResolver()),
-            ParserConfiguration.apply(Seq$.MODULE$.empty(), new HashMap<>(), false),
+            new ParserConfigurationBuilder().build(),
             new Properties()
         );
     }
