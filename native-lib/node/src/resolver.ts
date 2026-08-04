@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import AdmZip from "adm-zip";
 
 /**
  * Module resolver function type.
@@ -64,4 +65,40 @@ export function modulesFromDirectory(baseDir: string): ModuleResolver {
       throw new Error(`Failed to read module ${modulePath} from ${fullPath}: ${message}`);
     }
   };
+}
+
+/**
+ * Creates a resolver that extracts .dwl files from JAR archives.
+ * Returns a Promise because JAR extraction must complete before resolver is used.
+ * The returned resolver itself is synchronous (backed by in-memory map).
+ *
+ * @param jarPaths Array of paths to JAR files
+ * @returns Promise resolving to resolver function
+ *
+ * @example
+ * const resolver = await modulesFromJars(['./libs/dw-strings.jar']);
+ * // Now use synchronously: resolver('dw/core/Strings.dwl')
+ */
+export async function modulesFromJars(jarPaths: string[]): Promise<ModuleResolver> {
+  const modules: Record<string, string> = {};
+
+  for (const jarPath of jarPaths) {
+    try {
+      const zip = new AdmZip(jarPath);
+      const entries = zip.getEntries();
+
+      for (const entry of entries) {
+        // Extract only .dwl files, skip directories
+        if (!entry.isDirectory && entry.entryName.endsWith(".dwl")) {
+          const source = entry.getData().toString("utf-8");
+          modules[entry.entryName] = source;
+        }
+      }
+    } catch (error: any) {
+      throw new Error(`Failed to read JAR ${jarPath}: ${error.message}`);
+    }
+  }
+
+  // Return synchronous resolver backed by extracted modules
+  return modulesFromMap(modules);
 }

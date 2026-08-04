@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { modulesFromMap, modulesFromDirectory } from "../../src/resolver";
+import { modulesFromMap, modulesFromDirectory, modulesFromJars } from "../../src/resolver";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -110,5 +110,57 @@ describe("modulesFromDirectory", () => {
   it("returns null for path traversal attempts", () => {
     const resolver = modulesFromDirectory(tempDir);
     expect(resolver("../../outside.dwl")).toBeNull();
+  });
+});
+
+describe("modulesFromJars", () => {
+  it("extracts .dwl files from JAR", async () => {
+    const jarPath = path.join(__dirname, "..", "fixtures", "test-lib.jar");
+
+    const resolver = await modulesFromJars([jarPath]);
+
+    const strings = resolver("dw/core/Strings.dwl");
+    expect(strings).toContain("fun capitalize");
+
+    const math = resolver("org/test/math.dwl");
+    expect(math).toContain("fun multiply");
+  });
+
+  it("returns null when module not in JAR", async () => {
+    const jarPath = path.join(__dirname, "..", "fixtures", "test-lib.jar");
+
+    const resolver = await modulesFromJars([jarPath]);
+
+    const result = resolver("missing/mod.dwl");
+
+    expect(result).toBeNull();
+  });
+
+  it("handles multiple JARs", async () => {
+    const jarPath = path.join(__dirname, "..", "fixtures", "test-lib.jar");
+
+    // Use same JAR twice for test (simulates multiple JARs)
+    const resolver = await modulesFromJars([jarPath, jarPath]);
+
+    expect(resolver("dw/core/Strings.dwl")).toContain("fun capitalize");
+  });
+
+  it("throws on invalid JAR", async () => {
+    const badJar = path.join(__dirname, "..", "fixtures", "not-a-jar.txt");
+    fs.writeFileSync(badJar, "not a zip file");
+
+    await expect(modulesFromJars([badJar])).rejects.toThrow("Failed to read JAR");
+
+    fs.unlinkSync(badJar);
+  });
+
+  it("ignores non-.dwl files in JAR", async () => {
+    // Test JAR contains only .dwl files, but verify behavior
+    const jarPath = path.join(__dirname, "..", "fixtures", "test-lib.jar");
+
+    const resolver = await modulesFromJars([jarPath]);
+
+    // Should not throw, just not find non-.dwl paths
+    expect(resolver("some-text-file.txt")).toBeNull();
   });
 });
