@@ -330,4 +330,227 @@ public class NativeLib {
         return ptr;
     }
 
+    // ── Resolver-aware FFI Entrypoints ───────────────────────────────────
+
+    /**
+     * Runs a DataWeave script with module resolver callback.
+     *
+     * <p>This variant accepts a {@link NativeCallbacks.ResolveModuleCallback} to resolve
+     * external modules during script execution. The resolver is installed before script
+     * execution and remains active for the lifetime of the process.</p>
+     *
+     * @param thread GraalVM isolate thread
+     * @param script DataWeave script source (C string)
+     * @param inputsJson JSON string of inputs (C string)
+     * @param resolverCallback Callback for resolving external modules
+     * @return JSON result or error message (unmanaged C string, must be freed)
+     */
+    @CEntryPoint(name = "run_script_with_resolver")
+    public static CCharPointer runScriptWithResolver(
+            IsolateThread thread,
+            CCharPointer script,
+            CCharPointer inputsJson,
+            NativeCallbacks.ResolveModuleCallback resolverCallback) {
+
+        try {
+            // Install resolver (idempotent if already set)
+            ScriptRuntime.setResolver(resolverCallback);
+
+            // Delegate to existing run logic
+            String dwScript = CTypeConversion.toJavaString(script);
+            String inputs = CTypeConversion.toJavaString(inputsJson);
+
+            ScriptRuntime runtime = ScriptRuntime.getInstance();
+            String result = runtime.run(dwScript, inputs);
+            return toUnmanagedCString(result);
+        } catch (Exception e) {
+            return toUnmanagedCString("{\"success\":false,\"error\":\""
+                + escapeJsonString(e.getMessage()) + "\"}");
+        }
+    }
+
+    /**
+     * Runs a DataWeave script with streaming output and module resolver.
+     *
+     * <p>This variant combines streaming output via a write callback with external module
+     * resolution. The resolver is installed before script execution.</p>
+     *
+     * @param thread GraalVM isolate thread
+     * @param script DataWeave script source (C string)
+     * @param inputsJson JSON-encoded inputs map (C string), may be null
+     * @param writeCallback function pointer invoked with each output chunk
+     * @param ctx opaque context pointer forwarded to callback
+     * @param resolverCallback Callback for resolving external modules
+     * @return an unmanaged C string with JSON metadata/error (must be freed)
+     */
+    @CEntryPoint(name = "run_script_callback_with_resolver")
+    public static CCharPointer runScriptCallbackWithResolver(
+            IsolateThread thread,
+            CCharPointer script,
+            CCharPointer inputsJson,
+            NativeCallbacks.WriteCallback writeCallback,
+            PointerBase ctx,
+            NativeCallbacks.ResolveModuleCallback resolverCallback) {
+
+        try {
+            // Install resolver
+            ScriptRuntime.setResolver(resolverCallback);
+
+            // Delegate to existing streaming logic
+            String dwScript = CTypeConversion.toJavaString(script);
+            String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
+
+            ScriptRuntime runtime = ScriptRuntime.getInstance();
+            StreamSession session = runtime.runStreaming(dwScript, inputs);
+
+            if (session.isError()) {
+                return toUnmanagedCString("{\"success\":false,\"error\":\""
+                        + escapeJsonString(session.getError()) + "\"}");
+            }
+
+            try {
+                byte[] buf = new byte[CALLBACK_BUFFER_SIZE];
+                CCharPointer nativeBuf = UnmanagedMemory.malloc(CALLBACK_BUFFER_SIZE);
+                try {
+                    int n;
+                    while ((n = session.read(buf, buf.length)) > 0) {
+                        for (int i = 0; i < n; i++) {
+                            nativeBuf.write(i, buf[i]);
+                        }
+                        int rc = writeCallback.invoke(ctx, nativeBuf, n);
+                        if (rc != 0) {
+                            return toUnmanagedCString("{\"success\":false,\"error\":\""
+                                    + "Write callback returned error: " + rc + "\"}");
+                        }
+                    }
+                } finally {
+                    UnmanagedMemory.free(nativeBuf);
+                }
+            } catch (IOException e) {
+                return toUnmanagedCString("{\"success\":false,\"error\":\""
+                        + escapeJsonString(e.getMessage()) + "\"}");
+            } finally {
+                session.closeStream();
+            }
+
+            return toUnmanagedCString("{\"success\":true"
+                    + ",\"mimeType\":\"" + session.getMimeType() + "\""
+                    + ",\"charset\":\"" + session.getCharset() + "\""
+                    + ",\"binary\":" + session.isBinary()
+                    + "}");
+        } catch (Exception e) {
+            return toUnmanagedCString("{\"success\":false,\"error\":\""
+                + escapeJsonString(e.getMessage()) + "\"}");
+        }
+    }
+
+    /**
+     * Runs a DataWeave script with streaming input/output and module resolver.
+     *
+     * <p>This variant combines streaming input via read callback, streaming output via write
+     * callback, and external module resolution. The resolver is installed before script execution.</p>
+     *
+     * @param thread GraalVM isolate thread
+     * @param script DataWeave script source (C string)
+     * @param inputsJson JSON-encoded inputs map (C string), may be null
+     * @param inputName the binding name for the callback-supplied input (C string)
+     * @param inputMimeType the MIME type of the callback-supplied input (C string)
+     * @param inputCharset the charset of the callback-supplied input (C string), may be null
+     * @param readCallback function pointer invoked to read input chunks
+     * @param writeCallback function pointer invoked with output chunks
+     * @param ctx opaque context pointer forwarded to callbacks
+     * @param resolverCallback Callback for resolving external modules
+     * @return an unmanaged C string with JSON metadata/error (must be freed)
+     */
+    @CEntryPoint(name = "run_script_input_output_callback_with_resolver")
+    public static CCharPointer runScriptInputOutputCallbackWithResolver(
+            IsolateThread thread,
+            CCharPointer script,
+            CCharPointer inputsJson,
+            CCharPointer inputName,
+            CCharPointer inputMimeType,
+            CCharPointer inputCharset,
+            NativeCallbacks.ReadCallback readCallback,
+            NativeCallbacks.WriteCallback writeCallback,
+            PointerBase ctx,
+            NativeCallbacks.ResolveModuleCallback resolverCallback) {
+
+        try {
+            // Install resolver
+            ScriptRuntime.setResolver(resolverCallback);
+
+            // Delegate to existing streaming I/O logic
+            String dwScript = CTypeConversion.toJavaString(script);
+            String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
+            String inName = CTypeConversion.toJavaString(inputName);
+            String inMime = CTypeConversion.toJavaString(inputMimeType);
+            String inCharset = inputCharset.isNull() ? null : CTypeConversion.toJavaString(inputCharset);
+
+            // Create a piped input stream session for the callback-supplied input
+            InputStreamSession inputSession = new InputStreamSession(inMime, inCharset);
+            long inputHandle = inputSession.register();
+
+            // Merge the stream handle into the inputs JSON
+            String streamEntry = "{\"streamHandle\":\"" + inputHandle + "\",\"mimeType\":\"" + inMime + "\""
+                    + (inCharset != null ? ",\"charset\":\"" + inCharset + "\"" : "") + "}";
+            String mergedInputs = mergeInputEntry(inputs, inName, streamEntry);
+
+            // Start background thread for reading input
+            final long readCallbackAddr = readCallback.rawValue();
+            final long ctxAddr = ctx.rawValue();
+            Thread feeder = new Thread(new InputCallbackFeeder(
+                    readCallbackAddr, ctxAddr, inputSession), "dw-input-callback-feeder");
+            feeder.setDaemon(true);
+            feeder.start();
+
+            // Execute the script and stream output via the writeCallback
+            ScriptRuntime runtime = ScriptRuntime.getInstance();
+            StreamSession session = runtime.runStreaming(dwScript, mergedInputs);
+
+            if (session.isError()) {
+                cleanupFeeder(feeder, inputHandle);
+                return toUnmanagedCString("{\"success\":false,\"error\":\""
+                        + escapeJsonString(session.getError()) + "\"}");
+            }
+
+            try {
+                byte[] buf = new byte[CALLBACK_BUFFER_SIZE];
+                CCharPointer writeBuf = UnmanagedMemory.malloc(CALLBACK_BUFFER_SIZE);
+                try {
+                    int n;
+                    while ((n = session.read(buf, buf.length)) > 0) {
+                        for (int i = 0; i < n; i++) {
+                            writeBuf.write(i, buf[i]);
+                        }
+                        int rc = writeCallback.invoke(ctx, writeBuf, n);
+                        if (rc != 0) {
+                            cleanupFeeder(feeder, inputHandle);
+                            return toUnmanagedCString("{\"success\":false,\"error\":\""
+                                    + "Write callback returned error: " + rc + "\"}");
+                        }
+                    }
+                } finally {
+                    UnmanagedMemory.free(writeBuf);
+                }
+            } catch (IOException e) {
+                cleanupFeeder(feeder, inputHandle);
+                return toUnmanagedCString("{\"success\":false,\"error\":\""
+                        + escapeJsonString(e.getMessage()) + "\"}");
+            } finally {
+                session.closeStream();
+            }
+
+            cleanupFeeder(feeder, inputHandle);
+
+            return toUnmanagedCString("{\"success\":true"
+                    + ",\"mimeType\":\"" + session.getMimeType() + "\""
+                    + ",\"charset\":\"" + session.getCharset() + "\""
+                    + ",\"binary\":" + session.isBinary()
+                    + "}");
+        } catch (Exception e) {
+            return toUnmanagedCString("{\"success\":false,\"error\":\""
+                + escapeJsonString(e.getMessage()) + "\"}");
+        }
+    }
+
 }
