@@ -32,4 +32,12 @@ describe("modulesFromMap", () => {
     expect(resolver("b.dwl")).toBe("source b");
     expect(resolver("c.dwl")).toBeNull();
   });
+
+  it("returns empty string when module source is empty", () => {
+    const resolver = modulesFromMap({
+      "org/test/empty.dwl": "",
+    });
+
+    expect(resolver("org/test/empty.dwl")).toBe("");
+  });
 });

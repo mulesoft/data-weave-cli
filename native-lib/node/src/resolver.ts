@@ -20,13 +20,9 @@ export type ModuleResolver = (modulePath: string) => string | null;
  */
 export function modulesFromMap(modules: Record<string, string>): ModuleResolver {
   return (modulePath: string): string | null => {
-    const source = modules[modulePath];
-
-    if (source === undefined) {
-      console.debug(`Module not found in map: ${modulePath}`);
-      return null;
+    if (modulePath in modules) {
+      return modules[modulePath];
     }
-
-    return source;
+    return null;
   };
 }
