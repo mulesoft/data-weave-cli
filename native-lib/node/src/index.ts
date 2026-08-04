@@ -1,5 +1,6 @@
 export { DataWeave, run, runStreaming, runTransform, cleanup } from "./dataweave";
 export { DataWeaveError, DataWeaveScriptError } from "./errors";
+export { modulesFromMap } from "./resolver";
 
 export type {
   ExecutionResult,
@@ -9,3 +10,5 @@ export type {
   InputEntry,
   TransformOptions,
 } from "./types";
+
+export type { ModuleResolver } from "./resolver";
