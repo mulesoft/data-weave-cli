@@ -787,9 +787,12 @@ static napi_value napi_run_with_resolver(napi_env env, napi_callback_info info) 
     napi_get_value_string_utf8(env, args[1], inputs, inputs_len + 1, NULL);
     napi_get_value_string_utf8(env, args[2], mime_type, mime_len + 1, NULL);
 
-    // Set up resolver threadsafe function (if not already done)
+    // Resolver is initialized once per process lifetime. Subsequent calls with
+    // different resolver callbacks will reuse the first resolver, as enforced by
+    // ScriptRuntime.setResolver() on the native side (one resolver per engine).
     uv_mutex_lock(&g_mutex);
     if (g_resolver_data == NULL) {
+        // First call: initialize resolver (one per process lifetime)
         g_resolver_data = (resolver_callback_data_t*)malloc(sizeof(resolver_callback_data_t));
         if (g_resolver_data == NULL) {
             uv_mutex_unlock(&g_mutex);
@@ -834,6 +837,8 @@ static napi_value napi_run_with_resolver(napi_env env, napi_callback_info info) 
             return NULL;
         }
     }
+    // Note: Subsequent calls reuse the first resolver. The global resolver set on
+    // first call will handle all module resolutions for this process lifetime.
     uv_mutex_unlock(&g_mutex);
 
     // Need to attach thread for this call
