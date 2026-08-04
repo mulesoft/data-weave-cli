@@ -50,17 +50,10 @@ runs:
       run: ./gradlew --stacktrace --no-problems-report native-lib:nodeTest ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
       shell: bash
 
-    - name: Run Node.js TCK Conformance 2.12.2-SNAPSHOT
+    - name: Run Node.js TCK Conformance
       if: inputs.run-tck == 'true'
       run: |
-        ./gradlew --stacktrace --no-problems-report -PweaveTestSuiteVersion=2.12.2-SNAPSHOT native-lib:stageTckSuites
-        cd native-lib/node && npm run test:tck
-      shell: bash
-
-    - name: Run Node.js TCK Conformance 2.13.0-SNAPSHOT
-      if: inputs.run-tck == 'true'
-      run: |
-        ./gradlew --stacktrace --no-problems-report -PweaveTestSuiteVersion=2.13.0-SNAPSHOT native-lib:stageTckSuites
+        ./gradlew --stacktrace --no-problems-report native-lib:stageTckSuites
         cd native-lib/node && npm run test:tck
       shell: bash
 

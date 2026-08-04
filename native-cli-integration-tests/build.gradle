@@ -17,9 +17,9 @@ sourceSets {
 dependencies {
     api(project(":native-cli"))
 
-    weaveSuite "org.mule.weave:runtime:${weaveTestSuiteVersion}:tck@zip"
-    weaveSuite "org.mule.weave:yaml-module:${weaveTestSuiteVersion}:tck@zip"
-    weaveSuite "org.mule.weave:core-modules:${weaveTestSuiteVersion}:tck@zip"
+    weaveSuite "org.mule.weave:runtime:${weaveTCKVersion}:tck@zip"
+    weaveSuite "org.mule.weave:yaml-module:${weaveTCKVersion}:tck@zip"
+    weaveSuite "org.mule.weave:core-modules:${weaveTCKVersion}:tck@zip"
     testRuntimeOnly 'com.vladsch.flexmark:flexmark-all:0.64.8'
     // https://mvnrepository.com/artifact/org.scalatest/scalatest
     testImplementation group: 'org.scalatest', name: 'scalatest_2.12', version: '3.2.19'
@@ -54,9 +54,3 @@ tasks.named('processResources') {
 downloadTestSuites.dependsOn(cleanTestSuites)
 test.dependsOn(downloadTestSuites)
 test.dependsOn(":native-cli:nativeCompile")
-
-test {
-    if (System.getProperty("weaveSuiteVersion") != null) {
-        systemProperty "weaveSuiteVersion", System.getProperty("weaveSuiteVersion")
-    }
-}
