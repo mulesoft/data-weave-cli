@@ -671,6 +671,10 @@ static char* resolve_module_callback(void* thread, const char* module_path) {
 
     // Set request data
     data->module_path = strdup(module_path);
+    if (data->module_path == NULL) {
+        uv_mutex_unlock(&data->mutex);
+        return NULL;  // Allocation failed
+    }
     data->result_source = NULL;
     data->ready = 0;
 
@@ -771,13 +775,30 @@ static napi_value napi_run_with_resolver(napi_env env, napi_callback_info info) 
     char* inputs = (char*)malloc(inputs_len + 1);
     char* mime_type = (char*)malloc(mime_len + 1);
 
+    if (script == NULL || inputs == NULL || mime_type == NULL) {
+        free(script);
+        free(inputs);
+        free(mime_type);
+        napi_throw_error(env, NULL, "Failed to allocate memory for arguments");
+        return NULL;
+    }
+
     napi_get_value_string_utf8(env, args[0], script, script_len + 1, NULL);
     napi_get_value_string_utf8(env, args[1], inputs, inputs_len + 1, NULL);
     napi_get_value_string_utf8(env, args[2], mime_type, mime_len + 1, NULL);
 
     // Set up resolver threadsafe function (if not already done)
+    uv_mutex_lock(&g_mutex);
     if (g_resolver_data == NULL) {
         g_resolver_data = (resolver_callback_data_t*)malloc(sizeof(resolver_callback_data_t));
+        if (g_resolver_data == NULL) {
+            uv_mutex_unlock(&g_mutex);
+            free(script);
+            free(inputs);
+            free(mime_type);
+            napi_throw_error(env, NULL, "Failed to allocate resolver data");
+            return NULL;
+        }
         uv_mutex_init(&g_resolver_data->mutex);
         uv_cond_init(&g_resolver_data->cond);
         g_resolver_data->module_path = NULL;
@@ -787,7 +808,7 @@ static napi_value napi_run_with_resolver(napi_env env, napi_callback_info info) 
         napi_value async_resource_name;
         napi_create_string_utf8(env, "ResolverCallback", NAPI_AUTO_LENGTH, &async_resource_name);
 
-        napi_create_threadsafe_function(
+        napi_status status = napi_create_threadsafe_function(
             env,
             args[3],  // JS resolver callback
             NULL,
@@ -800,7 +821,20 @@ static napi_value napi_run_with_resolver(napi_env env, napi_callback_info info) 
             resolver_js_callback,
             &g_resolver_data->tsfn
         );
+        if (status != napi_ok) {
+            uv_mutex_destroy(&g_resolver_data->mutex);
+            uv_cond_destroy(&g_resolver_data->cond);
+            free(g_resolver_data);
+            g_resolver_data = NULL;
+            uv_mutex_unlock(&g_mutex);
+            free(script);
+            free(inputs);
+            free(mime_type);
+            napi_throw_error(env, NULL, "Failed to create threadsafe function");
+            return NULL;
+        }
     }
+    uv_mutex_unlock(&g_mutex);
 
     // Need to attach thread for this call
     void* thread = NULL;
@@ -821,6 +855,12 @@ static napi_value napi_run_with_resolver(napi_env env, napi_callback_info info) 
         mime_type,
         resolve_module_callback
     );
+
+    // Native has copied the resolver result, now free it
+    if (g_resolver_data != NULL && g_resolver_data->result_source != NULL) {
+        free(g_resolver_data->result_source);
+        g_resolver_data->result_source = NULL;
+    }
 
     fn_detach_thread(thread);
 
@@ -865,6 +905,23 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
   if (g_initialized) {
     g_ref_count--;
     if (g_ref_count <= 0) {
+      // Clean up resolver data
+      if (g_resolver_data != NULL) {
+        if (g_resolver_data->tsfn != NULL) {
+          napi_release_threadsafe_function(g_resolver_data->tsfn, napi_tsfn_abort);
+        }
+        uv_mutex_destroy(&g_resolver_data->mutex);
+        uv_cond_destroy(&g_resolver_data->cond);
+        if (g_resolver_data->module_path != NULL) {
+          free(g_resolver_data->module_path);
+        }
+        if (g_resolver_data->result_source != NULL) {
+          free(g_resolver_data->result_source);
+        }
+        free(g_resolver_data);
+        g_resolver_data = NULL;
+      }
+
       uv_thread_t tid;
       uv_thread_options_t opts;
       opts.flags = UV_THREAD_HAS_STACK_SIZE;
