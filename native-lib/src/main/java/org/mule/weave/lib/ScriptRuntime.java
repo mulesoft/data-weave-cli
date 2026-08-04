@@ -3,19 +3,29 @@ package org.mule.weave.lib;
 import org.json.JSONObject;
 import org.mule.weave.v2.runtime.BindingValue;
 import org.mule.weave.v2.runtime.DataWeaveResult;
+import org.mule.weave.v2.runtime.DataWeaveScriptingEngine;
+import org.mule.weave.v2.runtime.ModuleComponentsFactory;
+import org.mule.weave.v2.runtime.ParserConfiguration;
 import org.mule.weave.v2.runtime.ScriptingBindings;
 import org.mule.weave.v2.runtime.api.DWResult;
 import org.mule.weave.v2.runtime.api.DWScript;
 import org.mule.weave.v2.runtime.api.DWScriptingEngine;
+import org.mule.weave.v2.sdk.ClassLoaderWeaveResourceResolver;
+import org.mule.weave.v2.sdk.CompositeWeaveResourceResolver;
+import org.mule.weave.v2.sdk.WeaveResourceResolver;
 import scala.Option;
 import scala.Tuple2;
 import scala.collection.immutable.Map;
 import scala.collection.immutable.Map$;
+import scala.collection.immutable.Seq;
+import scala.collection.immutable.Seq$;
+import scala.collection.mutable.HashMap;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.util.Base64;
+import java.util.Properties;
 
 /**
  * Singleton wrapper around a {@link DWScriptingEngine} used to compile and execute DataWeave scripts.
@@ -37,10 +47,62 @@ public class ScriptRuntime {
         return INSTANCE;
     }
 
+    /**
+     * Sets the module resolver callback and rebuilds the engine.
+     * Can only be called once per process (engine is a singleton).
+     *
+     * @param callback Function pointer for resolving modules
+     */
+    public static void setResolver(NativeCallbacks.ResolveModuleCallback callback) {
+        if (resolver != null) {
+            System.err.println("WARNING: Module resolver already set for this process. " +
+                              "Only one resolver configuration is supported. Ignoring new resolver. " +
+                              "Use composeResolvers() to combine multiple module sources.");
+            return;
+        }
+
+        if (callback == null) {
+            System.err.println("WARNING: Attempted to set null resolver, ignoring.");
+            return;
+        }
+
+        resolver = new CallbackWeaveResourceResolver(callback);
+
+        // Rebuild engine with composite resolver (built-ins + callback)
+        INSTANCE.engine = new DataWeaveScriptingEngine(
+            ModuleComponentsFactory.apply(compositeResolver()),
+            ParserConfiguration.apply(Seq$.MODULE$.empty(), new HashMap<>(), false),
+            new Properties()
+        );
+    }
+
+    /**
+     * Creates composite resolver: ClassLoader (built-ins) + Callback (user modules).
+     * If no callback resolver is set, returns ClassLoader only.
+     */
+    private static WeaveResourceResolver compositeResolver() {
+        WeaveResourceResolver classLoaderResolver = ClassLoaderWeaveResourceResolver.apply();
+
+        if (resolver == null) {
+            return classLoaderResolver;
+        }
+
+        return CompositeWeaveResourceResolver.apply(
+            classLoaderResolver,  // Try built-ins first
+            resolver              // Then callback for user modules
+        );
+    }
+
     private DWScriptingEngine engine;
+    private static CallbackWeaveResourceResolver resolver = null;
 
     private ScriptRuntime() {
-        engine = DWScriptingEngine.builder().build();
+        // Build engine with composite resolver (supports callback if set)
+        engine = new DataWeaveScriptingEngine(
+            ModuleComponentsFactory.apply(compositeResolver()),
+            ParserConfiguration.apply(Seq$.MODULE$.empty(), new HashMap<>(), false),
+            new Properties()
+        );
     }
 
     /**
