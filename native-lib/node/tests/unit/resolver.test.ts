@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { modulesFromMap, modulesFromDirectory, modulesFromJars } from "../../src/resolver";
+import { modulesFromMap, modulesFromDirectory, modulesFromJars, composeResolvers } from "../../src/resolver";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -162,5 +162,64 @@ describe("modulesFromJars", () => {
 
     // Should not throw, just not find non-.dwl paths
     expect(resolver("some-text-file.txt")).toBeNull();
+  });
+});
+
+describe("composeResolvers", () => {
+  it("returns first match", () => {
+    const r1 = modulesFromMap({ "a.dwl": "source1" });
+    const r2 = modulesFromMap({ "a.dwl": "source2" });
+
+    const composed = composeResolvers(r1, r2);
+
+    expect(composed("a.dwl")).toBe("source1"); // First wins
+  });
+
+  it("falls through to next resolver on null", () => {
+    const r1 = modulesFromMap({ "a.dwl": "source1" });
+    const r2 = modulesFromMap({ "b.dwl": "source2" });
+
+    const composed = composeResolvers(r1, r2);
+
+    expect(composed("a.dwl")).toBe("source1"); // r1 matched
+    expect(composed("b.dwl")).toBe("source2"); // r1 returned null, r2 matched
+  });
+
+  it("returns null when all resolvers return null", () => {
+    const r1 = modulesFromMap({ "a.dwl": "source1" });
+    const r2 = modulesFromMap({ "b.dwl": "source2" });
+
+    const composed = composeResolvers(r1, r2);
+
+    expect(composed("c.dwl")).toBeNull();
+  });
+
+  it("handles three resolvers", () => {
+    const r1 = modulesFromMap({ "a.dwl": "source1" });
+    const r2 = modulesFromMap({ "b.dwl": "source2" });
+    const r3 = modulesFromMap({ "c.dwl": "source3" });
+
+    const composed = composeResolvers(r1, r2, r3);
+
+    expect(composed("a.dwl")).toBe("source1");
+    expect(composed("b.dwl")).toBe("source2");
+    expect(composed("c.dwl")).toBe("source3");
+    expect(composed("d.dwl")).toBeNull();
+  });
+
+  it("combines directory and map resolvers", () => {
+    // Create temp dir with one file
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "dw-test-"));
+    fs.writeFileSync(path.join(tempDir, "file.dwl"), "from disk");
+
+    const composed = composeResolvers(
+      modulesFromMap({ "override.dwl": "from map" }),
+      modulesFromDirectory(tempDir)
+    );
+
+    expect(composed("override.dwl")).toBe("from map"); // Map first
+    expect(composed("file.dwl")).toBe("from disk"); // Fallback to disk
+
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 });

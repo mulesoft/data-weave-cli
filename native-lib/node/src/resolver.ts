@@ -103,3 +103,32 @@ export async function modulesFromJars(jarPaths: string[]): Promise<ModuleResolve
   // Return synchronous resolver backed by extracted modules
   return modulesFromMap(modules);
 }
+
+/**
+ * Composes multiple resolvers into one with fallback chain.
+ * Tries each resolver in order, returns first non-null result.
+ *
+ * @param resolvers Resolvers to try in order
+ * @returns Composite resolver function
+ *
+ * @example
+ * const resolver = composeResolvers(
+ *   modulesFromMap({ 'override.dwl': '...' }),  // Try first
+ *   modulesFromDirectory('./shared'),            // Then directory
+ *   await modulesFromJars(['./vendor/lib.jar'])  // Finally JAR
+ * );
+ */
+export function composeResolvers(...resolvers: ModuleResolver[]): ModuleResolver {
+  return (modulePath: string): string | null => {
+    for (const resolver of resolvers) {
+      const result = resolver(modulePath);
+      if (result !== null) {
+        return result; // First match wins
+      }
+    }
+
+    // None matched
+    console.debug(`Module not found in any resolver: ${modulePath}`);
+    return null;
+  };
+}
