@@ -29,15 +29,15 @@ class TCKCliTest extends AnyFunSpec with Matchers
   private val INPUT_FILE_PATTERN = Pattern.compile("in[0-9]+\\.[a-zA-Z]+")
   private val OUTPUT_FILE_PATTERN = Pattern.compile("out\\.[a-zA-Z]+")
 
-
-  private val weaveVersion = System.getProperty("weaveSuiteVersion", ComponentVersion.weaveVersion)
+  private val weaveVersion = ComponentVersion.weaveVersion
   println(s"****** Running with weaveSuiteVersion: $weaveVersion *******")
   private val versionString: String = DataWeaveVersion(weaveVersion).toString()
+  private val weaveTCKVersion = System.getProperty("weaveSuiteVersion", ComponentVersion.weaveTCKVersion)
 
   private val testSuites = Seq(
-    TestSuite("runtime-tck-tests", loadTestZipFile(s"weave-suites/runtime-$weaveVersion-tck.zip")),
-    TestSuite("yaml-tck-tests", loadTestZipFile(s"weave-suites/yaml-module-$weaveVersion-tck.zip")),
-    TestSuite("core-modules-tck-tests", loadTestZipFile(s"weave-suites/core-modules-$weaveVersion-tck.zip"))
+    TestSuite("runtime-tck-tests", loadTestZipFile(s"weave-suites/runtime-$weaveTCKVersion-tck.zip")),
+    TestSuite("yaml-tck-tests", loadTestZipFile(s"weave-suites/yaml-module-$weaveTCKVersion-tck.zip")),
+    TestSuite("core-modules-tck-tests", loadTestZipFile(s"weave-suites/core-modules-$weaveTCKVersion-tck.zip"))
   )
 
   private def loadTestZipFile(testSuiteExample: String): File = {
@@ -48,8 +48,8 @@ class TCKCliTest extends AnyFunSpec with Matchers
     zipFile
   }
 
-
   println("NativeCliRuntimeTest -> " + testSuites.mkString(","))
+
   testSuites.foreach {
     testSuite => {
       val wd = Files.createTempDirectory(testSuite.name).toFile

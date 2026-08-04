@@ -29,5 +29,5 @@ runs:
         github-token: ${{ inputs.github-token }}
 
     - name: Run Build
-      run: ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true build ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
+      run: ./gradlew --stacktrace --no-problems-report -PskipNodeTests=true -PskipTCKTests=true build ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
       shell: bash

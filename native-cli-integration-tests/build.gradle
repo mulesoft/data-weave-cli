@@ -17,9 +17,9 @@ sourceSets {
 dependencies {
     api(project(":native-cli"))
 
-    weaveSuite "org.mule.weave:runtime:${weaveTestSuiteVersion}:tck@zip"
-    weaveSuite "org.mule.weave:yaml-module:${weaveTestSuiteVersion}:tck@zip"
-    weaveSuite "org.mule.weave:core-modules:${weaveTestSuiteVersion}:tck@zip"
+    weaveSuite "org.mule.weave:runtime:${weaveTCKVersion}:tck@zip"
+    weaveSuite "org.mule.weave:yaml-module:${weaveTCKVersion}:tck@zip"
+    weaveSuite "org.mule.weave:core-modules:${weaveTCKVersion}:tck@zip"
     testRuntimeOnly 'com.vladsch.flexmark:flexmark-all:0.64.8'
     // https://mvnrepository.com/artifact/org.scalatest/scalatest
     testImplementation group: 'org.scalatest', name: 'scalatest_2.12', version: '3.2.19'
@@ -55,8 +55,11 @@ downloadTestSuites.dependsOn(cleanTestSuites)
 test.dependsOn(downloadTestSuites)
 test.dependsOn(":native-cli:nativeCompile")
 
+// Skip TCKCliTest when -PskipTCKTests=true (matches -PskipNodeTests pattern).
+// CI build-foundation passes this flag on non-master branches so TCK only runs via the explicit
+// "Run CLI TCK Conformance" step (master-only), matching Node TCK behavior. Other IT tests run always.
 test {
-    if (System.getProperty("weaveSuiteVersion") != null) {
-        systemProperty "weaveSuiteVersion", System.getProperty("weaveSuiteVersion")
+    if (project.hasProperty('skipTCKTests') && project.property('skipTCKTests') == 'true') {
+        exclude '**/TCKCliTest.class'
     }
 }

@@ -44,14 +44,9 @@ runs:
       run: ./gradlew --stacktrace --no-problems-report native-cli:distro ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
       shell: bash
 
-    - name: Run regression test 2.12.2-SNAPSHOT
+    - name: Run CLI TCK Conformance
       if: inputs.run-tck == 'true'
-      run: ./gradlew --stacktrace -PweaveTestSuiteVersion=2.12.2-SNAPSHOT -DweaveSuiteVersion=2.12.2-SNAPSHOT native-cli-integration-tests:test
-      shell: bash
-
-    - name: Run regression test 2.13.0-SNAPSHOT
-      if: inputs.run-tck == 'true'
-      run: ./gradlew --stacktrace -PweaveTestSuiteVersion=2.13.0-SNAPSHOT -DweaveSuiteVersion=2.13.0-SNAPSHOT native-cli-integration-tests:test
+      run: ./gradlew --stacktrace native-cli-integration-tests:test
       shell: bash
 
     - name: Stage renamed CLI distro
