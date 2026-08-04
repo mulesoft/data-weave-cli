@@ -13,8 +13,14 @@ typedef void* (*run_script_fn)(void*, const char*, const char*);
 typedef void (*free_cstring_fn)(void*, void*);
 typedef int (*write_callback_t)(void* ctx, const char* buf, int len);
 typedef int (*read_callback_t)(void* ctx, char* buf, int buf_size);
+typedef char* (*resolve_module_callback_t)(void* thread, const char* module_path);
 typedef void* (*run_script_callback_fn)(void*, const char*, const char*, write_callback_t, void*);
 typedef void* (*run_script_input_output_callback_fn)(void*, const char*, const char*, const char*, const char*, const char*, read_callback_t, write_callback_t, void*);
+
+// Resolver-aware entrypoint types
+typedef char* (*run_script_with_resolver_fn)(void*, const char*, const char*, const char*, resolve_module_callback_t);
+typedef void* (*run_script_callback_with_resolver_fn)(void*, const char*, const char*, const char*, write_callback_t, void*, resolve_module_callback_t);
+typedef void* (*run_script_input_output_callback_with_resolver_fn)(void*, const char*, const char*, const char*, const char*, const char*, read_callback_t, write_callback_t, void*, resolve_module_callback_t);
 
 // Global state
 static uv_lib_t g_lib;
@@ -33,6 +39,24 @@ static run_script_fn fn_run_script = NULL;
 static free_cstring_fn fn_free_cstring = NULL;
 static run_script_callback_fn fn_run_script_callback = NULL;
 static run_script_input_output_callback_fn fn_run_script_input_output_callback = NULL;
+
+// Resolver-aware entrypoints
+static run_script_with_resolver_fn fn_run_script_with_resolver = NULL;
+static run_script_callback_with_resolver_fn fn_run_script_callback_with_resolver = NULL;
+static run_script_input_output_callback_with_resolver_fn fn_run_script_input_output_callback_with_resolver = NULL;
+
+// Resolver callback data (same pattern as read callback)
+typedef struct {
+    napi_threadsafe_function tsfn;
+    uv_mutex_t mutex;
+    uv_cond_t cond;
+    char* module_path;       // Input: path to resolve
+    char* result_source;     // Output: .dwl source (or NULL)
+    int ready;               // Synchronization flag
+} resolver_callback_data_t;
+
+// Global resolver data (one per isolate)
+static resolver_callback_data_t* g_resolver_data = NULL;
 
 // --- Initialization ---
 
@@ -61,6 +85,11 @@ static void init_thread_fn(void* arg) {
   uv_dlsym(&g_lib, "free_cstring", (void**)&fn_free_cstring);
   uv_dlsym(&g_lib, "run_script_callback", (void**)&fn_run_script_callback);
   uv_dlsym(&g_lib, "run_script_input_output_callback", (void**)&fn_run_script_input_output_callback);
+
+  // Load resolver-aware entrypoints (optional - newer symbols)
+  uv_dlsym(&g_lib, "run_script_with_resolver", (void**)&fn_run_script_with_resolver);
+  uv_dlsym(&g_lib, "run_script_callback_with_resolver", (void**)&fn_run_script_callback_with_resolver);
+  uv_dlsym(&g_lib, "run_script_input_output_callback_with_resolver", (void**)&fn_run_script_input_output_callback_with_resolver);
 
   if (!fn_create_isolate || !fn_run_script || !fn_free_cstring) {
     snprintf(args->error, sizeof(args->error), "Missing required symbols in library");
@@ -628,6 +657,189 @@ static napi_value napi_run_script_transform(napi_env env, napi_callback_info inf
   return promise;
 }
 
+// --- Resolver callback bridge ---
+
+// Called by native code (background thread) when it needs to resolve a module
+static char* resolve_module_callback(void* thread, const char* module_path) {
+    if (g_resolver_data == NULL) {
+        return NULL;  // No resolver set
+    }
+
+    resolver_callback_data_t* data = g_resolver_data;
+
+    uv_mutex_lock(&data->mutex);
+
+    // Set request data
+    data->module_path = strdup(module_path);
+    data->result_source = NULL;
+    data->ready = 0;
+
+    // Invoke JS callback on main thread (blocks until JS returns)
+    napi_call_threadsafe_function(data->tsfn, data, napi_tsfn_blocking);
+
+    // Wait for JS to return result
+    while (!data->ready) {
+        uv_cond_wait(&data->cond, &data->mutex);
+    }
+
+    char* result = data->result_source;
+    free(data->module_path);
+    data->module_path = NULL;
+
+    uv_mutex_unlock(&data->mutex);
+
+    return result;  // Native will copy, then we free in cleanup
+}
+
+// Called on main thread via threadsafe function
+static void resolver_js_callback(napi_env env, napi_value js_callback,
+                                  void* context, void* data) {
+    resolver_callback_data_t* cb_data = (resolver_callback_data_t*)data;
+
+    // Create JS string for module path
+    napi_value module_path_str;
+    napi_status status = napi_create_string_utf8(env, cb_data->module_path,
+                                                  NAPI_AUTO_LENGTH, &module_path_str);
+    if (status != napi_ok) {
+        fprintf(stderr, "Failed to create module path string\n");
+        goto done;
+    }
+
+    // Call JS: result = resolveModule(modulePath)
+    napi_value undefined, result;
+    napi_get_undefined(env, &undefined);
+    status = napi_call_function(env, undefined, js_callback, 1, &module_path_str, &result);
+    if (status != napi_ok) {
+        fprintf(stderr, "Resolver callback threw exception\n");
+        goto done;
+    }
+
+    // Check result type
+    napi_valuetype result_type;
+    napi_typeof(env, result, &result_type);
+
+    if (result_type == napi_string) {
+        // Get string length
+        size_t len;
+        napi_get_value_string_utf8(env, result, NULL, 0, &len);
+
+        // Allocate and copy (native will copy again, we free after return)
+        cb_data->result_source = (char*)malloc(len + 1);
+        if (cb_data->result_source != NULL) {
+            napi_get_value_string_utf8(env, result, cb_data->result_source, len + 1, NULL);
+        }
+    } else {
+        // null/undefined/other → not found
+        cb_data->result_source = NULL;
+    }
+
+done:
+    // Wake background thread
+    uv_mutex_lock(&cb_data->mutex);
+    cb_data->ready = 1;
+    uv_cond_signal(&cb_data->cond);
+    uv_mutex_unlock(&cb_data->mutex);
+}
+
+// N-API method: runWithResolver
+static napi_value napi_run_with_resolver(napi_env env, napi_callback_info info) {
+    if (!g_initialized) {
+        napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
+        return NULL;
+    }
+    if (!fn_run_script_with_resolver) {
+        napi_throw_error(env, NULL, "run_script_with_resolver not available in native library");
+        return NULL;
+    }
+
+    size_t argc = 5;
+    napi_value args[5];
+    napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+
+    if (argc < 5) {
+        napi_throw_error(env, NULL, "Expected 5 arguments: script, inputs, mimeType, resolverCallback, isolate");
+        return NULL;
+    }
+
+    // Extract script, inputs, mimeType
+    size_t script_len, inputs_len, mime_len;
+    napi_get_value_string_utf8(env, args[0], NULL, 0, &script_len);
+    napi_get_value_string_utf8(env, args[1], NULL, 0, &inputs_len);
+    napi_get_value_string_utf8(env, args[2], NULL, 0, &mime_len);
+
+    char* script = (char*)malloc(script_len + 1);
+    char* inputs = (char*)malloc(inputs_len + 1);
+    char* mime_type = (char*)malloc(mime_len + 1);
+
+    napi_get_value_string_utf8(env, args[0], script, script_len + 1, NULL);
+    napi_get_value_string_utf8(env, args[1], inputs, inputs_len + 1, NULL);
+    napi_get_value_string_utf8(env, args[2], mime_type, mime_len + 1, NULL);
+
+    // Set up resolver threadsafe function (if not already done)
+    if (g_resolver_data == NULL) {
+        g_resolver_data = (resolver_callback_data_t*)malloc(sizeof(resolver_callback_data_t));
+        uv_mutex_init(&g_resolver_data->mutex);
+        uv_cond_init(&g_resolver_data->cond);
+        g_resolver_data->module_path = NULL;
+        g_resolver_data->result_source = NULL;
+        g_resolver_data->ready = 0;
+
+        napi_value async_resource_name;
+        napi_create_string_utf8(env, "ResolverCallback", NAPI_AUTO_LENGTH, &async_resource_name);
+
+        napi_create_threadsafe_function(
+            env,
+            args[3],  // JS resolver callback
+            NULL,
+            async_resource_name,
+            0,
+            1,
+            NULL,
+            NULL,
+            NULL,
+            resolver_js_callback,
+            &g_resolver_data->tsfn
+        );
+    }
+
+    // Need to attach thread for this call
+    void* thread = NULL;
+    int rc = fn_attach_thread(g_isolate, &thread);
+    if (rc != 0) {
+        free(script);
+        free(inputs);
+        free(mime_type);
+        napi_throw_error(env, NULL, "Failed to attach thread");
+        return NULL;
+    }
+
+    // Call native with resolver callback
+    char* result = fn_run_script_with_resolver(
+        thread,
+        script,
+        inputs,
+        mime_type,
+        resolve_module_callback
+    );
+
+    fn_detach_thread(thread);
+
+    free(script);
+    free(inputs);
+    free(mime_type);
+
+    if (result == NULL) {
+        napi_throw_error(env, NULL, "Script execution failed");
+        return NULL;
+    }
+
+    napi_value result_str;
+    napi_create_string_utf8(env, result, NAPI_AUTO_LENGTH, &result_str);
+    free(result);
+
+    return result_str;
+}
+
 // --- Cleanup (must run on a separate thread to avoid V8 signal handler conflict) ---
 
 static void cleanup_thread_fn(void* arg) {
@@ -688,6 +900,9 @@ static napi_value Init(napi_env env, napi_value exports) {
 
   napi_create_function(env, "runScriptTransform", NAPI_AUTO_LENGTH, napi_run_script_transform, NULL, &fn);
   napi_set_named_property(env, exports, "runScriptTransform", fn);
+
+  napi_create_function(env, "runWithResolver", NAPI_AUTO_LENGTH, napi_run_with_resolver, NULL, &fn);
+  napi_set_named_property(env, exports, "runWithResolver", fn);
 
   napi_create_function(env, "cleanup", NAPI_AUTO_LENGTH, napi_cleanup, NULL, &fn);
   napi_set_named_property(env, exports, "cleanup", fn);
