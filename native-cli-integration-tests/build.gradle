@@ -54,3 +54,12 @@ tasks.named('processResources') {
 downloadTestSuites.dependsOn(cleanTestSuites)
 test.dependsOn(downloadTestSuites)
 test.dependsOn(":native-cli:nativeCompile")
+
+// Skip TCKCliTest when -PskipTCKTests=true (matches -PskipNodeTests pattern).
+// CI build-foundation passes this flag on non-master branches so TCK only runs via the explicit
+// "Run CLI TCK Conformance" step (master-only), matching Node TCK behavior. Other IT tests run always.
+test {
+    if (project.hasProperty('skipTCKTests') && project.property('skipTCKTests') == 'true') {
+        exclude '**/TCKCliTest.class'
+    }
+}
