@@ -1,3 +1,6 @@
+import * as fs from "fs";
+import * as path from "path";
+
 /**
  * Module resolver function type.
  * Takes a module path (e.g., "org/mule/weave/v2/libs/lib.dwl") and returns
@@ -24,5 +27,36 @@ export function modulesFromMap(modules: Record<string, string>): ModuleResolver 
       return modules[modulePath];
     }
     return null;
+  };
+}
+
+/**
+ * Creates a resolver that reads .dwl files from a directory tree.
+ * Scans recursively for nested namespace structures.
+ * Reads from disk on every resolution (no caching).
+ *
+ * @param baseDir Base directory to scan for .dwl files
+ * @returns Resolver function
+ *
+ * @example
+ * const resolver = modulesFromDirectory('./my-modules');
+ * // Resolves "org/test/lib.dwl" → reads "./my-modules/org/test/lib.dwl"
+ */
+export function modulesFromDirectory(baseDir: string): ModuleResolver {
+  return (modulePath: string): string | null => {
+    const fullPath = path.join(baseDir, modulePath);
+
+    if (!fs.existsSync(fullPath)) {
+      console.debug(`Module not found in directory: ${fullPath}`);
+      return null;
+    }
+
+    try {
+      return fs.readFileSync(fullPath, "utf-8");
+    } catch (error: any) {
+      throw new Error(
+        `Failed to read module ${modulePath} from ${fullPath}: ${error.message}`
+      );
+    }
   };
 }
