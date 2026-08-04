@@ -44,19 +44,24 @@ export function modulesFromMap(modules: Record<string, string>): ModuleResolver 
  */
 export function modulesFromDirectory(baseDir: string): ModuleResolver {
   return (modulePath: string): string | null => {
-    const fullPath = path.join(baseDir, modulePath);
+    const fullPath = path.resolve(path.join(baseDir, modulePath));
+    const baseDirResolved = path.resolve(baseDir);
 
-    if (!fs.existsSync(fullPath)) {
-      console.debug(`Module not found in directory: ${fullPath}`);
-      return null;
+    // Prevent path traversal - ensure resolved path is within baseDir
+    if (!fullPath.startsWith(baseDirResolved + path.sep) && fullPath !== baseDirResolved) {
+      return null; // Path escapes baseDir
     }
 
     try {
       return fs.readFileSync(fullPath, "utf-8");
-    } catch (error: any) {
-      throw new Error(
-        `Failed to read module ${modulePath} from ${fullPath}: ${error.message}`
-      );
+    } catch (error) {
+      // File not found is expected, return null
+      if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+        return null;
+      }
+      // Other errors (permissions, invalid UTF-8, etc.) should throw
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to read module ${modulePath} from ${fullPath}: ${message}`);
     }
   };
 }

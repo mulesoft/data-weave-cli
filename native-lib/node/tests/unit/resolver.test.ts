@@ -106,4 +106,9 @@ describe("modulesFromDirectory", () => {
     // Cleanup
     fs.chmodSync(badFile, 0o644);
   });
+
+  it("returns null for path traversal attempts", () => {
+    const resolver = modulesFromDirectory(tempDir);
+    expect(resolver("../../outside.dwl")).toBeNull();
+  });
 });
