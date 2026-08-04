@@ -37,6 +37,7 @@
     "adm-zip": "^0.5.10"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^20",
     "@vitest/coverage-v8": "^3.0",
     "fast-xml-parser": "^5.10.1",

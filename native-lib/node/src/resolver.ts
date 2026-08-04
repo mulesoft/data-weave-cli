@@ -94,8 +94,9 @@ export async function modulesFromJars(jarPaths: string[]): Promise<ModuleResolve
           modules[entry.entryName] = source;
         }
       }
-    } catch (error: any) {
-      throw new Error(`Failed to read JAR ${jarPath}: ${error.message}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to read JAR ${jarPath}: ${message}`);
     }
   }
 
