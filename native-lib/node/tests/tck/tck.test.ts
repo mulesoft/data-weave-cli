@@ -9,12 +9,13 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { DataWeave } from "../../src/index";
+import { DataWeave, modulesFromDirectory } from "../../src/index";
 import { parseCase, MAIN_TRANSFORM, type TckScenario } from "./case-loader";
 import { compareOutput } from "./compare";
 import { isIgnored, ignoreReason } from "./ignore-list";
 
 const SUITES_DIR = join(__dirname, "suites");
+const FIXTURES_DIR = join(__dirname, "fixtures");
 
 /** A discovered case: its directory and the scenarios parsed from it. */
 interface DiscoveredCase {
@@ -61,8 +62,11 @@ if (!existsSync(SUITES_DIR)) {
 } else {
   const { cases, skipped } = discoverCases();
 
-  // One shared runtime for the whole lane.
-  const dw = new DataWeave();
+  // One shared runtime for the whole lane. Modules imported by a handful of
+  // TCK cases (org::mule::weave::v2::libs::lib) live only in the private
+  // data-weave runtime repo's test resources, not in any published
+  // artifact/TCK zip — resolve them from a committed fixture instead.
+  const dw = new DataWeave({ resolveModule: modulesFromDirectory(FIXTURES_DIR) });
 
   describe("TCK conformance", () => {
     // eslint-disable-next-line no-console
