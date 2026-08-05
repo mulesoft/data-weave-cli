@@ -24,7 +24,9 @@ const result = dw.run(`
 console.log(result.getString());  // "Hello World"
 ```
 
-**Important:** External module resolution is currently supported only through `run()` (the synchronous, non-streaming API). `runStreaming()` and `runTransform()` do not yet support external modules and will only have access to built-in modules. To use external modules, construct a `DataWeave` instance directly with a `resolveModule` callback, call `.initialize()`, and use `.run()`.
+**Important:** The module-level convenience functions (`run()`, `runStreaming()`, `runTransform()` exported directly from `@dataweave/native`) operate on a lazily-initialized singleton that takes no constructor options and therefore cannot be configured with `resolveModule` — you **must** construct your own `DataWeave` instance to use external modules, as shown above.
+
+Additionally, external module resolution is currently supported only through `.run()` (the synchronous API). `.runStreaming()` and `.runTransform()` do not yet support external modules and will only have access to built-in modules.
 
 ## Resolver Factories
 
@@ -146,16 +148,14 @@ The resolver returns `null`, and the engine reports a compile-time error.
 
 ### File I/O Errors
 
-When the resolver encounters file system errors:
+When the resolver encounters file system errors (unreadable files, permission denied, etc.), the resolver throws an error. However, this error is caught internally by the native layer, logged to **stderr** only, and the callback returns `null` — indistinguishable from "module not found" to the DataWeave compiler:
 
 ```typescript
 const dw = new DataWeave({
-  resolveModule: modulesFromDirectory('./nonexistent-dir'),
+  resolveModule: modulesFromDirectory('./my-modules'),
 });
 dw.initialize();
 
-// If a module exists in the path but can't be read (permissions, encoding, etc.),
-// the resolver throws an Error with details
 const result = dw.run(`
   %dw 2.0
   import org::test::lib
@@ -164,9 +164,14 @@ const result = dw.run(`
 `);
 
 if (!result.success) {
-  console.error(result.error);  // File I/O error details
+  // result.error is the same generic message as "module not found":
+  console.error(result.error);  // "Unable to resolve module with identifier ..."
+  // The actual error details (permissions, encoding, etc.) are logged to stderr only
+  // and not available in the result object
 }
 ```
+
+**Debugging:** To see detailed resolver error messages, check your process's stderr/console output. These details help diagnose why a resolver is failing (e.g., directory does not exist, file unreadable due to permissions).
 
 ### Multiple DataWeave Instances
 

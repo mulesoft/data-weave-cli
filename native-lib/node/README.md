@@ -224,9 +224,9 @@ try {
 - `runStreaming(script, inputs?)`: Same as module-level `runStreaming()`
 - `runTransform(script, input, opts?)`: Same as module-level `runTransform()`
 
-## External Modules
+### External Modules
 
-DataWeave scripts can import external modules using the `resolveModule` option:
+DataWeave scripts can import external modules using the `resolveModule` option. The module-level convenience functions (`run()`, `runStreaming()`, `runTransform()`) operate on a lazily-initialized singleton that cannot be configured with a resolver — you must construct your own `DataWeave` instance:
 
 ```typescript
 import { DataWeave, composeResolvers, modulesFromDirectory, modulesFromJars } from '@dataweave/native';
