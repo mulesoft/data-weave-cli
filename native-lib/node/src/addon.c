@@ -66,6 +66,18 @@ static run_script_input_output_callback_with_resolver_fn fn_run_script_input_out
 static napi_env g_resolver_env = NULL;
 static napi_ref g_resolver_ref = NULL;
 
+// The OS thread that first installed the resolver (see napi_run_with_resolver
+// below). ScriptRuntime's engine is a process-wide singleton, so once a
+// resolver is installed, resolve_module_callback() can be reached from ANY
+// entrypoint that later compiles a script against that shared engine —
+// including runScriptStreaming/runScriptTransform, whose native calls run on
+// a background uv_thread (see streaming_thread_fn/transform_thread_fn), not
+// the JS thread. napi_env/napi_ref are thread-affine; calling into them from
+// a thread other than the one that created them is undefined behavior. We
+// record the owning thread here so resolve_module_callback can detect the
+// mismatch and fail closed (return "not found") instead of crashing.
+static uv_thread_t g_resolver_thread;
+
 // A single runWithResolver call may trigger resolve_module_callback multiple
 // times (one script can import several modules). Native copies each
 // returned buffer immediately, but the copy is made *after* our callback
@@ -128,6 +140,11 @@ static void init_thread_fn(void* arg) {
 
   // Load resolver-aware entrypoints (optional - newer symbols)
   uv_dlsym(&g_lib, "run_script_with_resolver", (void**)&fn_run_script_with_resolver);
+  // fn_run_script_callback_with_resolver / fn_run_script_input_output_callback_with_resolver
+  // are resolved here but intentionally never called from this file. Wiring them into
+  // runScriptStreaming/runScriptTransform would put the resolver callback on a background
+  // uv_thread, which is unsafe for the same reason resolve_module_callback() above guards
+  // against cross-thread napi calls — do not wire these up without solving that hazard first.
   uv_dlsym(&g_lib, "run_script_callback_with_resolver", (void**)&fn_run_script_callback_with_resolver);
   uv_dlsym(&g_lib, "run_script_input_output_callback_with_resolver", (void**)&fn_run_script_input_output_callback_with_resolver);
 
@@ -711,6 +728,20 @@ static char* resolve_module_callback(void* thread, const char* module_path) {
         return NULL;  // No resolver set
     }
 
+    // Guard against cross-thread napi calls. The engine that triggers this
+    // callback is a process-wide singleton shared by run()/runStreaming()/
+    // runTransform(); streaming and transform execute their native call on a
+    // background uv_thread (streaming_thread_fn/transform_thread_fn), not the
+    // JS thread that registered g_resolver_env/g_resolver_ref. If we're not
+    // on the thread that owns this napi_env, calling napi_get_reference_value
+    // or napi_call_function here is undefined behavior (typically a crash).
+    // Fail closed instead: report "not found", which matches the documented
+    // built-ins-only fallback for streaming/transform.
+    uv_thread_t current = uv_thread_self();
+    if (!uv_thread_equal(&current, &g_resolver_thread)) {
+        return NULL;
+    }
+
     napi_env env = g_resolver_env;
 
     napi_value js_callback;
@@ -855,6 +886,7 @@ static napi_value napi_run_with_resolver(napi_env env, napi_callback_info info) 
             return NULL;
         }
         g_resolver_env = env;
+        g_resolver_thread = uv_thread_self();
     }
     // Note: subsequent calls reuse the first resolver for this process lifetime.
     uv_mutex_unlock(&g_mutex);

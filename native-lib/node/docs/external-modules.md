@@ -206,6 +206,10 @@ const dw2 = new DataWeave({ resolveModule: resolver });
 dw2.initialize();  // Both use the same resolver
 ```
 
+## Security / Trust Model
+
+A `resolveModule` callback executes with **full process permissions** — the same trust model as the `dw` CLI resolving `.dwl` files from disk. There is no sandboxing: the callback can read/write the filesystem, make network calls, or run arbitrary Node.js code, and its return value (module source) is compiled and executed by the DataWeave engine with no additional isolation. Only configure a resolver that points at trusted sources (your own modules, vetted directories, or JARs from a trusted registry) — treat it with the same care you would give any code that runs with the permissions of your process.
+
 ## JAR Dependency Management
 
 This release does NOT include Maven/coursier dependency resolution. You must provide JAR paths manually.

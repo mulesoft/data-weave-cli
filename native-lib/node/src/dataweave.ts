@@ -28,6 +28,10 @@ export interface DataWeaveOptions {
    * multiple `DataWeave` instances with different `resolveModule` callbacks
    * in the same process, later instances silently reuse the first resolver
    * instead of their own.
+   *
+   * Security: the resolver runs with full process permissions and no
+   * sandboxing (same trust model as the CLI resolving `.dwl` files from
+   * disk) — only use resolvers pointed at trusted sources.
    */
   resolveModule?: ModuleResolver;
 }

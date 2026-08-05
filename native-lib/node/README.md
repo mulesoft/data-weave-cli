@@ -252,7 +252,7 @@ if (result.success) {
 }
 ```
 
-See [docs/external-modules.md](docs/external-modules.md) for complete documentation, resolver factories, error handling, and dependency management.
+See [docs/external-modules.md](docs/external-modules.md) for complete documentation, resolver factories, error handling, and dependency management. Note: a resolver runs with full process permissions (no sandboxing) — see the "Security / Trust Model" section there before pointing one at untrusted sources.
 
 ### Input Formats
 

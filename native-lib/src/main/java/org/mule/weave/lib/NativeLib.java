@@ -382,6 +382,12 @@ public class NativeLib {
      * @param ctx opaque context pointer forwarded to callback
      * @param resolverCallback Callback for resolving external modules
      * @return an unmanaged C string with JSON metadata/error (must be freed)
+     *
+     * <p><b>NOTE:</b> compiled/linked but intentionally NOT invoked from the Node binding's
+     * TypeScript layer. runStreaming() deliberately uses the resolver-less streaming entrypoint
+     * instead: streaming runs its native call on a background thread, and wiring a resolver
+     * callback there would call back into JS from a non-owning OS thread (undefined behavior /
+     * crash). Do not wire this up without first solving that cross-thread hazard.</p>
      */
     @CEntryPoint(name = "run_script_callback_with_resolver")
     public static CCharPointer runScriptCallbackWithResolver(
@@ -461,6 +467,12 @@ public class NativeLib {
      * @param ctx opaque context pointer forwarded to callbacks
      * @param resolverCallback Callback for resolving external modules
      * @return an unmanaged C string with JSON metadata/error (must be freed)
+     *
+     * <p><b>NOTE:</b> compiled/linked but intentionally NOT invoked from the Node binding's
+     * TypeScript layer. runTransform() deliberately uses the resolver-less transform entrypoint
+     * instead: transform runs its native call on a background thread, and wiring a resolver
+     * callback there would call back into JS from a non-owning OS thread (undefined behavior /
+     * crash). Do not wire this up without first solving that cross-thread hazard.</p>
      */
     @CEntryPoint(name = "run_script_input_output_callback_with_resolver")
     public static CCharPointer runScriptInputOutputCallbackWithResolver(
