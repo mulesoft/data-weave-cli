@@ -94,7 +94,7 @@ describe("modulesFromDirectory", () => {
     expect(result).toBeNull();
   });
 
-  it("throws on unreadable file", () => {
+  it.skipIf(process.platform === "win32")("throws on unreadable file", () => {
     const badFile = path.join(tempDir, "bad.dwl");
     fs.writeFileSync(badFile, "content");
     fs.chmodSync(badFile, 0o000); // Make unreadable
