@@ -54,7 +54,7 @@ describe('DataWeave with resolver', () => {
       output application/json
       ---
       {}
-    `)).toThrow();
+    `, undefined, { raiseOnError: true })).toThrow();
   });
 
   it('built-in modules still resolve with resolver', () => {

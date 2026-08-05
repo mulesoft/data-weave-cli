@@ -22,6 +22,12 @@ export interface DataWeaveOptions {
    * Optional. If not provided, only built-in modules are available.
    *
    * MUST be synchronous (cannot return Promise).
+   *
+   * Note: the native layer installs at most one resolver per process
+   * lifetime — only the first resolver registered is used. If you construct
+   * multiple `DataWeave` instances with different `resolveModule` callbacks
+   * in the same process, later instances silently reuse the first resolver
+   * instead of their own.
    */
   resolveModule?: ModuleResolver;
 }
