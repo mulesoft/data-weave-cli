@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import type { ModuleResolver } from "./resolver";
 
 interface NativeAddon {
   initialize(libPath: string): void;
@@ -13,6 +14,13 @@ interface NativeAddon {
     readCb: (bufSize: number) => Buffer | null,
     writeCb: (chunk: Buffer) => void
   ): Promise<string>;
+  runWithResolver(
+    script: string,
+    inputsJson: string,
+    mimeType: string,
+    resolverCallback: ModuleResolver,
+    isolate: null
+  ): string;
   cleanup(): void;
 }
 
@@ -52,6 +60,15 @@ export function runScriptTransform(
   writeCb: (chunk: Buffer) => void
 ): Promise<string> {
   return getAddon().runScriptTransform(script, inputsJson, inputName, inputMimeType, inputCharset, readCb, writeCb);
+}
+
+export function runWithResolver(
+  script: string,
+  inputsJson: string,
+  mimeType: string,
+  resolverCallback: ModuleResolver
+): string {
+  return getAddon().runWithResolver(script, inputsJson, mimeType, resolverCallback, null);
 }
 
 export function cleanup(): void {
