@@ -18,7 +18,14 @@ typedef void* (*run_script_callback_fn)(void*, const char*, const char*, write_c
 typedef void* (*run_script_input_output_callback_fn)(void*, const char*, const char*, const char*, const char*, const char*, read_callback_t, write_callback_t, void*);
 
 // Resolver-aware entrypoint types
-typedef char* (*run_script_with_resolver_fn)(void*, const char*, const char*, const char*, resolve_module_callback_t);
+// NOTE: run_script_with_resolver has no mimeType parameter on the native side
+// (NativeLib.runScriptWithResolver(thread, script, inputsJson, resolverCallback)
+// delegates to ScriptRuntime.run(script, inputsJson), which infers/hardcodes
+// output mime type internally). The JS-facing mimeType argument is accepted
+// for API symmetry with other entrypoints but is NOT forwarded across the FFI
+// boundary — passing it here would misalign the native call's argument
+// registers and corrupt the callback function pointer.
+typedef char* (*run_script_with_resolver_fn)(void*, const char*, const char*, resolve_module_callback_t);
 typedef void* (*run_script_callback_with_resolver_fn)(void*, const char*, const char*, const char*, write_callback_t, void*, resolve_module_callback_t);
 typedef void* (*run_script_input_output_callback_with_resolver_fn)(void*, const char*, const char*, const char*, const char*, const char*, read_callback_t, write_callback_t, void*, resolve_module_callback_t);
 
@@ -45,18 +52,51 @@ static run_script_with_resolver_fn fn_run_script_with_resolver = NULL;
 static run_script_callback_with_resolver_fn fn_run_script_callback_with_resolver = NULL;
 static run_script_input_output_callback_with_resolver_fn fn_run_script_input_output_callback_with_resolver = NULL;
 
-// Resolver callback data (same pattern as read callback)
-typedef struct {
-    napi_threadsafe_function tsfn;
-    uv_mutex_t mutex;
-    uv_cond_t cond;
-    char* module_path;       // Input: path to resolve
-    char* result_source;     // Output: .dwl source (or NULL)
-    int ready;               // Synchronization flag
-} resolver_callback_data_t;
+// Resolver bridge state (one resolver per process).
+//
+// Unlike the streaming/transform entrypoints, runWithResolver's native call
+// executes synchronously on the very thread that invoked it from JS — no
+// background uv_thread is spawned. So when native code calls back into
+// resolve_module_callback(), we are already on the correct (JS) thread and
+// can call directly into V8/napi. Do NOT use napi_threadsafe_function here:
+// that pattern queues work for "the" JS thread to pick up and blocks the
+// caller on a condition variable until it's serviced — but if the caller
+// *is* the JS thread, it can never service its own queued item, causing a
+// deadlock (a real bug fixed in this codebase — see Task 11 report).
+static napi_env g_resolver_env = NULL;
+static napi_ref g_resolver_ref = NULL;
 
-// Global resolver data (one per isolate)
-static resolver_callback_data_t* g_resolver_data = NULL;
+// A single runWithResolver call may trigger resolve_module_callback multiple
+// times (one script can import several modules). Native copies each
+// returned buffer immediately, but the copy is made *after* our callback
+// returns — we don't get a per-call "done freeing" signal, only "the whole
+// run finished". So track every buffer allocated during one call and free
+// them all once fn_run_script_with_resolver returns.
+typedef struct resolver_result_node {
+    char* buf;
+    struct resolver_result_node* next;
+} resolver_result_node_t;
+static resolver_result_node_t* g_resolver_results = NULL;
+
+static void resolver_results_track(char* buf) {
+    if (buf == NULL) return;
+    resolver_result_node_t* node = (resolver_result_node_t*)malloc(sizeof(resolver_result_node_t));
+    if (node == NULL) return;  // Leak the buffer rather than crash; best-effort tracking.
+    node->buf = buf;
+    node->next = g_resolver_results;
+    g_resolver_results = node;
+}
+
+static void resolver_results_free_all(void) {
+    resolver_result_node_t* node = g_resolver_results;
+    while (node != NULL) {
+        resolver_result_node_t* next = node->next;
+        free(node->buf);
+        free(node);
+        node = next;
+    }
+    g_resolver_results = NULL;
+}
 
 // --- Initialization ---
 
@@ -659,90 +699,68 @@ static napi_value napi_run_script_transform(napi_env env, napi_callback_info inf
 
 // --- Resolver callback bridge ---
 
-// Called by native code (background thread) when it needs to resolve a module
+// Called by native code, synchronously, on the same JS thread that invoked
+// runWithResolver (see the comment on g_resolver_env above for why this must
+// NOT hop through napi_threadsafe_function). Calls the JS resolver directly
+// and returns its result copied onto the heap; the caller (napi_run_with_resolver)
+// frees it via g_resolver_last_result after the native side has copied it.
 static char* resolve_module_callback(void* thread, const char* module_path) {
-    if (g_resolver_data == NULL) {
+    (void)thread;
+
+    if (g_resolver_env == NULL || g_resolver_ref == NULL) {
         return NULL;  // No resolver set
     }
 
-    resolver_callback_data_t* data = g_resolver_data;
+    napi_env env = g_resolver_env;
 
-    uv_mutex_lock(&data->mutex);
-
-    // Set request data
-    data->module_path = strdup(module_path);
-    if (data->module_path == NULL) {
-        uv_mutex_unlock(&data->mutex);
-        return NULL;  // Allocation failed
-    }
-    data->result_source = NULL;
-    data->ready = 0;
-
-    // Invoke JS callback on main thread (blocks until JS returns)
-    napi_call_threadsafe_function(data->tsfn, data, napi_tsfn_blocking);
-
-    // Wait for JS to return result
-    while (!data->ready) {
-        uv_cond_wait(&data->cond, &data->mutex);
+    napi_value js_callback;
+    if (napi_get_reference_value(env, g_resolver_ref, &js_callback) != napi_ok) {
+        return NULL;
     }
 
-    char* result = data->result_source;
-    free(data->module_path);
-    data->module_path = NULL;
+    // NameIdentifierHelper.toWeaveFilePath (Java side, via CallbackWeaveResourceResolver)
+    // always renders paths with a leading separator, e.g. "/org/test/lib.dwl". Every
+    // resolver factory in resolver.ts (modulesFromMap, modulesFromDirectory, ...) and
+    // their documented examples key/join on the separator-less form ("org/test/lib.dwl"),
+    // so strip exactly one leading '/' here before handing the path to JS.
+    const char* js_module_path = module_path;
+    if (js_module_path[0] == '/') {
+        js_module_path++;
+    }
 
-    uv_mutex_unlock(&data->mutex);
-
-    return result;  // Native will copy, then we free in cleanup
-}
-
-// Called on main thread via threadsafe function
-static void resolver_js_callback(napi_env env, napi_value js_callback,
-                                  void* context, void* data) {
-    resolver_callback_data_t* cb_data = (resolver_callback_data_t*)data;
-
-    // Create JS string for module path
     napi_value module_path_str;
-    napi_status status = napi_create_string_utf8(env, cb_data->module_path,
-                                                  NAPI_AUTO_LENGTH, &module_path_str);
-    if (status != napi_ok) {
-        fprintf(stderr, "Failed to create module path string\n");
-        goto done;
+    if (napi_create_string_utf8(env, js_module_path, NAPI_AUTO_LENGTH, &module_path_str) != napi_ok) {
+        return NULL;
     }
 
-    // Call JS: result = resolveModule(modulePath)
     napi_value undefined, result;
     napi_get_undefined(env, &undefined);
-    status = napi_call_function(env, undefined, js_callback, 1, &module_path_str, &result);
+    napi_status status = napi_call_function(env, undefined, js_callback, 1, &module_path_str, &result);
     if (status != napi_ok) {
+        // JS resolver threw — clear the pending exception so it doesn't leak
+        // into the next napi call, log, and report "not found".
+        napi_value exception;
+        napi_get_and_clear_last_exception(env, &exception);
         fprintf(stderr, "Resolver callback threw exception\n");
-        goto done;
+        return NULL;
     }
 
-    // Check result type
     napi_valuetype result_type;
     napi_typeof(env, result, &result_type);
 
+    char* result_source = NULL;
     if (result_type == napi_string) {
-        // Get string length
         size_t len;
         napi_get_value_string_utf8(env, result, NULL, 0, &len);
-
-        // Allocate and copy (native will copy again, we free after return)
-        cb_data->result_source = (char*)malloc(len + 1);
-        if (cb_data->result_source != NULL) {
-            napi_get_value_string_utf8(env, result, cb_data->result_source, len + 1, NULL);
+        result_source = (char*)malloc(len + 1);
+        if (result_source != NULL) {
+            napi_get_value_string_utf8(env, result, result_source, len + 1, NULL);
         }
-    } else {
-        // null/undefined/other → not found
-        cb_data->result_source = NULL;
     }
+    // null/undefined/other → not found (result_source stays NULL)
 
-done:
-    // Wake background thread
-    uv_mutex_lock(&cb_data->mutex);
-    cb_data->ready = 1;
-    uv_cond_signal(&cb_data->cond);
-    uv_mutex_unlock(&cb_data->mutex);
+    resolver_results_track(result_source);
+    return result_source;  // Native copies this immediately; we free the original after the call.
 }
 
 // N-API method: runWithResolver
@@ -787,58 +805,29 @@ static napi_value napi_run_with_resolver(napi_env env, napi_callback_info info) 
     napi_get_value_string_utf8(env, args[1], inputs, inputs_len + 1, NULL);
     napi_get_value_string_utf8(env, args[2], mime_type, mime_len + 1, NULL);
 
-    // Resolver is initialized once per process lifetime. Subsequent calls with
+    // Resolver is installed once per process lifetime. Subsequent calls with
     // different resolver callbacks will reuse the first resolver, as enforced by
     // ScriptRuntime.setResolver() on the native side (one resolver per engine).
+    //
+    // No thread-hop machinery is needed: fn_run_script_with_resolver() below
+    // runs on this very thread, so resolve_module_callback() (invoked from
+    // inside that call) can call directly back into JS via the stored
+    // napi_ref. See the comment on g_resolver_env for why napi_threadsafe_function
+    // must NOT be used here.
     uv_mutex_lock(&g_mutex);
-    if (g_resolver_data == NULL) {
-        // First call: initialize resolver (one per process lifetime)
-        g_resolver_data = (resolver_callback_data_t*)malloc(sizeof(resolver_callback_data_t));
-        if (g_resolver_data == NULL) {
-            uv_mutex_unlock(&g_mutex);
-            free(script);
-            free(inputs);
-            free(mime_type);
-            napi_throw_error(env, NULL, "Failed to allocate resolver data");
-            return NULL;
-        }
-        uv_mutex_init(&g_resolver_data->mutex);
-        uv_cond_init(&g_resolver_data->cond);
-        g_resolver_data->module_path = NULL;
-        g_resolver_data->result_source = NULL;
-        g_resolver_data->ready = 0;
-
-        napi_value async_resource_name;
-        napi_create_string_utf8(env, "ResolverCallback", NAPI_AUTO_LENGTH, &async_resource_name);
-
-        napi_status status = napi_create_threadsafe_function(
-            env,
-            args[3],  // JS resolver callback
-            NULL,
-            async_resource_name,
-            0,
-            1,
-            NULL,
-            NULL,
-            NULL,
-            resolver_js_callback,
-            &g_resolver_data->tsfn
-        );
+    if (g_resolver_ref == NULL) {
+        napi_status status = napi_create_reference(env, args[3], 1, &g_resolver_ref);
         if (status != napi_ok) {
-            uv_mutex_destroy(&g_resolver_data->mutex);
-            uv_cond_destroy(&g_resolver_data->cond);
-            free(g_resolver_data);
-            g_resolver_data = NULL;
             uv_mutex_unlock(&g_mutex);
             free(script);
             free(inputs);
             free(mime_type);
-            napi_throw_error(env, NULL, "Failed to create threadsafe function");
+            napi_throw_error(env, NULL, "Failed to reference resolver callback");
             return NULL;
         }
+        g_resolver_env = env;
     }
-    // Note: Subsequent calls reuse the first resolver. The global resolver set on
-    // first call will handle all module resolutions for this process lifetime.
+    // Note: subsequent calls reuse the first resolver for this process lifetime.
     uv_mutex_unlock(&g_mutex);
 
     // Need to attach thread for this call
@@ -852,20 +841,19 @@ static napi_value napi_run_with_resolver(napi_env env, napi_callback_info info) 
         return NULL;
     }
 
-    // Call native with resolver callback
+    // Call native with resolver callback. mime_type is accepted from JS for API
+    // symmetry but is not part of the native run_script_with_resolver signature
+    // (see run_script_with_resolver_fn typedef comment) — do not forward it.
     char* result = fn_run_script_with_resolver(
         thread,
         script,
         inputs,
-        mime_type,
         resolve_module_callback
     );
 
-    // Native has copied the resolver result, now free it
-    if (g_resolver_data != NULL && g_resolver_data->result_source != NULL) {
-        free(g_resolver_data->result_source);
-        g_resolver_data->result_source = NULL;
-    }
+    // Native has copied every resolver result returned during this call; free
+    // our copies now that it's done.
+    resolver_results_free_all();
 
     fn_detach_thread(thread);
 
@@ -910,22 +898,13 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
   if (g_initialized) {
     g_ref_count--;
     if (g_ref_count <= 0) {
-      // Clean up resolver data
-      if (g_resolver_data != NULL) {
-        if (g_resolver_data->tsfn != NULL) {
-          napi_release_threadsafe_function(g_resolver_data->tsfn, napi_tsfn_abort);
-        }
-        uv_mutex_destroy(&g_resolver_data->mutex);
-        uv_cond_destroy(&g_resolver_data->cond);
-        if (g_resolver_data->module_path != NULL) {
-          free(g_resolver_data->module_path);
-        }
-        if (g_resolver_data->result_source != NULL) {
-          free(g_resolver_data->result_source);
-        }
-        free(g_resolver_data);
-        g_resolver_data = NULL;
+      // Clean up resolver reference
+      if (g_resolver_ref != NULL && g_resolver_env != NULL) {
+        napi_delete_reference(g_resolver_env, g_resolver_ref);
       }
+      g_resolver_ref = NULL;
+      g_resolver_env = NULL;
+      resolver_results_free_all();
 
       uv_thread_t tid;
       uv_thread_options_t opts;

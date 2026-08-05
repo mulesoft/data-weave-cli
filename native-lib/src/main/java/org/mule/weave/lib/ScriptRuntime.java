@@ -66,7 +66,7 @@ public class ScriptRuntime {
             return;
         }
 
-        if (callback == null) {
+        if (callback.isNull()) {
             System.err.println("WARNING: Attempted to set null resolver, ignoring.");
             return;
         }

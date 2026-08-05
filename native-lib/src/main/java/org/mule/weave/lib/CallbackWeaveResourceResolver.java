@@ -18,7 +18,7 @@ public class CallbackWeaveResourceResolver implements WeaveResourceResolver {
     private final NativeCallbacks.ResolveModuleCallback callback;
 
     public CallbackWeaveResourceResolver(NativeCallbacks.ResolveModuleCallback callback) {
-        if (callback == null) {
+        if (callback.isNull()) {
             throw new IllegalArgumentException("Resolver callback cannot be null");
         }
         this.callback = callback;
