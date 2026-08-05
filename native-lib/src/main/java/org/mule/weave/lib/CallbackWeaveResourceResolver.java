@@ -1,7 +1,6 @@
 package org.mule.weave.lib;
 
 import org.graalvm.nativeimage.CurrentIsolate;
-import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.nativeimage.c.type.CTypeConversion;
 import org.mule.weave.v2.parser.ast.variables.NameIdentifier;
@@ -9,6 +8,11 @@ import org.mule.weave.v2.sdk.NameIdentifierHelper;
 import org.mule.weave.v2.sdk.WeaveResource;
 import org.mule.weave.v2.sdk.WeaveResourceResolver;
 import scala.Option;
+import scala.collection.JavaConverters;
+import scala.collection.immutable.Seq;
+import scala.collection.immutable.Seq$;
+
+import java.util.Collections;
 
 /**
  * WeaveResourceResolver implementation backed by a C function pointer callback.
@@ -62,15 +66,14 @@ public class CallbackWeaveResourceResolver implements WeaveResourceResolver {
     }
 
     @Override
-    public scala.collection.immutable.Seq<WeaveResource> resolveAll(NameIdentifier nameIdentifier) {
+    public Seq<WeaveResource> resolveAll(NameIdentifier nameIdentifier) {
         // Not used for module resolution, return single result or empty
         Option<WeaveResource> result = resolve(nameIdentifier);
         if (result.isDefined()) {
-            return scala.collection.JavaConverters.asScalaBuffer(
-                java.util.Collections.singletonList(result.get())
-            ).toList();
+            return JavaConverters.asScalaBuffer(Collections.singletonList(result.get()))
+                    .toList();
         } else {
-            return scala.collection.immutable.Seq$.MODULE$.empty();
+            return (Seq<WeaveResource>) Seq$.MODULE$.<WeaveResource>empty();
         }
     }
 }

@@ -3,11 +3,8 @@ package org.mule.weave.lib;
 import org.json.JSONObject;
 import org.mule.weave.v2.runtime.BindingValue;
 import org.mule.weave.v2.runtime.DataWeaveResult;
-import org.mule.weave.v2.runtime.DataWeaveScriptingEngine;
-import org.mule.weave.v2.runtime.ModuleComponentsFactory;
-import org.mule.weave.v2.runtime.ParserConfiguration;
-import org.mule.weave.v2.runtime.ParserConfigurationBuilder;
 import org.mule.weave.v2.runtime.ScriptingBindings;
+import org.mule.weave.v2.runtime.api.DWModuleComponentsFactory;
 import org.mule.weave.v2.runtime.api.DWResult;
 import org.mule.weave.v2.runtime.api.DWScript;
 import org.mule.weave.v2.runtime.api.DWScriptingEngine;
@@ -23,7 +20,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.util.Base64;
-import java.util.Properties;
 
 /**
  * Singleton wrapper around a {@link DWScriptingEngine} used to compile and execute DataWeave scripts.
@@ -75,11 +71,9 @@ public class ScriptRuntime {
 
         // Rebuild engine with composite resolver (built-ins + callback)
         synchronized (INSTANCE) {
-            INSTANCE.engine = new DataWeaveScriptingEngine(
-                ModuleComponentsFactory.apply(compositeResolver()),
-                new ParserConfigurationBuilder().build(),
-                new Properties()
-            );
+            INSTANCE.engine = DWScriptingEngine.builder()
+                    .withDWModuleComponentsFactory(createModuleComponentsFactory())
+                    .build();
         }
     }
 
@@ -101,16 +95,20 @@ public class ScriptRuntime {
         );
     }
 
+    private static DWModuleComponentsFactory createModuleComponentsFactory() {
+        return DWModuleComponentsFactory.createSimpleDWModuleComponentsFactoryBuilder()
+                .withWeaveResourceResolver(compositeResolver())
+                .build();
+    }
+
     // Instance field for the scripting engine, access synchronized in setResolver
     private volatile DWScriptingEngine engine;
 
     private ScriptRuntime() {
         // Initialize with ClassLoader-only resolver (no callback yet)
-        engine = new DataWeaveScriptingEngine(
-            ModuleComponentsFactory.apply(compositeResolver()),
-            new ParserConfigurationBuilder().build(),
-            new Properties()
-        );
+        engine = DWScriptingEngine.builder()
+                .withDWModuleComponentsFactory(createModuleComponentsFactory())
+                .build();
     }
 
     /**
