@@ -5,6 +5,7 @@ import org.apache.commons.io.FilenameUtils
 import org.mule.weave.v2.helper.FolderBasedTest
 import org.mule.weave.v2.utils.DataWeaveVersion
 import org.mule.weave.v2.version.ComponentVersion
+import org.scalatest.Tag
 import org.scalatest.funspec.AnyFunSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -17,6 +18,10 @@ import java.util.concurrent.TimeUnit
 import java.util.regex.Pattern
 import java.util.zip.ZipFile
 import scala.collection.JavaConverters._
+
+// TCK conformance scenarios are tagged so CI can exclude them on non-master
+// (PR) builds via -PskipTCKTests=true, matching the master-only Node TCK lane.
+object TckConformance extends Tag("org.mule.weave.clinative.TckConformance")
 
 class TCKCliTest extends AnyFunSpec with Matchers
   with FolderBasedTest
@@ -142,7 +147,7 @@ class TCKCliTest extends AnyFunSpec with Matchers
     val scenarios = unsortedScenarios.sortBy(_.name)
     scenarios.foreach {
       scenario =>
-        it(scenario.name) {
+        it(scenario.name, TckConformance) {
           var args = Array("run")
 
           // Add inputs

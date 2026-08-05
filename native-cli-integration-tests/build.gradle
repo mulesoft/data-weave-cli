@@ -55,11 +55,16 @@ downloadTestSuites.dependsOn(cleanTestSuites)
 test.dependsOn(downloadTestSuites)
 test.dependsOn(":native-cli:nativeCompile")
 
-// Skip TCKCliTest when -PskipTCKTests=true (matches -PskipNodeTests pattern).
-// CI build-foundation passes this flag on non-master branches so TCK only runs via the explicit
-// "Run CLI TCK Conformance" step (master-only), matching Node TCK behavior. Other IT tests run always.
+// TCK conformance is master-only. On non-master CI, build-foundation passes
+// -PskipTCKTests=true; we exclude the TckConformance-tagged scenarios so they
+// don't run, while the module's other IT specs still do. This uses ScalaTest
+// tag exclusion (maiflai's `tags { exclude }` -> scalatest `-l <tag>`) rather
+// than Gradle's Test.exclude class-pattern filter, which is a no-op under the
+// maiflai scalatest runner. Mirrors the master-only Node TCK lane.
 test {
     if (project.hasProperty('skipTCKTests') && project.property('skipTCKTests') == 'true') {
-        exclude '**/TCKCliTest.class'
+        tags {
+            exclude 'org.mule.weave.clinative.TckConformance'
+        }
     }
 }
