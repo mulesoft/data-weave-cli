@@ -224,6 +224,36 @@ try {
 - `runStreaming(script, inputs?)`: Same as module-level `runStreaming()`
 - `runTransform(script, input, opts?)`: Same as module-level `runTransform()`
 
+## External Modules
+
+DataWeave scripts can import external modules using the `resolveModule` option:
+
+```typescript
+import { DataWeave, composeResolvers, modulesFromDirectory, modulesFromJars } from '@dataweave/native';
+
+const dw = new DataWeave({
+  resolveModule: composeResolvers(
+    modulesFromDirectory('./my-modules'),
+    await modulesFromJars(['./libs/dw-utils.jar'])
+  )
+});
+dw.initialize();
+
+const result = dw.run(`
+  %dw 2.0
+  import org::company::utils
+  output application/json
+  ---
+  utils::doSomething()
+`);
+
+if (result.success) {
+  console.log(result.getString());
+}
+```
+
+See [docs/external-modules.md](docs/external-modules.md) for complete documentation, resolver factories, error handling, and dependency management.
+
 ### Input Formats
 
 Inputs can be provided in multiple formats:
