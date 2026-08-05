@@ -738,10 +738,39 @@ static char* resolve_module_callback(void* thread, const char* module_path) {
     napi_status status = napi_call_function(env, undefined, js_callback, 1, &module_path_str, &result);
     if (status != napi_ok) {
         // JS resolver threw — clear the pending exception so it doesn't leak
-        // into the next napi call, log, and report "not found".
-        napi_value exception;
-        napi_get_and_clear_last_exception(env, &exception);
-        fprintf(stderr, "Resolver callback threw exception\n");
+        // into the next napi call, extract and log its message/stack for
+        // diagnostics (same pattern as the read-callback bridge above), and
+        // report "not found".
+        if (status == napi_pending_exception) {
+            napi_value exception;
+            napi_get_and_clear_last_exception(env, &exception);
+
+            napi_value message_prop, stack_prop;
+            char message_buf[512] = {0};
+            char stack_buf[2048] = {0};
+            size_t message_len = 0, stack_len = 0;
+
+            if (napi_get_named_property(env, exception, "message", &message_prop) == napi_ok) {
+                napi_get_value_string_utf8(env, message_prop, message_buf, sizeof(message_buf), &message_len);
+            }
+
+            if (napi_get_named_property(env, exception, "stack", &stack_prop) == napi_ok) {
+                napi_get_value_string_utf8(env, stack_prop, stack_buf, sizeof(stack_buf), &stack_len);
+            }
+
+            fprintf(stderr, "[DataWeave Node addon] Resolver callback threw exception:\n");
+            if (message_len > 0) {
+                fprintf(stderr, "  Message: %s\n", message_buf);
+            }
+            if (stack_len > 0) {
+                fprintf(stderr, "  Stack:\n%s\n", stack_buf);
+            }
+            if (message_len == 0 && stack_len == 0) {
+                fprintf(stderr, "  (Unable to extract exception details)\n");
+            }
+        } else {
+            fprintf(stderr, "Resolver callback threw exception\n");
+        }
         return NULL;
     }
 
