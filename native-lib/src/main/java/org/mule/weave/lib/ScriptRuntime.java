@@ -4,9 +4,13 @@ import org.json.JSONObject;
 import org.mule.weave.v2.runtime.BindingValue;
 import org.mule.weave.v2.runtime.DataWeaveResult;
 import org.mule.weave.v2.runtime.ScriptingBindings;
+import org.mule.weave.v2.runtime.api.DWModuleComponentsFactory;
 import org.mule.weave.v2.runtime.api.DWResult;
 import org.mule.weave.v2.runtime.api.DWScript;
 import org.mule.weave.v2.runtime.api.DWScriptingEngine;
+import org.mule.weave.v2.sdk.ClassLoaderWeaveResourceResolver;
+import org.mule.weave.v2.sdk.CompositeWeaveResourceResolver;
+import org.mule.weave.v2.sdk.WeaveResourceResolver;
 import scala.Option;
 import scala.Tuple2;
 import scala.collection.immutable.Map;
@@ -28,6 +32,9 @@ public class ScriptRuntime {
 
     private static final ScriptRuntime INSTANCE = new ScriptRuntime();
 
+    // Static field for callback resolver, volatile for thread-safe double-checked locking
+    private static volatile CallbackWeaveResourceResolver resolver = null;
+
     /**
      * Returns the singleton instance.
      *
@@ -37,10 +44,71 @@ public class ScriptRuntime {
         return INSTANCE;
     }
 
-    private DWScriptingEngine engine;
+    /**
+     * Sets the module resolver callback and rebuilds the engine.
+     * Can only be called once per process (engine is a singleton).
+     * Thread-safe but should be called early in application lifecycle before script execution.
+     *
+     * <p><strong>IMPORTANT:</strong> The callback function must be thread-safe if using
+     * GraalVM's threadsafe function pointers, as it may be invoked from multiple threads
+     * during concurrent module resolution.</p>
+     *
+     * @param callback Thread-safe function pointer for resolving modules
+     */
+    public static synchronized void setResolver(NativeCallbacks.ResolveModuleCallback callback) {
+        if (resolver != null) {
+            System.err.println("WARNING: Module resolver already set for this process. " +
+                              "Only one resolver configuration is supported. Ignoring new resolver.");
+            return;
+        }
+
+        if (callback.isNull()) {
+            System.err.println("WARNING: Attempted to set null resolver, ignoring.");
+            return;
+        }
+
+        resolver = new CallbackWeaveResourceResolver(callback);
+
+        // Rebuild engine with composite resolver (built-ins + callback)
+        synchronized (INSTANCE) {
+            INSTANCE.engine = DWScriptingEngine.builder()
+                    .withDWModuleComponentsFactory(createModuleComponentsFactory())
+                    .build();
+        }
+    }
+
+    /**
+     * Creates composite resolver: ClassLoader (built-ins) + Callback (user modules).
+     * If no callback resolver is set, returns ClassLoader only.
+     */
+    private static WeaveResourceResolver compositeResolver() {
+        WeaveResourceResolver classLoaderResolver = ClassLoaderWeaveResourceResolver.apply();
+
+        CallbackWeaveResourceResolver currentResolver = resolver;
+        if (currentResolver == null) {
+            return classLoaderResolver;
+        }
+
+        return CompositeWeaveResourceResolver.apply(
+            classLoaderResolver,  // Try built-ins first
+            currentResolver       // Then callback for user modules
+        );
+    }
+
+    private static DWModuleComponentsFactory createModuleComponentsFactory() {
+        return DWModuleComponentsFactory.createSimpleDWModuleComponentsFactoryBuilder()
+                .withWeaveResourceResolver(compositeResolver())
+                .build();
+    }
+
+    // Instance field for the scripting engine, access synchronized in setResolver
+    private volatile DWScriptingEngine engine;
 
     private ScriptRuntime() {
-        engine = DWScriptingEngine.builder().build();
+        // Initialize with ClassLoader-only resolver (no callback yet)
+        engine = DWScriptingEngine.builder()
+                .withDWModuleComponentsFactory(createModuleComponentsFactory())
+                .build();
     }
 
     /**

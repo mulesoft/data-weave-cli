@@ -28,12 +28,6 @@ export interface IgnoreEntry {
 export const IGNORED_CASES: Readonly<Record<string, IgnoreEntry>> = {
   // unresolved-module — library/resource not present in dwlib
   "dw-binary-out.dwl": { reason: "unresolved-module: readUrl/classpath resource" },
-  "full-qualified-name-ref-out.json": { reason: "unresolved-module: org::mule::weave::v2::libs" },
-  "import-component-alias-lib-out.json": { reason: "unresolved-module: import lib not in dwlib" },
-  "import-lib-out.json": { reason: "unresolved-module: import lib not in dwlib" },
-  "import-lib-with-alias-out.json": { reason: "unresolved-module: import lib not in dwlib" },
-  "import-named-lib-out.json": { reason: "unresolved-module: import lib not in dwlib" },
-  "import-star-out.json": { reason: "unresolved-module: import lib not in dwlib" },
   "is-empty-using-empty-stream-out.json": { reason: "unresolved-module: dw::Client streaming" },
   "module-singleton-out.json": { reason: "unresolved-module: lib not in dwlib" },
   "private_scope_directives-out.xml": { reason: "unresolved-module: resource not in dwlib" },

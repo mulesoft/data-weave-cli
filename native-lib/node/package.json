@@ -22,7 +22,8 @@
     "native/",
     "build/Release/dwlib_addon.node",
     "src/addon.c",
-    "binding.gyp"
+    "binding.gyp",
+    "docs/"
   ],
   "os": [
     "darwin",
@@ -33,6 +34,9 @@
     "node": ">=18"
   },
   "gypfile": true,
+  "dependencies": {
+    "adm-zip": "^0.6.0"
+  },
   "devDependencies": {
     "@types/node": "^20",
     "@vitest/coverage-v8": "^3.0",

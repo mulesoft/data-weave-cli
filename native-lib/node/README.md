@@ -224,6 +224,36 @@ try {
 - `runStreaming(script, inputs?)`: Same as module-level `runStreaming()`
 - `runTransform(script, input, opts?)`: Same as module-level `runTransform()`
 
+### External Modules
+
+DataWeave scripts can import external modules using the `resolveModule` option. The module-level convenience functions (`run()`, `runStreaming()`, `runTransform()`) operate on a lazily-initialized singleton that cannot be configured with a resolver — you must construct your own `DataWeave` instance:
+
+```typescript
+import { DataWeave, composeResolvers, modulesFromDirectory, modulesFromJars } from '@dataweave/native';
+
+const dw = new DataWeave({
+  resolveModule: composeResolvers(
+    modulesFromDirectory('./my-modules'),
+    await modulesFromJars(['./libs/dw-utils.jar'])
+  )
+});
+dw.initialize();
+
+const result = dw.run(`
+  %dw 2.0
+  import org::company::utils
+  output application/json
+  ---
+  utils::doSomething()
+`);
+
+if (result.success) {
+  console.log(result.getString());
+}
+```
+
+See [docs/external-modules.md](docs/external-modules.md) for complete documentation, resolver factories, error handling, and dependency management. Note: a resolver runs with full process permissions (no sandboxing) — see the "Security / Trust Model" section there before pointing one at untrusted sources.
+
 ### Input Formats
 
 Inputs can be provided in multiple formats:
@@ -409,11 +439,21 @@ try {
 The Node.js binding uses **N-API** (Node-API) for C addon integration:
 
 - **Thread-safe**: N-API calls are serialized on the Node.js event loop
-- **Worker threads**: Safe to use from Worker threads (each thread needs its own `DataWeave` instance)
 - **Async operations**: Streaming operations yield control to the event loop between chunks
 - **No blocking**: Long-running scripts execute on the native side without blocking the event loop
 
 **Important:** Do not share a single `DataWeave` instance across Worker threads. Use the module-level functions (which use a global singleton) or create separate instances per thread.
+
+**Custom module resolvers and Worker threads:** the native layer installs at
+most one resolver callback for the whole process lifetime, and it is bound to
+the Worker (main thread or a `worker_threads` Worker) that registered it
+first — see [External Modules: Multiple Resolvers](docs/external-modules.md#multiple-resolvers-in-one-process).
+Custom-module resolution attempted from any *other* thread is not routed to
+that thread's own `resolveModule` callback; it silently falls back to
+built-in modules only (custom module paths resolve as "not found" rather than
+crashing or hanging). If you need per-Worker custom modules, resolve them on
+the thread that first constructs a resolver-backed `DataWeave` instance, or
+avoid resolver-backed instances in worker pools altogether.
 
 ## Platform Support
 

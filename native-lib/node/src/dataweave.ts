@@ -5,6 +5,48 @@ import { createChunkReader } from "./reader";
 import { streamFromNative } from "./stream";
 import { DataWeaveError, DataWeaveScriptError } from "./errors";
 import type { ExecutionResult, StreamingResult, Inputs, TransformOptions } from "./types";
+import type { ModuleResolver } from "./resolver";
+
+/**
+ * Constructor options for {@link DataWeave}.
+ */
+export interface DataWeaveOptions {
+  /**
+   * Path to dwlib native library.
+   * If not provided, uses default location.
+   */
+  libPath?: string;
+
+  /**
+   * Module resolver for external DataWeave modules.
+   * Optional. If not provided, only built-in modules are available.
+   *
+   * MUST be synchronous (cannot return Promise).
+   *
+   * Note: the native layer installs at most one resolver per process
+   * lifetime, bound on the first resolver-backed {@link DataWeave.run} call
+   * (not on {@link DataWeave.initialize}, which only loads/ref-counts the
+   * native library) and to the thread (main thread or `worker_threads`
+   * Worker) that made that first call. If you construct multiple `DataWeave`
+   * instances with different `resolveModule` callbacks in the same process,
+   * whichever instance's `run()` executes first wins; later instances
+   * silently reuse that resolver instead of their own. If a later instance's
+   * `run()` executes on a *different* thread, its resolver is not invoked at
+   * all and custom module paths resolve as "not found" (see
+   * docs/external-modules.md#multiple-resolvers-in-one-process).
+   *
+   * Concurrency warning: calling a resolver-backed `run()` concurrently from
+   * more than one Worker is not just unsupported — it is memory-unsafe (see
+   * docs/external-modules.md, Worker threads section). Restrict
+   * resolver-backed execution to a single thread, or serialize calls across
+   * Workers.
+   *
+   * Security: the resolver runs with full process permissions and no
+   * sandboxing (same trust model as the CLI resolving `.dwl` files from
+   * disk) — only use resolvers pointed at trusted sources.
+   */
+  resolveModule?: ModuleResolver;
+}
 
 /**
  * A handle to the DataWeave native runtime for executing scripts.
@@ -18,14 +60,22 @@ import type { ExecutionResult, StreamingResult, Inputs, TransformOptions } from 
  */
 export class DataWeave {
   private readonly libPath: string;
+  private readonly resolveModule?: ModuleResolver;
   private initialized = false;
 
   /**
-   * @param libPath - Absolute path to the `dwlib` shared library. When omitted,
-   *   it is discovered via {@link findLibrary} (env var, packaged, or dev-build).
+   * @param options - Configuration options or a legacy libPath string.
+   *   When a string is provided, it is treated as {@link DataWeaveOptions.libPath}.
    */
-  constructor(libPath?: string) {
-    this.libPath = libPath ?? findLibrary();
+  constructor(options?: DataWeaveOptions | string) {
+    if (typeof options === "string") {
+      // Legacy constructor signature: DataWeave(libPath)
+      this.libPath = options;
+      this.resolveModule = undefined;
+    } else {
+      this.libPath = options?.libPath ?? findLibrary();
+      this.resolveModule = options?.resolveModule;
+    }
   }
 
   /**
@@ -68,7 +118,16 @@ export class DataWeave {
   run(script: string, inputs?: Inputs, opts?: { raiseOnError?: boolean }): ExecutionResult {
     this.ensureInitialized();
     const inputsJson = buildInputsJson(inputs ?? {});
-    const raw = ffi.runScript(script, inputsJson);
+
+    let raw: string;
+    if (this.resolveModule) {
+      // Use resolver-aware entrypoint
+      raw = ffi.runWithResolver(script, inputsJson, "application/json", this.resolveModule);
+    } else {
+      // Use standard entrypoint (backward compatible)
+      raw = ffi.runScript(script, inputsJson);
+    }
+
     const result = parseNativeResponse(raw);
 
     if (opts?.raiseOnError && !result.success) {

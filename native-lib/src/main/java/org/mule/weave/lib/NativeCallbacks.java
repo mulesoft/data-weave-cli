@@ -1,5 +1,6 @@
 package org.mule.weave.lib;
 
+import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.nativeimage.c.function.CFunctionPointer;
 import org.graalvm.nativeimage.c.function.InvokeCFunctionPointer;
 import org.graalvm.nativeimage.c.type.CCharPointer;
@@ -45,5 +46,15 @@ public final class NativeCallbacks {
     public interface ReadCallback extends CFunctionPointer {
         @InvokeCFunctionPointer
         int invoke(PointerBase ctx, CCharPointer buffer, int bufferSize);
+    }
+
+    /**
+     * Callback invoked by native code to resolve DataWeave modules.
+     * Takes a module path (e.g., "org/mule/weave/v2/libs/lib.dwl") and returns
+     * the .dwl source as a C string, or null if the module is not found.
+     */
+    public interface ResolveModuleCallback extends CFunctionPointer {
+        @InvokeCFunctionPointer
+        CCharPointer invoke(IsolateThread thread, CCharPointer modulePath);
     }
 }
