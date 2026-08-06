@@ -776,28 +776,51 @@ static char* resolve_module_callback(void* thread, const char* module_path) {
             napi_value exception;
             napi_get_and_clear_last_exception(env, &exception);
 
-            napi_value message_prop, stack_prop;
-            char message_buf[512] = {0};
-            char stack_buf[2048] = {0};
-            size_t message_len = 0, stack_len = 0;
-
-            if (napi_get_named_property(env, exception, "message", &message_prop) == napi_ok) {
-                napi_get_value_string_utf8(env, message_prop, message_buf, sizeof(message_buf), &message_len);
+            // The resolver is user-provided code; its exception message/stack
+            // can carry module source, file paths, credentials, or other
+            // tenant data. Logging that to stderr by default risks leaking it
+            // into aggregated log systems. Only log a fixed, content-free
+            // diagnostic unless the caller has opted in via
+            // DATAWEAVE_RESOLVER_DEBUG=1 (checked once and cached, since
+            // getenv() is not safe to call from arbitrary threads on all
+            // platforms and this callback can run off the JS thread).
+            static int debug_checked = 0;
+            static int debug_enabled = 0;
+            if (!debug_checked) {
+                const char* debug_env = getenv("DATAWEAVE_RESOLVER_DEBUG");
+                debug_enabled = (debug_env != NULL && strcmp(debug_env, "1") == 0);
+                debug_checked = 1;
             }
 
-            if (napi_get_named_property(env, exception, "stack", &stack_prop) == napi_ok) {
-                napi_get_value_string_utf8(env, stack_prop, stack_buf, sizeof(stack_buf), &stack_len);
-            }
+            if (!debug_enabled) {
+                fprintf(stderr,
+                    "[DataWeave Node addon] Resolver callback threw an exception "
+                    "(details suppressed; set DATAWEAVE_RESOLVER_DEBUG=1 to log "
+                    "message/stack — may expose resolver-controlled data).\n");
+            } else {
+                napi_value message_prop, stack_prop;
+                char message_buf[512] = {0};
+                char stack_buf[2048] = {0};
+                size_t message_len = 0, stack_len = 0;
 
-            fprintf(stderr, "[DataWeave Node addon] Resolver callback threw exception:\n");
-            if (message_len > 0) {
-                fprintf(stderr, "  Message: %s\n", message_buf);
-            }
-            if (stack_len > 0) {
-                fprintf(stderr, "  Stack:\n%s\n", stack_buf);
-            }
-            if (message_len == 0 && stack_len == 0) {
-                fprintf(stderr, "  (Unable to extract exception details)\n");
+                if (napi_get_named_property(env, exception, "message", &message_prop) == napi_ok) {
+                    napi_get_value_string_utf8(env, message_prop, message_buf, sizeof(message_buf), &message_len);
+                }
+
+                if (napi_get_named_property(env, exception, "stack", &stack_prop) == napi_ok) {
+                    napi_get_value_string_utf8(env, stack_prop, stack_buf, sizeof(stack_buf), &stack_len);
+                }
+
+                fprintf(stderr, "[DataWeave Node addon] Resolver callback threw exception:\n");
+                if (message_len > 0) {
+                    fprintf(stderr, "  Message: %s\n", message_buf);
+                }
+                if (stack_len > 0) {
+                    fprintf(stderr, "  Stack:\n%s\n", stack_buf);
+                }
+                if (message_len == 0 && stack_len == 0) {
+                    fprintf(stderr, "  (Unable to extract exception details)\n");
+                }
             }
         } else {
             fprintf(stderr, "Resolver callback threw exception\n");
@@ -916,20 +939,31 @@ static napi_value napi_run_with_resolver(napi_env env, napi_callback_info info) 
     // our copies now that it's done.
     resolver_results_free_all();
 
+    // result (if non-NULL) is a GraalVM UnmanagedMemory.malloc'd buffer, like
+    // every other native result pointer in this file; it must be released via
+    // fn_free_cstring(), not libc free(), and while the isolate thread is
+    // still attached. Copy it to a libc-owned buffer first so we can build
+    // the JS string after detaching, matching the strdup + fn_free_cstring
+    // pattern used by run_script_thread_fn/streaming_thread_fn/transform_thread_fn.
+    char* result_copy = result ? strdup(result) : NULL;
+    if (result != NULL) {
+        fn_free_cstring(thread, result);
+    }
+
     fn_detach_thread(thread);
 
     free(script);
     free(inputs);
     free(mime_type);
 
-    if (result == NULL) {
+    if (result_copy == NULL) {
         napi_throw_error(env, NULL, "Script execution failed");
         return NULL;
     }
 
     napi_value result_str;
-    napi_create_string_utf8(env, result, NAPI_AUTO_LENGTH, &result_str);
-    free(result);
+    napi_create_string_utf8(env, result_copy, NAPI_AUTO_LENGTH, &result_str);
+    free(result_copy);
 
     return result_str;
 }

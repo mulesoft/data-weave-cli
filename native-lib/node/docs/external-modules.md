@@ -173,7 +173,7 @@ if (!result.success) {
 
 **Debugging:** To see detailed resolver error messages, check your process's stderr/console output. These details help diagnose why a resolver is failing (e.g., directory does not exist, file unreadable due to permissions).
 
-### Multiple DataWeave Instances
+### Multiple Resolvers in One Process
 
 If you construct multiple `DataWeave` instances with different resolvers in the same process:
 
@@ -205,6 +205,18 @@ dw1.initialize();
 const dw2 = new DataWeave({ resolveModule: resolver });
 dw2.initialize();  // Both use the same resolver
 ```
+
+**Worker threads:** the same one-resolver-per-process rule applies across
+`worker_threads` Workers, not just across instances on one thread. The
+resolver callback is additionally bound to the specific thread that first
+registered it. A resolver-backed `DataWeave` constructed and initialized on a
+Worker other than the one that registered the process's resolver will not
+have its `resolveModule` invoked at all — custom module paths resolve as "not
+found" (falling back to built-ins only) rather than crashing. There is
+currently no supported way to run distinct custom-module resolvers on
+different Workers in the same process; either resolve modules on the thread
+that owns the process's resolver, or avoid resolver-backed instances in
+worker pools.
 
 ## Security / Trust Model
 

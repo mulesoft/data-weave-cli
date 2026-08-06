@@ -3,6 +3,7 @@ import { modulesFromMap, modulesFromDirectory, modulesFromJars, composeResolvers
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import AdmZip from "adm-zip";
 
 describe("modulesFromMap", () => {
   it("returns source when module exists", () => {
@@ -111,6 +112,27 @@ describe("modulesFromDirectory", () => {
     const resolver = modulesFromDirectory(tempDir);
     expect(resolver("../../outside.dwl")).toBeNull();
   });
+
+  it.skipIf(process.platform === "win32")(
+    "returns null when an in-tree symlink escapes baseDir",
+    () => {
+      // outsideDir sits alongside tempDir, outside the configured base.
+      const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "dw-outside-"));
+      const secretFile = path.join(outsideDir, "secret.dwl");
+      fs.writeFileSync(secretFile, "%dw 2.0\n// should never be resolved");
+
+      // A symlink inside tempDir that resolves outside it. The lexical
+      // containment check alone would accept this path; only realpath
+      // canonicalization catches the escape.
+      const linkPath = path.join(tempDir, "escape.dwl");
+      fs.symlinkSync(secretFile, linkPath);
+
+      const resolver = modulesFromDirectory(tempDir);
+      expect(resolver("escape.dwl")).toBeNull();
+
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  );
 });
 
 describe("modulesFromJars", () => {
@@ -139,10 +161,21 @@ describe("modulesFromJars", () => {
   it("handles multiple JARs", async () => {
     const jarPath = path.join(__dirname, "..", "fixtures", "test-lib.jar");
 
-    // Use same JAR twice for test (simulates multiple JARs)
-    const resolver = await modulesFromJars([jarPath, jarPath]);
+    // Build a second, distinct JAR (different module name) on the fly so
+    // this test actually exercises merging across archives, rather than
+    // passing trivially because only the first archive's contents matter.
+    const secondJarDir = fs.mkdtempSync(path.join(os.tmpdir(), "dw-jar-"));
+    const secondJarPath = path.join(secondJarDir, "second-lib.jar");
+    const zip = new AdmZip();
+    zip.addFile("org/test/second.dwl", Buffer.from('%dw 2.0\nfun square(n) = n * n'));
+    zip.writeZip(secondJarPath);
+
+    const resolver = await modulesFromJars([jarPath, secondJarPath]);
 
     expect(resolver("dw/core/Strings.dwl")).toContain("fun capitalize");
+    expect(resolver("org/test/second.dwl")).toContain("fun square");
+
+    fs.rmSync(secondJarDir, { recursive: true, force: true });
   });
 
   it("throws on invalid JAR", async () => {

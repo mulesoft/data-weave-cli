@@ -24,10 +24,13 @@ export interface DataWeaveOptions {
    * MUST be synchronous (cannot return Promise).
    *
    * Note: the native layer installs at most one resolver per process
-   * lifetime — only the first resolver registered is used. If you construct
-   * multiple `DataWeave` instances with different `resolveModule` callbacks
-   * in the same process, later instances silently reuse the first resolver
-   * instead of their own.
+   * lifetime, bound to the thread (main thread or `worker_threads` Worker)
+   * that registers it first. If you construct multiple `DataWeave` instances
+   * with different `resolveModule` callbacks in the same process, later
+   * instances silently reuse the first resolver instead of their own; if a
+   * later instance is constructed on a *different* thread, its resolver is
+   * not invoked at all and custom module paths resolve as "not found" (see
+   * docs/external-modules.md#multiple-resolvers-in-one-process).
    *
    * Security: the resolver runs with full process permissions and no
    * sandboxing (same trust model as the CLI resolving `.dwl` files from

@@ -2,7 +2,25 @@ import { describe, it, expect, afterAll } from "vitest";
 import { DataWeave, cleanup } from '../../src/dataweave';
 import { modulesFromMap } from '../../src/resolver';
 
+// Every test below constructs its own explicit DataWeave instance (rather
+// than the module-level singleton) so each can configure its own resolver.
+// `cleanup()` above only releases the *singleton* (`globalInstance`), which
+// nothing in this file ever creates -- so without this tracking, every
+// explicit instance's native library reference (and the shared addon-level
+// ref-count, see addon.c's g_ref_count) would leak for the lifetime of the
+// test process. Track every instance created in this file and release them
+// all in afterAll.
+const instances: DataWeave[] = [];
+function trackedDataWeave(...args: ConstructorParameters<typeof DataWeave>): DataWeave {
+  const dw = new DataWeave(...args);
+  instances.push(dw);
+  return dw;
+}
+
 afterAll(() => {
+  for (const dw of instances) {
+    dw.cleanup();
+  }
   cleanup();
 });
 
@@ -22,7 +40,7 @@ const SHARED_RESOLVER_MODULES: Record<string, string> = {
 
 describe('DataWeave with resolver', () => {
   it('resolves imported module from map', () => {
-    const dw = new DataWeave({
+    const dw = trackedDataWeave({
       resolveModule: modulesFromMap(SHARED_RESOLVER_MODULES),
     });
     dw.initialize();
@@ -40,7 +58,7 @@ describe('DataWeave with resolver', () => {
   });
 
   it('works without resolver (backward compatible)', () => {
-    const dw = new DataWeave();  // No resolver
+    const dw = trackedDataWeave();  // No resolver
     dw.initialize();
 
     const result = dw.run(`
@@ -55,7 +73,7 @@ describe('DataWeave with resolver', () => {
   });
 
   it('throws when module not found', () => {
-    const dw = new DataWeave({
+    const dw = trackedDataWeave({
       resolveModule: modulesFromMap({ 'a.dwl': '...' }),
     });
     dw.initialize();
@@ -70,7 +88,7 @@ describe('DataWeave with resolver', () => {
   });
 
   it('built-in modules still resolve with resolver', () => {
-    const dw = new DataWeave({
+    const dw = trackedDataWeave({
       resolveModule: modulesFromMap({ 'custom.dwl': '...' }),
     });
     dw.initialize();
@@ -106,7 +124,7 @@ describe('DataWeave with resolver', () => {
     // below import two module paths that no earlier test in this file has
     // imported yet (both pre-registered in SHARED_RESOLVER_MODULES above,
     // since only the first-installed resolver's map is ever consulted).
-    const dw = new DataWeave({
+    const dw = trackedDataWeave({
       resolveModule: modulesFromMap(SHARED_RESOLVER_MODULES),
     });
     dw.initialize();

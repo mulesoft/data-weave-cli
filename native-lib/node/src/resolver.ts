@@ -24,7 +24,10 @@ export type ModuleResolver = (modulePath: string) => string | null;
  */
 export function modulesFromMap(modules: Record<string, string>): ModuleResolver {
   return (modulePath: string): string | null => {
-    if (modulePath in modules) {
+    // Object.hasOwn (not `in`) avoids matching inherited properties like
+    // "toString" or "constructor", which would violate the string | null
+    // contract above.
+    if (Object.hasOwn(modules, modulePath)) {
       return modules[modulePath];
     }
     return null;
@@ -44,17 +47,49 @@ export function modulesFromMap(modules: Record<string, string>): ModuleResolver 
  * // Resolves "org/test/lib.dwl" → reads "./my-modules/org/test/lib.dwl"
  */
 export function modulesFromDirectory(baseDir: string): ModuleResolver {
+  // Unresolved base, for the cheap lexical check below (must be compared
+  // against an equally-unresolved candidate path — see baseDirResolved).
+  const baseDirLexical = path.resolve(baseDir);
+  // Canonicalized base, for the filesystem-truth check below. This also
+  // fails fast if baseDir doesn't exist, rather than silently resolving
+  // nothing. Kept separate from baseDirLexical: on macOS, os.tmpdir() (and
+  // other paths) can live under a symlink (e.g. /var -> /private/var), so
+  // comparing an unresolved candidate against a canonicalized base would
+  // reject every legitimate path.
+  const baseDirResolved = fs.realpathSync(baseDir);
+
   return (modulePath: string): string | null => {
     const fullPath = path.resolve(path.join(baseDir, modulePath));
-    const baseDirResolved = path.resolve(baseDir);
 
-    // Prevent path traversal - ensure resolved path is within baseDir
-    if (!fullPath.startsWith(baseDirResolved + path.sep) && fullPath !== baseDirResolved) {
+    // Lexical containment check first (cheap, catches plain ".." traversal
+    // before touching the filesystem). Compared against the unresolved base
+    // so a symlinked baseDir itself doesn't cause a false rejection.
+    if (!fullPath.startsWith(baseDirLexical + path.sep) && fullPath !== baseDirLexical) {
       return null; // Path escapes baseDir
     }
 
+    let realPath: string;
     try {
-      return fs.readFileSync(fullPath, "utf-8");
+      // Canonicalize the candidate too: a symlink inside baseDir can point
+      // outside it and would otherwise pass the lexical check above, since
+      // path.resolve() never touches the filesystem.
+      realPath = fs.realpathSync(fullPath);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+        return null;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to read module ${modulePath} from ${fullPath}: ${message}`);
+    }
+
+    // Re-check containment against the canonical path, rejecting symlinks
+    // (or symlinked ancestor directories) that resolve outside baseDir.
+    if (!realPath.startsWith(baseDirResolved + path.sep) && realPath !== baseDirResolved) {
+      return null;
+    }
+
+    try {
+      return fs.readFileSync(realPath, "utf-8");
     } catch (error) {
       // File not found is expected, return null
       if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
