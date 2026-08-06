@@ -20,9 +20,13 @@ describe("first-resolver-wins (isolated process)", () => {
     expect(existsSync(DIST_ENTRY), `built entry missing at ${DIST_ENTRY} — run \`npm run build:ts\``).toBe(true);
 
     // execFileSync throws on a non-zero exit, so a "wrong resolver won" /
-    // native-crash outcome in the child fails this test.
+    // native-crash outcome in the child fails this test. A timeout is also
+    // required: execFileSync blocks synchronously with no way for Vitest to
+    // interrupt it, so a native deadlock in the child would otherwise hang
+    // the whole suite instead of failing this one test.
     const stdout = execFileSync(process.execPath, [FIXTURE], {
       encoding: "utf-8",
+      timeout: 30_000,
     });
 
     expect(stdout).toContain("OK:first-resolver-wins");

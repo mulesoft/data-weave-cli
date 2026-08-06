@@ -11,16 +11,23 @@
 //
 // Contract with the parent:
 //   - Requires the built CommonJS entry at ../../../dist/index.js.
-//   - Constructs dw1 with a resolver for 'first.dwl', initializes it, and
-//     runs a script that imports 'first.dwl' to force-install dw1's resolver
-//     on the singleton engine.
-//   - Constructs dw2 with a *different* resolver for 'second.dwl', and runs a
-//     script that imports 'second.dwl'. Per the singleton semantics, dw2's
-//     resolver is never installed, so this import must fail to resolve.
-//   - Prints "OK:first-resolver-wins" and exits 0 when both expectations hold
-//     (dw1's import succeeds, dw2's import fails). Prints "FAIL:<reason>" and
-//     exits 1 otherwise. A native crash surfaces as a non-zero signal exit,
-//     which the parent also treats as failure.
+//   - Constructs dw1 with a resolver for 'first.dwl' and dw2 with a
+//     *different* resolver for 'second.dwl', then initializes both.
+//   - Runs a script through dw1 that imports 'first.dwl' to force-install
+//     dw1's resolver on the singleton engine (must succeed).
+//   - Runs a script through dw2 that imports 'second.dwl'. Per the singleton
+//     semantics, dw2's resolver is never installed, so this import must fail.
+//   - Runs a THIRD script, through dw2, that imports 'first.dwl' again and
+//     asserts it still returns "Hello World". This is the check that actually
+//     distinguishes "the first resolver remains active" from "custom
+//     resolution broke entirely after the first call" — the second script
+//     alone would fail identically under either explanation.
+//   - Always calls cleanup() on both instances via try/finally, so teardown
+//     is exercised even on failure, then exits naturally (no process.exit()).
+//   - Prints "OK:first-resolver-wins" when all three expectations hold, or
+//     "FAIL:<reason>" (with a non-zero exitCode) otherwise. A native crash
+//     surfaces as a non-zero signal exit, which the parent also treats as
+//     failure.
 const path = require("node:path");
 
 const { DataWeave, modulesFromMap } = require(path.join(__dirname, "..", "..", "..", "dist", "index.js"));
@@ -30,40 +37,67 @@ const dw1 = new DataWeave({
     "first.dwl": '%dw 2.0\nfun greet(n: String) = "Hello " ++ n',
   }),
 });
-dw1.initialize();
-
-const firstResult = dw1.run(`
-  %dw 2.0
-  import first
-  output application/json
-  ---
-  first::greet("World")
-`);
-
-if (!firstResult.success) {
-  console.log("FAIL:first-resolver-did-not-resolve:" + firstResult.error);
-  process.exit(1);
-}
 
 const dw2 = new DataWeave({
   resolveModule: modulesFromMap({
     "second.dwl": '%dw 2.0\nfun shout(n: String) = n ++ "!"',
   }),
 });
-dw2.initialize();
 
-const secondResult = dw2.run(`
-  %dw 2.0
-  import second
-  output application/json
-  ---
-  second::shout("hi")
-`);
+let failure = null;
 
-if (secondResult.success) {
-  console.log("FAIL:second-resolver-unexpectedly-won");
-  process.exit(1);
+try {
+  dw1.initialize();
+  dw2.initialize();
+
+  const firstResult = dw1.run(`
+    %dw 2.0
+    import first
+    output application/json
+    ---
+    first::greet("World")
+  `);
+
+  if (!firstResult.success) {
+    failure = "first-resolver-did-not-resolve:" + firstResult.error;
+  } else {
+    const secondResult = dw2.run(`
+      %dw 2.0
+      import second
+      output application/json
+      ---
+      second::shout("hi")
+    `);
+
+    if (secondResult.success) {
+      failure = "second-resolver-unexpectedly-won";
+    } else {
+      // Prove the first resolver is still ACTIVE on dw2 (not merely that
+      // dw2's own resolver lost). A resolver that died entirely after the
+      // first call would also make second.dwl fail above -- this second
+      // check on dw2 is what actually distinguishes "first resolver wins"
+      // from "custom resolution stopped working after the first run".
+      const stillFirstResult = dw2.run(`
+        %dw 2.0
+        import first
+        output application/json
+        ---
+        first::greet("World")
+      `);
+
+      if (!stillFirstResult.success || JSON.parse(stillFirstResult.getString()) !== "Hello World") {
+        failure = "first-resolver-no-longer-active-on-dw2:" + (stillFirstResult.error || stillFirstResult.getString());
+      }
+    }
+  }
+} finally {
+  dw1.cleanup();
+  dw2.cleanup();
 }
 
-console.log("OK:first-resolver-wins");
-process.exit(0);
+if (failure) {
+  console.log("FAIL:" + failure);
+  process.exitCode = 1;
+} else {
+  console.log("OK:first-resolver-wins");
+}

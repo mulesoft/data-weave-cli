@@ -37,6 +37,13 @@ static void* g_thread = NULL;
 static int g_initialized = 0;
 static int g_ref_count = 0;
 static uv_mutex_t g_mutex;
+// Guards initialization of the process-global g_mutex. Init() runs once per
+// Worker environment that loads this addon, but g_mutex is process-global —
+// re-running uv_mutex_init() on an already-initialized mutex from a second
+// Worker's Init() call is undefined behavior (and can corrupt the mutex for
+// every other thread already relying on it). uv_once ensures the real init
+// body runs exactly once per process regardless of how many Workers load us.
+static uv_once_t g_mutex_once = UV_ONCE_INIT;
 
 static graal_create_isolate_fn fn_create_isolate = NULL;
 static graal_attach_thread_fn fn_attach_thread = NULL;
@@ -1020,8 +1027,12 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
 
 // --- Module init ---
 
-static napi_value Init(napi_env env, napi_value exports) {
+static void init_g_mutex(void) {
   uv_mutex_init(&g_mutex);
+}
+
+static napi_value Init(napi_env env, napi_value exports) {
+  uv_once(&g_mutex_once, init_g_mutex);
 
   napi_value fn;
 

@@ -24,13 +24,22 @@ export interface DataWeaveOptions {
    * MUST be synchronous (cannot return Promise).
    *
    * Note: the native layer installs at most one resolver per process
-   * lifetime, bound to the thread (main thread or `worker_threads` Worker)
-   * that registers it first. If you construct multiple `DataWeave` instances
-   * with different `resolveModule` callbacks in the same process, later
-   * instances silently reuse the first resolver instead of their own; if a
-   * later instance is constructed on a *different* thread, its resolver is
-   * not invoked at all and custom module paths resolve as "not found" (see
+   * lifetime, bound on the first resolver-backed {@link DataWeave.run} call
+   * (not on {@link DataWeave.initialize}, which only loads/ref-counts the
+   * native library) and to the thread (main thread or `worker_threads`
+   * Worker) that made that first call. If you construct multiple `DataWeave`
+   * instances with different `resolveModule` callbacks in the same process,
+   * whichever instance's `run()` executes first wins; later instances
+   * silently reuse that resolver instead of their own. If a later instance's
+   * `run()` executes on a *different* thread, its resolver is not invoked at
+   * all and custom module paths resolve as "not found" (see
    * docs/external-modules.md#multiple-resolvers-in-one-process).
+   *
+   * Concurrency warning: calling a resolver-backed `run()` concurrently from
+   * more than one Worker is not just unsupported — it is memory-unsafe (see
+   * docs/external-modules.md, Worker threads section). Restrict
+   * resolver-backed execution to a single thread, or serialize calls across
+   * Workers.
    *
    * Security: the resolver runs with full process permissions and no
    * sandboxing (same trust model as the CLI resolving `.dwl` files from

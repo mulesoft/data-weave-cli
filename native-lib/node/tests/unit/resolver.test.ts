@@ -133,6 +133,60 @@ describe("modulesFromDirectory", () => {
       fs.rmSync(outsideDir, { recursive: true, force: true });
     }
   );
+
+  it("keeps resolving a relative baseDir after process.chdir()", () => {
+    // modulesFromDirectory captures an absolute baseDirLexical up front. The
+    // candidate path built on each call must be derived from that captured
+    // absolute base -- not re-resolved against baseDir (which, if relative,
+    // silently tracks the *current* cwd) -- or a later chdir() breaks every
+    // lookup against a resolver that was already constructed and working.
+    const originalCwd = process.cwd();
+    const relativeBase = path.relative(originalCwd, tempDir);
+    const resolver = modulesFromDirectory(relativeBase);
+
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "dw-elsewhere-"));
+    try {
+      process.chdir(elsewhere);
+      const result = resolver("simple.dwl");
+      expect(result).toContain("var x = 42");
+    } finally {
+      process.chdir(originalCwd);
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("modulesFromDirectory with a root-level baseDir", () => {
+  // A root base (POSIX "/", or a Windows drive root) makes `base + path.sep`
+  // duplicate the separator (e.g. "//"), which broke the old prefix-based
+  // containment check for every child path. Exercise the actual filesystem
+  // root's realpath so this covers whatever isContained() computes for it,
+  // without assuming write access to "/" itself.
+  it("does not reject a path solely because baseDir is a filesystem root", () => {
+    const root = path.parse(process.cwd()).root; // e.g. "/" or "C:\\"
+    const rootResolved = fs.realpathSync(root);
+    const resolver = modulesFromDirectory(root);
+
+    // A false containment rejection and a genuine "not found" both surface as
+    // `null` from the resolver, so this needs a file that definitely exists
+    // under root to tell them apart -- create one under the OS temp dir,
+    // which is itself always a descendant of the filesystem root.
+    const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), "dw-root-probe-"));
+    try {
+      const probeResolved = fs.realpathSync(probeDir);
+      expect(probeResolved.startsWith(rootResolved)).toBe(true);
+
+      fs.writeFileSync(path.join(probeDir, "probe.dwl"), "%dw 2.0\nvar probe = true");
+      // Resolve relative to the *actual* root, using the probe dir's path
+      // relative to root as the "module path" -- this only works if root
+      // containment doesn't reject valid, deeply-nested children.
+      const relFromRoot = path.relative(rootResolved, path.join(probeResolved, "probe.dwl"));
+      const result = resolver(relFromRoot);
+      expect(result).toContain("var probe = true");
+    } finally {
+      fs.rmSync(probeDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("modulesFromJars", () => {

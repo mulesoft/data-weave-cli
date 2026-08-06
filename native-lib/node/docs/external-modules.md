@@ -186,10 +186,20 @@ dw1.initialize();
 const dw2 = new DataWeave({
   resolveModule: modulesFromMap({ 'b.dwl': '...' }),
 });
-dw2.initialize();  // Logs warning, silently reuses dw1's resolver
+dw2.initialize();  // Only loads/ref-counts the native library — does NOT register a resolver
+
+dw1.run('...');    // First resolver-backed run() in the process: installs dw1's resolver
+dw2.run('...');    // Logs warning, silently reuses dw1's resolver instead of dw2's
 
 // Both dw1 and dw2 use dw1's resolver (only 'a.dwl' is available)
 ```
+
+**The rule is "first resolver-backed `run()` wins," not "first `initialize()` wins."**
+`initialize()` only loads and ref-counts the native library; the resolver
+itself is registered lazily, on whichever instance's `run()` executes first
+with a resolver configured. If `dw2.run()` happens to execute before
+`dw1.run()` — even though `dw1.initialize()` ran first — `dw2`'s resolver
+wins instead.
 
 **Workaround:** Use `composeResolvers()` to combine all modules into a single resolver:
 
@@ -217,6 +227,16 @@ currently no supported way to run distinct custom-module resolvers on
 different Workers in the same process; either resolve modules on the thread
 that owns the process's resolver, or avoid resolver-backed instances in
 worker pools.
+
+**Concurrent resolver-backed runs across Workers are unsupported and
+memory-unsafe.** Beyond the "not found" fallback described above, calling a
+resolver-backed `run()` concurrently from more than one Worker is not just
+unsupported behavior — it is a memory-safety hazard. The native layer tracks
+in-flight resolver results in unsynchronized, process-global state, and one
+Worker's cleanup can free memory another Worker's concurrent call is still
+using. Restrict resolver-backed execution to a single thread (or fully
+serialize resolver-backed calls across Workers) until a future release
+isolates per-instance engine state.
 
 ## Security / Trust Model
 

@@ -35,6 +35,27 @@ export function modulesFromMap(modules: Record<string, string>): ModuleResolver 
 }
 
 /**
+ * True iff `candidate` is `base` itself or lies strictly beneath it.
+ *
+ * Deliberately not a `startsWith(base + path.sep)` string check: that
+ * degrades at a root base (`/` -> `startsWith("//")`, and the analogous
+ * duplicated separator on Windows drive/UNC roots), which would reject every
+ * legitimate child of a root-level baseDir. path.relative() has no such edge
+ * case: a candidate outside base always relates back via a leading "..", or
+ * — for a different drive/root on Windows — comes back absolute.
+ */
+function isContained(base: string, candidate: string): boolean {
+  if (candidate === base) return true;
+  const rel = path.relative(base, candidate);
+  // An escape climbs out via a ".." segment (rel === ".." or rel starts with
+  // "../"). A literal filename that merely starts with two dots, e.g.
+  // "..foo.dwl", is a single segment and is NOT an escape — checking for the
+  // separator (or an exact ".." match) avoids misclassifying it.
+  const isUpwardEscape = rel === ".." || rel.startsWith(".." + path.sep);
+  return rel !== "" && !isUpwardEscape && !path.isAbsolute(rel);
+}
+
+/**
  * Creates a resolver that reads .dwl files from a directory tree.
  * Scans recursively for nested namespace structures.
  * Reads from disk on every resolution (no caching).
@@ -59,12 +80,17 @@ export function modulesFromDirectory(baseDir: string): ModuleResolver {
   const baseDirResolved = fs.realpathSync(baseDir);
 
   return (modulePath: string): string | null => {
-    const fullPath = path.resolve(path.join(baseDir, modulePath));
+    // Join against the already-absolute baseDirLexical, not the original
+    // (possibly relative) baseDir: a relative baseDir re-resolves against the
+    // *current* cwd on every call, so a later process.chdir() would silently
+    // relocate every lookup. baseDirLexical was captured once, above, so it
+    // is stable regardless of later chdir() calls.
+    const fullPath = path.resolve(path.join(baseDirLexical, modulePath));
 
     // Lexical containment check first (cheap, catches plain ".." traversal
     // before touching the filesystem). Compared against the unresolved base
     // so a symlinked baseDir itself doesn't cause a false rejection.
-    if (!fullPath.startsWith(baseDirLexical + path.sep) && fullPath !== baseDirLexical) {
+    if (!isContained(baseDirLexical, fullPath)) {
       return null; // Path escapes baseDir
     }
 
@@ -84,7 +110,7 @@ export function modulesFromDirectory(baseDir: string): ModuleResolver {
 
     // Re-check containment against the canonical path, rejecting symlinks
     // (or symlinked ancestor directories) that resolve outside baseDir.
-    if (!realPath.startsWith(baseDirResolved + path.sep) && realPath !== baseDirResolved) {
+    if (!isContained(baseDirResolved, realPath)) {
       return null;
     }
 
