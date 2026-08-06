@@ -148,7 +148,7 @@ The resolver returns `null`, and the engine reports a compile-time error.
 
 ### File I/O Errors
 
-When the resolver encounters file system errors (unreadable files, permission denied, etc.), the resolver throws an error. However, this error is caught internally by the native layer, logged to **stderr** only, and the callback returns `null` — indistinguishable from "module not found" to the DataWeave compiler:
+When the resolver encounters file system errors (unreadable files, permission denied, etc.), the resolver throws an error. This error is caught internally by the native layer and the callback returns `null` — indistinguishable from "module not found" to the DataWeave compiler:
 
 ```typescript
 const dw = new DataWeave({
@@ -166,12 +166,12 @@ const result = dw.run(`
 if (!result.success) {
   // result.error is the same generic message as "module not found":
   console.error(result.error);  // "Unable to resolve module with identifier ..."
-  // The actual error details (permissions, encoding, etc.) are logged to stderr only
-  // and not available in the result object
+  // The actual error details (permissions, encoding, etc.) are not available
+  // in the result object; see "Debugging" below for how to surface them.
 }
 ```
 
-**Debugging:** To see detailed resolver error messages, check your process's stderr/console output. These details help diagnose why a resolver is failing (e.g., directory does not exist, file unreadable due to permissions).
+**Debugging:** By default, a resolver failure logs only a fixed, content-free diagnostic line to stderr — the actual exception message and stack are suppressed, since they can carry resolver-controlled data (module source, credentials, filesystem paths). To see the detailed message and stack for diagnosing a failing resolver (e.g., directory does not exist, file unreadable due to permissions), set `DATAWEAVE_RESOLVER_DEBUG=1` in the process environment before running. Only enable this in a trusted debugging context, since the detailed output may expose sensitive resolver-controlled data.
 
 ### Multiple Resolvers in One Process
 
@@ -221,6 +221,8 @@ worker pools.
 ## Security / Trust Model
 
 A `resolveModule` callback executes with **full process permissions** — the same trust model as the `dw` CLI resolving `.dwl` files from disk. There is no sandboxing: the callback can read/write the filesystem, make network calls, or run arbitrary Node.js code, and its return value (module source) is compiled and executed by the DataWeave engine with no additional isolation. Only configure a resolver that points at trusted sources (your own modules, vetted directories, or JARs from a trusted registry) — treat it with the same care you would give any code that runs with the permissions of your process.
+
+**`modulesFromDirectory` and symlinks:** each lookup canonicalizes the candidate path and rejects it if the canonical path falls outside the configured base directory, which blocks a *stable* symlink pointing out of the module tree. This cannot portably close a time-of-check/time-of-use race, though: an actor able to write into the module tree could swap a validated file (or an ancestor directory) for an out-of-base symlink between the validation check and the subsequent read — Node has no portable equivalent of Linux's `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` to close this atomically. As with the trust model above, only point `modulesFromDirectory` at a directory tree that is not writable by principals less trusted than the process itself.
 
 ## JAR Dependency Management
 
