@@ -35,9 +35,9 @@
   "gypfile": true,
   "devDependencies": {
     "@types/node": "^20",
-    "@vitest/coverage-v8": "^3.0",
+    "@vitest/coverage-v8": "^4.1",
     "fast-xml-parser": "^5.10.1",
-    "node-gyp": "^11",
+    "node-gyp": "^13",
     "typescript": "^5.5",
     "vitest": "^3.0"
   }
