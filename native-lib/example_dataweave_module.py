@@ -25,58 +25,59 @@ def example_simple_functions():
     # Simple script execution
     print("\n[*] Simple arithmetic:")
     script = "2 + 2"
-    result = dataweave.run_script(script)
+    result = dataweave.run(script)
     ok = assert_result(script, result, "4") and ok
 
     print("\n[*] Square root:")
     script = "sqrt(144)"
-    result = dataweave.run_script(script)
+    result = dataweave.run(script)
     ok = assert_result(script, result, "12") and ok
 
     print("\n[*] Array operations:")
     script = "[1, 2, 3] map $ * 2"
-    result = dataweave.run_script(script)
+    result = dataweave.run(script)
     ok = assert_result(script, result, "[\n  2, \n  4, \n  6\n]") and ok
 
     print("\n[*] String operations:")
     script = "upper('hello world')"
-    result = dataweave.run_script(script)
+    result = dataweave.run(script)
     ok = assert_result(script, result, '"HELLO WORLD"') and ok
 
     # Script with inputs (simple values - auto-converted)
     print("\n[*] Script with inputs (auto-converted):")
     script = "num1 + num2"
-    result = dataweave.run_script(script, {"num1": 25, "num2": 17})
+    result = dataweave.run(script, {"num1": 25, "num2": 17})
     ok = assert_result(script, result, "42") and ok
 
     # Script with complex inputs
     print("\n[*] Script with complex object:")
     script = "payload.name"
-    result = dataweave.run_script(script, {"payload": {"content": '{"name": "John", "age": 30}', "mimeType": "application/json"}})
+    result = dataweave.run(script, {"payload": {"content": '{"name": "John", "age": 30}', "mimeType": "application/json"}})
     ok = assert_result(script, result, '"John"') and ok
 
     # Script with mixed input types
     print("\n[*] Script with mixed input types:")
     script = "greeting ++ ' ' ++ payload.name"
-    result = dataweave.run_script(script, {"greeting": "Hello", "payload": {"content": '{"name": "Alice", "role": "Developer"}', "mimeType": "application/json"}})
+    result = dataweave.run(script, {"greeting": "Hello", "payload": {"content": '{"name": "Alice", "role": "Developer"}', "mimeType": "application/json"}})
     ok = assert_result(script, result, '"Hello Alice"') and ok
 
     # Binary output
     print("\n[*] Binary output:")
     script = "output application/octet-stream\n---\ndw::core::Binaries::fromBase64(\"holamund\")"
-    result = dataweave.run_script(script)
+    result = dataweave.run(script)
     ok = assert_result(script, result, "holamund") and ok
 
     # Script with InputValue
     print("\n[*] Inputs:")
     input_value = dataweave.InputValue(
         content="1234567",
-        mimeType="application/csv",
+        mime_type="application/csv",
         properties={"header": False, "separator": "4"}
     )
     script = "in0.column_1[0]"
-    result = dataweave.run_script(script, {"in0": input_value})
+    result = dataweave.run(script, {"in0": input_value})
     ok = assert_result(script, result, '"567"') and ok
+
 
     # Cleanup when done
     dataweave.cleanup()
@@ -136,11 +137,11 @@ def example_explicit_format():
     ok = True
 
     script = "payload.message"
-    result = dataweave.run_script(script, {"payload": {"content": '{"message": "Hello from JSON!", "value": 42}', "mimeType": "application/json"}})
+    result = dataweave.run(script, {"payload": {"content": '{"message": "Hello from JSON!", "value": 42}', "mimeType": "application/json"}})
     ok = assert_result(script, result, '"Hello from JSON!"') and ok
 
     script = "payload.value + offset"
-    result = dataweave.run_script(script, {"payload": {"content": '{"value": 100}', "mimeType": "application/json"}, "offset": 50})
+    result = dataweave.run(script, {"payload": {"content": '{"value": 100}', "mimeType": "application/json"}, "offset": 50})
     ok = assert_result(script, result, "150") and ok
 
     return ok
@@ -154,7 +155,7 @@ def example_error_handling():
     
     try:
         print("\n[*] Invalid script (will show error):")
-        result = dataweave.run_script("invalid syntax here", {})
+        result = dataweave.run("invalid syntax here", {})
         print(f"   Result: {result} {'[OK]' if result.success == False else '[FAIL]'}")
             
     except dataweave.DataWeaveLibraryNotFoundError as e:

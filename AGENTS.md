@@ -176,7 +176,9 @@ Benchmarks are opt-in: `./gradlew benchmarkCompare -Pbenchmark=true`. Runner tas
 `ext.benchmarkRunner = true`; the root aggregator auto-discovers them. New runners must
 use the shared corpus/schema and write `benchmarks/results/<runner>-<timestamp>.json`.
 Do not add benchmark execution to normal `build` or `test`. The CLI benchmark requires a
-binary built with `-Pbenchmark=true`; `DW_BENCH_BIN` may select a prebuilt one.
+normal `dw` binary. `-Pbenchmark=true` gates Gradle benchmark task execution; it does not
+make the artifact benchmark-capable. `DW_BENCH_BIN` selects an existing ordinary `dw`
+binary.
 
 CI builds Ubuntu and Windows with GraalVM 24. Native CLI regression suites and Node TCK
 run only on `master`. Run the smallest relevant suite, then the nearest module test; use

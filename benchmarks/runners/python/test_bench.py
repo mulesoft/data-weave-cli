@@ -6,7 +6,9 @@ import unittest
 from pathlib import Path
 import hashlib
 import os
+import sys
 import tempfile
+import importlib
 
 # benchmarks/runners/python -> benchmarks -> corpus
 CORPUS = Path(__file__).resolve().parents[2] / "corpus"
@@ -111,16 +113,14 @@ class TestEnv(unittest.TestCase):
         with tempfile.NamedTemporaryFile(suffix=".dylib", delete=False) as f:
             f.write(data)
             path = f.name
-        os.environ["DATAWEAVE_NATIVE_LIB"] = path
         try:
-            e = envmod.gather_env()
+            e = envmod.gather_env(dwlib_path=Path(path))
             size = os.path.getsize(path)
             h = hashlib.sha256()
             h.update(str(size).encode())
             h.update(data[:65536])
             self.assertEqual(e["dwlibBuildId"], "dwlib-" + h.hexdigest()[:8])
         finally:
-            del os.environ["DATAWEAVE_NATIVE_LIB"]
             os.unlink(path)
 
 
@@ -129,6 +129,104 @@ class TestWrapper(unittest.TestCase):
         api = wrapper.load_wrapper()
         for attr in ("DataWeave", "run", "run_transform", "run_streaming"):
             self.assertTrue(hasattr(api, attr), f"binding missing {attr}")
+
+    def test_env_override_missing_dir_raises(self):
+        with self.assertRaises(RuntimeError):
+            old_env = os.environ.get("DW_BENCH_PY_SITE")
+            try:
+                os.environ["DW_BENCH_PY_SITE"] = "/nonexistent/path/for/test"
+                wrapper.load_wrapper()
+            finally:
+                if old_env is not None:
+                    os.environ["DW_BENCH_PY_SITE"] = old_env
+                else:
+                    os.environ.pop("DW_BENCH_PY_SITE", None)
+
+    def test_env_override_missing_dataweave_pkg_raises(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(RuntimeError):
+                old_env = os.environ.get("DW_BENCH_PY_SITE")
+                try:
+                    os.environ["DW_BENCH_PY_SITE"] = tmpdir
+                    wrapper.load_wrapper()
+                finally:
+                    if old_env is not None:
+                        os.environ["DW_BENCH_PY_SITE"] = old_env
+                    else:
+                        os.environ.pop("DW_BENCH_PY_SITE", None)
+
+    def test_env_override_valid_site_loads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dw_pkg = Path(tmpdir) / "dataweave"
+            dw_pkg.mkdir()
+            native = dw_pkg / "native"
+            native.mkdir()
+            library = native / "dwlib.dylib"
+            library.write_bytes(b"external dwlib")
+            (dw_pkg / "__init__.py").write_text(
+                "class DataWeave: pass\n"
+                "def run(*a, **k): return None\n"
+                "def run_transform(*a, **k): return None\n"
+                "def run_streaming(*a, **k): return None\n"
+            )
+
+            old_env = os.environ.get("DW_BENCH_PY_SITE")
+            old_modules = sys.modules.pop("dataweave", None)
+            try:
+                os.environ["DW_BENCH_PY_SITE"] = tmpdir
+                self.assertEqual(wrapper.resolve_wrapper_site(), Path(tmpdir))
+                self.assertEqual(wrapper.resolve_dwlib_path(), library)
+                api = wrapper.load_wrapper()
+                self.assertTrue(hasattr(api, "DataWeave"))
+                self.assertTrue(hasattr(api, "run"))
+            finally:
+                if old_env is not None:
+                    os.environ["DW_BENCH_PY_SITE"] = old_env
+                else:
+                    os.environ.pop("DW_BENCH_PY_SITE", None)
+                if old_modules is not None:
+                    sys.modules["dataweave"] = old_modules
+                else:
+                    sys.modules.pop("dataweave", None)
+                if tmpdir in sys.path:
+                    sys.path.remove(tmpdir)
+
+    def test_override_replaces_cached_local_package(self):
+        """An override must not reuse an earlier local dataweave import."""
+        cached_modules = {
+            name: module
+            for name, module in sys.modules.items()
+            if name == "dataweave" or name.startswith("dataweave.")
+        }
+        old_env = os.environ.get("DW_BENCH_PY_SITE")
+        try:
+            os.environ.pop("DW_BENCH_PY_SITE", None)
+            local_api = wrapper.load_wrapper()
+            self.assertTrue(
+                Path(local_api.__file__).resolve().is_relative_to(wrapper._SRC.resolve())
+            )
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                site = Path(tmpdir)
+                dw_pkg = site / "dataweave"
+                dw_pkg.mkdir()
+                (dw_pkg / "__init__.py").write_text("source = 'override'\n")
+
+                os.environ["DW_BENCH_PY_SITE"] = tmpdir
+                override_api = wrapper.load_wrapper()
+
+                self.assertTrue(
+                    Path(override_api.__file__).resolve().is_relative_to(site.resolve())
+                )
+        finally:
+            if old_env is not None:
+                os.environ["DW_BENCH_PY_SITE"] = old_env
+            else:
+                os.environ.pop("DW_BENCH_PY_SITE", None)
+            for name in list(sys.modules):
+                if name == "dataweave" or name.startswith("dataweave."):
+                    del sys.modules[name]
+            sys.modules.update(cached_modules)
 
 
 class TestColdstartAggregation(unittest.TestCase):

@@ -11,6 +11,7 @@ import {
   buildTable,
   dedupeLatestByRunner,
   renderMermaidCharts,
+  renderMetricNotes,
   renderMarkdown,
 } from "./report.mjs";
 
@@ -82,6 +83,33 @@ test("renderMarkdown emits no streaming non-comparable footnote", () => {
   });
   assert.ok(md.includes("| map-scale | streaming | MB/s |"), "streaming row is present");
   assert.ok(!md.includes("not like-for-like across runners"), "footnote removed");
+  assert.equal(renderMetricNotes(results), "", "metric note is omitted without CLI results");
+});
+
+test("report rendering labels CLI first-run as end-to-end and other runners as in-process", () => {
+  const manifest = loadManifest(CORPUS);
+  const engine = load("engine-b.json");
+  const cli = {
+    ...engine,
+    runner: "cli",
+    cases: engine.cases
+      .filter((result) => result.metric === "first-run")
+      .map((result) => ({ ...result })),
+  };
+  const results = [engine, cli];
+  const table = buildTable(manifest, results, "engine");
+  const md = renderMarkdown(table, results, {
+    baselineRunner: "engine",
+    stamp: { commit: "abc1234", date: "2026-08-10T14:33:03Z" },
+  });
+
+  assert.ok(md.includes("CLI `first-run` is end-to-end `dw run` command latency."));
+  assert.ok(md.includes("Other runners' `first-run` is in-process compile-and-execute latency."));
+  assert.equal(
+    renderMetricNotes(results),
+    "CLI `first-run` is end-to-end `dw run` command latency. " +
+      "Other runners' `first-run` is in-process compile-and-execute latency."
+  );
 });
 
 test("renderMermaidCharts emits one chart per (case, metric) with a bar per runner", () => {

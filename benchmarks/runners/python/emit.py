@@ -10,7 +10,7 @@ from coldstart import run_cold_start_and_first_run
 from env import gather_env
 from manifest import load_manifest, validate_result_ids
 from warm_bench import run_warm_and_streaming
-from wrapper import load_wrapper
+from wrapper import load_wrapper, resolve_dwlib_path
 
 # benchmarks/runners/python -> benchmarks
 _BENCH_DIR = Path(__file__).resolve().parents[2]
@@ -46,7 +46,7 @@ def main():
     cases = cold_rows + warm_rows
     validate_result_ids(manifest, [c["id"] for c in cases])  # fail-fast on orphan ids
 
-    env = gather_env()
+    env = gather_env(dwlib_path=resolve_dwlib_path())
     result = build_result(env, cases)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)

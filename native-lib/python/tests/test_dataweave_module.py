@@ -11,6 +11,22 @@ sys.path.insert(0, str(_PYTHON_SRC_DIR))
 
 import dataweave
 
+def test_input_value_mime_type_constructor():
+    """Test InputValue accepts the public mime_type constructor keyword."""
+    print("Testing InputValue mime_type constructor...")
+    try:
+        value = dataweave.InputValue(
+            content="1234567",
+            mime_type="application/csv",
+            properties={"header": False, "separator": "4"},
+        )
+        assert value.mime_type == "application/csv"
+        print("[OK] InputValue mime_type constructor works")
+        return True
+    except Exception as e:
+        print(f"[FAIL] InputValue mime_type constructor failed: {e}")
+        return False
+
 def test_basic():
     """Test basic functionality"""
     print("Testing basic script execution...")
@@ -473,6 +489,7 @@ def main():
     
     try:
         results = []
+        results.append(test_input_value_mime_type_constructor())
         results.append(test_basic())
         results.append(test_with_inputs())
         results.append(test_context_manager())

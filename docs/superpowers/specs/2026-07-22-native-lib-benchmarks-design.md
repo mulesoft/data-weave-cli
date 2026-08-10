@@ -4,6 +4,12 @@
 **Status:** Approved (design)
 **Scope of first deliverable:** Node runner + common JSON schema + report script. Python and Scala-engine runners are follow-up specs; the schema and corpus are designed to accommodate them without change.
 
+> **Superseded by current implementation:** This is the original harness design record.
+> Node, Python, engine, and CLI runners are now implemented, and task wiring has
+> evolved. Use [`benchmarks/README.md`](../../benchmarks/README.md) and the
+> current runner sources for operational documentation; retain this document for
+> its original decisions and rationale.
+
 ## Purpose
 
 Benchmark the DataWeave native-lib wrappers to serve, from one harness:

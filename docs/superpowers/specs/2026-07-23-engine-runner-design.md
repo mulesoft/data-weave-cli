@@ -4,6 +4,12 @@
 **Status:** Approved (design)
 **Parent spec:** [`2026-07-22-native-lib-benchmarks-design.md`](./2026-07-22-native-lib-benchmarks-design.md) — this resolves the three JVM-specific decisions that spec deferred to the engine runner.
 
+> **Superseded by current implementation:** This document records the original
+> JVM runner design. For current task wiring, runner layout, and usage, use
+> [`benchmarks/README.md`](../../benchmarks/README.md) and
+> [`benchmarks/runners/engine/`](../../benchmarks/runners/engine/). Retain this
+> document for its original decisions and rationale.
+
 ## Purpose
 
 Build the **engine runner** — the JVM baseline the native-lib wrappers are compared against. It drives the DataWeave engine over the **same shared corpus** the Node runner consumes and emits the **same JSON schema**, so `report/report.mjs` joins the results and produces the headline delta: **native-image wrappers vs. the JVM engine**.

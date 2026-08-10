@@ -65,9 +65,10 @@ def _dwlib_path():
     return None
 
 
-def _read_dwlib_build_id():
+def _read_dwlib_build_id(dwlib_path=None):
     # sha256 over (size + first 64KB), same formula as lib/env.mjs.
-    p = _dwlib_path()
+    supplied = Path(dwlib_path) if dwlib_path is not None else None
+    p = supplied if supplied and supplied.exists() else _dwlib_path()
     if p and p.exists():
         size = p.stat().st_size
         head = p.read_bytes()[:65536]
@@ -78,7 +79,7 @@ def _read_dwlib_build_id():
     return "unknown"
 
 
-def gather_env():
+def gather_env(dwlib_path=None):
     return {
         "runner": "python-wrapper",
         "os": f"{sys.platform}-{_normalize_arch(platform.machine())}",
@@ -86,5 +87,5 @@ def gather_env():
         "runtimeVersion": f"python {platform.python_version()}",
         "weaveVersion": _read_weave_version(),
         "commit": _read_commit(),
-        "dwlibBuildId": _read_dwlib_build_id(),
+        "dwlibBuildId": _read_dwlib_build_id(dwlib_path),
     }

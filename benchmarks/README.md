@@ -13,12 +13,8 @@ Language-agnostic benchmark harness for the DataWeave native-lib wrappers.
   (Scala/Gradle subproject `:benchmarks-engine`, depends on `org.mule.weave:runtime` at
   the same `weaveVersion` the native image is built from). `runners/python/` is the
   Python runner (stdlib scripts under `native-lib`, wrapping the same staged `dwlib` as Node).
-  `runners/cli/` is the CLI runner: a Node parent that spawns the `dw` native
-  binary (built with `-Pbenchmark=true`, which compiles in an in-binary
-  benchmark harness gated by `BenchmarkMode.ENABLED` and dispatched via the
-  `DW_BENCH` env var — the shipped `dw` contains none of it). It emits
-  `cold-start`, `first-run`, and `warm`; it does **not** emit `streaming`
-  (the `dw run` path has no chunked-input FFI like the library's).
+   `runners/cli/` is the CLI runner: a Node parent that spawns normal `dw run`
+   commands and emits only end-to-end `first-run` measurements.
 - `report/report.mjs` — joins result files against the manifest and prints a comparison table.
 - `results/` — gitignored per-run output.
 
@@ -27,14 +23,20 @@ Language-agnostic benchmark harness for the DataWeave native-lib wrappers.
 `cold-start` and `first-run` (fresh process per sample), `warm` (in-process steady state),
 `streaming` (MB/s). Each case declares which apply via `metrics[]`.
 
-**Cold-start is measured by the parent, not the child** — every runner spawns a fresh
-child that prints a `READY` marker the instant its runtime is initialized, and the parent
-records wall-clock from just-before-spawn to that marker. So cold-start includes process
-launch + library/class load + runtime init on all three runners, which is what makes the
-native-image-vs-JVM comparison meaningful (the native image has no JVM to boot; the JVM's
-cold cost *is* launch + classload). Adding a runner requires the same protocol: print
-`READY` (flushed) after init, then a JSON line with the in-process `firstRunMs`. Note only
-the first sample sees a truly cold OS page cache; the reported median is warm-cache init.
+For the CLI runner, `first-run` is end-to-end `dw run` command latency. Other
+runners' `first-run` is in-process compile-and-execute latency. The CLI emits
+no `cold-start`, `warm`, or `streaming` rows, so its table deltas remain visible
+but qualify a different measurement boundary.
+
+**Cold-start is measured by the parent, not the child** for the Node, Python, and engine
+runners. Their fresh child prints a `READY` marker the instant its runtime is initialized,
+and the parent records wall-clock from just-before-spawn to that marker. Cold-start therefore
+includes process launch + library/class load + runtime init, which makes the native-image-vs-JVM
+comparison meaningful (the native image has no JVM to boot; the JVM's cold cost *is* launch +
+classload). These in-process runners use the `READY` (flushed) plus JSON `firstRunMs` protocol.
+The CLI does not use that protocol: it measures each normal `dw run` process from spawn to
+successful exit. Only the first sample sees a truly cold OS page cache; the reported median is
+warm-cache init.
 
 ## Prerequisites
 
@@ -45,9 +47,8 @@ and `JAVA_HOME` set to it (see the root README / `CLAUDE.md`). The pinned build 
 `graalvmVersion` in `gradle.properties`. The **engine runner alone** drives the JVM
 `DataWeaveScriptingEngine` and runs on any JDK — no native image required.
 
-The **CLI runner** requires the bench-enabled binary
-(`./gradlew native-cli:nativeCompile -Pbenchmark=true`); set `DW_BENCH_BIN` to
-point at a prebuilt one. Like the library runners it needs the GraalVM toolchain.
+`DW_BENCH_BIN` points to an ordinary prebuilt `dw` binary; the CLI runner does
+not build it when the override is supplied.
 
 ## Running
 
@@ -55,9 +56,37 @@ The one-shot cross-runner comparison — runs **every** registered runner and pr
 
     ./gradlew benchmarkCompare -Pbenchmark=true          # all runners + comparison report
 
+### Running against pre-built wrapper artifacts
+
+The Node and Python runners can benchmark pre-built wrapper artifacts via env vars, skipping
+their corresponding local wrapper build or staging task:
+
+- **`DW_BENCH_NODE_PACKAGE`** — absolute path to an extracted `@dataweave/native` package
+  directory (must contain `dist/index.js`). Example:
+
+      DW_BENCH_NODE_PACKAGE=/tmp/artifacts/node/package \
+        ./gradlew native-lib:benchmarkNode -Pbenchmark=true
+
+- **`DW_BENCH_PY_SITE`** — absolute path to a site-packages-style directory containing
+  `dataweave/__init__.py`. Populate with `pip install --target <dir> <wheel>`. Example:
+
+      pip install --target /tmp/artifacts/py dataweave-0.0.1-py3-none-any.whl
+      DW_BENCH_PY_SITE=/tmp/artifacts/py \
+        ./gradlew native-lib:benchmarkPython -Pbenchmark=true
+
+If the env var is set but the target is invalid, the runner fails immediately rather than
+falling back to the source tree. For a cross-runner comparison with both wrapper overrides:
+
+    DW_BENCH_NODE_PACKAGE=/tmp/artifacts/node/package \
+      DW_BENCH_PY_SITE=/tmp/artifacts/py \
+      ./gradlew benchmarkCompare -Pbenchmark=true
+
+Use `DW_BENCH_BIN` to point the CLI runner at an ordinary prebuilt `dw` binary;
+when it is set, `benchmarkCli` does not run a local `nativeCompile`.
+
 Single-runner options:
 
-    ./gradlew native-lib:benchmark -Pbenchmark=true              # Node only: build wrapper, run, report
+    ./gradlew native-lib:benchmarkNode -Pbenchmark=true          # Node only: writes results/node-<ts>.json
     ./gradlew benchmarks-engine:benchmarkEngine -Pbenchmark=true # engine (JVM) only: writes results/engine-<ts>.json
     ./gradlew native-lib:benchmarkPython -Pbenchmark=true        # Python only: writes results/python-<ts>.json
     ./gradlew native-cli:benchmarkCli -Pbenchmark=true            # CLI only: writes results/cli-<ts>.json
@@ -67,6 +96,11 @@ Or directly, once the wrapper is built (`./gradlew native-lib:buildNodePackage`)
     node corpus/gen-inputs.mjs                            # generate large inputs first (idempotent)
     node runners/node/emit.mjs                            # writes results/node-<ts>.json
     node report/report.mjs results/*.json                 # renders the table
+
+`gen-inputs.mjs` reuses an existing `corpus/inputs/generated/records-large.json` so
+every runner in a comparison uses the same bytes. `BENCH_LARGE_N` is applied only when
+the file is first generated; delete `corpus/inputs/generated/records-large.json` before
+running the generator to create a corpus with a different record count.
 
 Results (`results/*.json`) are local-only and gitignored; no history is accumulated (see the
 design spec). To publish a snapshot, render a self-contained Markdown report with charts:

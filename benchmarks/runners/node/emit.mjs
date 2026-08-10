@@ -3,7 +3,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadManifest, validateResultIds } from "../../lib/manifest.mjs";
 import { gatherEnv } from "../../lib/env.mjs";
-import { loadWrapper } from "./wrapper.mjs";
+import { loadWrapper, resolveDwlibPath } from "./wrapper.mjs";
 import { runWarmAndStreaming } from "./warm-bench.mjs";
 import { runColdStartAndFirstRun } from "./coldstart.mjs";
 
@@ -24,7 +24,11 @@ export function buildResult(env, cases) {
 
 export async function main() {
   const manifest = loadManifest(CORPUS);
-  const env = gatherEnv({ runner: "node-wrapper", runtimeVersion: `node ${process.version}` });
+  const env = gatherEnv({
+    runner: "node-wrapper",
+    runtimeVersion: `node ${process.version}`,
+    dwlibPath: resolveDwlibPath(),
+  });
 
   // Cold-start / first-run first (fresh processes), then warm/streaming in-process.
   const coldRows = await runColdStartAndFirstRun(manifest);
