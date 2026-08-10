@@ -1048,11 +1048,14 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
     // failure surfaces here as handle == 0 (GraalVM @CEntryPoint default-value
     // semantics), and any handle <= 0 is never valid. Reject before this bridge
     // is linked into g_bridges or a cleanup hook is registered for it — at this
-    // point neither has happened yet, so tearing the bridge down is just
-    // deleting the napi_ref and freeing the struct.
+    // point neither has happened, so there's nothing to unlink/unhook. Still use
+    // bridge_finalize (not a manual napi_delete_reference+free) because the failed
+    // construction may have called resolve_module_callback (e.g. during eager
+    // module setup) before ultimately failing, which can have already populated
+    // bridge->results via resolver_results_track; bridge_finalize frees those
+    // tracked buffers too, so nothing is dropped on the floor.
     if (handle <= 0) {
-        napi_delete_reference(env, bridge->resolver_js);
-        free(bridge);
+        bridge_finalize(bridge);
         napi_throw_error(env, NULL, "create_engine_with_resolver returned an invalid handle");
         return NULL;
     }
