@@ -89,6 +89,17 @@ public class NativeLib {
         String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
 
         ScriptRuntime runtime = ScriptRuntime.getInstance();
+        return streamToWriteCallback(runtime, dwScript, inputs, writeCallback, ctx);
+    }
+
+    /**
+     * Runs the streaming write-callback loop shared by the legacy singleton entrypoint
+     * ({@link #runScriptCallback}) and the per-engine entrypoint
+     * ({@link #runScriptCallbackEngine}).
+     */
+    private static CCharPointer streamToWriteCallback(
+            ScriptRuntime runtime, String dwScript, String inputs,
+            NativeCallbacks.WriteCallback writeCallback, PointerBase ctx) {
         StreamSession session = runtime.runStreaming(dwScript, inputs);
 
         if (session.isError()) {
@@ -170,6 +181,22 @@ public class NativeLib {
         String inMime = CTypeConversion.toJavaString(inputMimeType);
         String inCharset = inputCharset.isNull() ? null : CTypeConversion.toJavaString(inputCharset);
 
+        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        return transformViaCallbacks(runtime, dwScript, inputs, inName, inMime, inCharset,
+                readCallback, writeCallback, ctx);
+    }
+
+    /**
+     * Runs the input-feeder + output-streaming loop shared by the legacy singleton entrypoint
+     * ({@link #runScriptInputOutputCallback}) and the per-engine entrypoint
+     * ({@link #runScriptInputOutputCallbackEngine}).
+     */
+    private static CCharPointer transformViaCallbacks(
+            ScriptRuntime runtime, String dwScript, String inputs,
+            String inName, String inMime, String inCharset,
+            NativeCallbacks.ReadCallback readCallback, NativeCallbacks.WriteCallback writeCallback,
+            PointerBase ctx) {
+
         // Create a piped input stream session for the callback-supplied input
         InputStreamSession inputSession = new InputStreamSession(inMime, inCharset);
         long inputHandle = inputSession.register();
@@ -191,7 +218,6 @@ public class NativeLib {
         feeder.start();
 
         // Execute the script and stream output via the writeCallback
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
         StreamSession session = runtime.runStreaming(dwScript, mergedInputs);
 
         if (session.isError()) {
@@ -330,239 +356,139 @@ public class NativeLib {
         return ptr;
     }
 
-    // ── Resolver-aware FFI Entrypoints ───────────────────────────────────
+    // ── Multi-Engine FFI Entrypoints (W-23692110) ────────────────────────
 
     /**
-     * Runs a DataWeave script with module resolver callback.
+     * Creates a new isolated engine (ClassLoader-only resolver) and returns its handle.
      *
-     * <p>This variant accepts a {@link NativeCallbacks.ResolveModuleCallback} to resolve
-     * external modules during script execution. The resolver is installed before script
-     * execution and remains active for the lifetime of the process.</p>
-     *
-     * @param thread GraalVM isolate thread
-     * @param script DataWeave script source (C string)
-     * @param inputsJson JSON string of inputs (C string)
-     * @param resolverCallback Callback for resolving external modules
-     * @return JSON result or error message (unmanaged C string, must be freed)
+     * @param thread the isolate thread
+     * @return a non-zero handle identifying the new engine
      */
-    @CEntryPoint(name = "run_script_with_resolver")
-    public static CCharPointer runScriptWithResolver(
-            IsolateThread thread,
-            CCharPointer script,
-            CCharPointer inputsJson,
-            NativeCallbacks.ResolveModuleCallback resolverCallback) {
-
-        try {
-            // Install resolver (idempotent if already set)
-            ScriptRuntime.setResolver(resolverCallback);
-
-            // Delegate to existing run logic
-            String dwScript = CTypeConversion.toJavaString(script);
-            String inputs = CTypeConversion.toJavaString(inputsJson);
-
-            ScriptRuntime runtime = ScriptRuntime.getInstance();
-            String result = runtime.run(dwScript, inputs);
-            return toUnmanagedCString(result);
-        } catch (Exception e) {
-            return toUnmanagedCString("{\"success\":false,\"error\":\""
-                + escapeJsonString(e.getMessage()) + "\"}");
-        }
+    @CEntryPoint(name = "create_engine")
+    public static long createEngine(IsolateThread thread) {
+        return ScriptRuntime.register(new ScriptRuntime(null));
     }
 
     /**
-     * Runs a DataWeave script with streaming output and module resolver.
+     * Creates a new isolated engine backed by a caller-supplied module resolver callback,
+     * and returns its handle.
      *
-     * <p>This variant combines streaming output via a write callback with external module
-     * resolution. The resolver is installed before script execution.</p>
-     *
-     * @param thread GraalVM isolate thread
-     * @param script DataWeave script source (C string)
-     * @param inputsJson JSON-encoded inputs map (C string), may be null
-     * @param writeCallback function pointer invoked with each output chunk
-     * @param ctx opaque context pointer forwarded to callback
-     * @param resolverCallback Callback for resolving external modules
-     * @return an unmanaged C string with JSON metadata/error (must be freed)
-     *
-     * <p><b>NOTE:</b> compiled/linked but intentionally NOT invoked from the Node binding's
-     * TypeScript layer. runStreaming() deliberately uses the resolver-less streaming entrypoint
-     * instead: streaming runs its native call on a background thread, and wiring a resolver
-     * callback there would call back into JS from a non-owning OS thread (undefined behavior /
-     * crash). Do not wire this up without first solving that cross-thread hazard.</p>
+     * @param thread           the isolate thread
+     * @param resolverCallback callback used to resolve external modules for this engine only
+     * @param ctx              opaque context pointer forwarded to every resolver invocation
+     * @return a non-zero handle identifying the new engine
      */
-    @CEntryPoint(name = "run_script_callback_with_resolver")
-    public static CCharPointer runScriptCallbackWithResolver(
+    @CEntryPoint(name = "create_engine_with_resolver")
+    public static long createEngineWithResolver(
             IsolateThread thread,
-            CCharPointer script,
-            CCharPointer inputsJson,
-            NativeCallbacks.WriteCallback writeCallback,
-            PointerBase ctx,
-            NativeCallbacks.ResolveModuleCallback resolverCallback) {
-
-        try {
-            // Install resolver
-            ScriptRuntime.setResolver(resolverCallback);
-
-            // Delegate to existing streaming logic
-            String dwScript = CTypeConversion.toJavaString(script);
-            String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
-
-            ScriptRuntime runtime = ScriptRuntime.getInstance();
-            StreamSession session = runtime.runStreaming(dwScript, inputs);
-
-            if (session.isError()) {
-                return toUnmanagedCString("{\"success\":false,\"error\":\""
-                        + escapeJsonString(session.getError()) + "\"}");
-            }
-
-            try {
-                byte[] buf = new byte[CALLBACK_BUFFER_SIZE];
-                CCharPointer nativeBuf = UnmanagedMemory.malloc(CALLBACK_BUFFER_SIZE);
-                try {
-                    int n;
-                    while ((n = session.read(buf, buf.length)) > 0) {
-                        for (int i = 0; i < n; i++) {
-                            nativeBuf.write(i, buf[i]);
-                        }
-                        int rc = writeCallback.invoke(ctx, nativeBuf, n);
-                        if (rc != 0) {
-                            return toUnmanagedCString("{\"success\":false,\"error\":\""
-                                    + "Write callback returned error: " + rc + "\"}");
-                        }
-                    }
-                } finally {
-                    UnmanagedMemory.free(nativeBuf);
-                }
-            } catch (IOException e) {
-                return toUnmanagedCString("{\"success\":false,\"error\":\""
-                        + escapeJsonString(e.getMessage()) + "\"}");
-            } finally {
-                session.closeStream();
-            }
-
-            return toUnmanagedCString("{\"success\":true"
-                    + ",\"mimeType\":\"" + session.getMimeType() + "\""
-                    + ",\"charset\":\"" + session.getCharset() + "\""
-                    + ",\"binary\":" + session.isBinary()
-                    + "}");
-        } catch (Exception e) {
-            return toUnmanagedCString("{\"success\":false,\"error\":\""
-                + escapeJsonString(e.getMessage()) + "\"}");
-        }
+            NativeCallbacks.ResolveModuleCallback resolverCallback,
+            PointerBase ctx) {
+        CallbackWeaveResourceResolver resolver =
+                new CallbackWeaveResourceResolver(resolverCallback, ctx);
+        return ScriptRuntime.register(new ScriptRuntime(resolver));
     }
 
     /**
-     * Runs a DataWeave script with streaming input/output and module resolver.
+     * Destroys an engine created by {@link #createEngine} / {@link #createEngineWithResolver}.
+     * A no-op if the handle is unknown or already destroyed.
      *
-     * <p>This variant combines streaming input via read callback, streaming output via write
-     * callback, and external module resolution. The resolver is installed before script execution.</p>
+     * @param thread the isolate thread
+     * @param handle the engine handle to remove
+     */
+    @CEntryPoint(name = "destroy_engine")
+    public static void destroyEngine(IsolateThread thread, long handle) {
+        ScriptRuntime.destroy(handle);
+    }
+
+    /**
+     * Executes a DataWeave script against a specific engine.
      *
-     * @param thread GraalVM isolate thread
-     * @param script DataWeave script source (C string)
+     * <p>If {@code handle} does not identify a live engine, returns
+     * {@code {"success":false,"error":"Unknown engine handle"}} rather than throwing.</p>
+     *
+     * @param thread     the isolate thread
+     * @param handle     the target engine's handle
+     * @param script     the DataWeave script (C string)
      * @param inputsJson JSON-encoded inputs map (C string), may be null
-     * @param inputName the binding name for the callback-supplied input (C string)
+     * @return the script execution result (unmanaged C string, must be freed)
+     */
+    @CEntryPoint(name = "run_script_engine")
+    public static CCharPointer runScriptEngine(
+            IsolateThread thread, long handle, CCharPointer script, CCharPointer inputsJson) {
+        ScriptRuntime runtime = ScriptRuntime.get(handle);
+        if (runtime == null) {
+            return toUnmanagedCString("{\"success\":false,\"error\":\"Unknown engine handle\"}");
+        }
+        String dwScript = CTypeConversion.toJavaString(script);
+        String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
+        return toUnmanagedCString(runtime.run(dwScript, inputs));
+    }
+
+    /**
+     * Executes a DataWeave script against a specific engine, streaming the result to a
+     * caller-supplied write callback. See {@link #runScriptCallback} for the callback contract.
+     *
+     * <p>If {@code handle} does not identify a live engine, returns
+     * {@code {"success":false,"error":"Unknown engine handle"}} rather than throwing.</p>
+     *
+     * @param thread        the isolate thread
+     * @param handle        the target engine's handle
+     * @param script        the DataWeave script (C string)
+     * @param inputsJson    JSON-encoded inputs map (C string), may be null
+     * @param writeCallback function pointer invoked with each output chunk; must return 0 on success
+     * @param ctx           opaque context pointer forwarded to every callback invocation
+     * @return an unmanaged C string with JSON metadata/error
+     */
+    @CEntryPoint(name = "run_script_callback_engine")
+    public static CCharPointer runScriptCallbackEngine(
+            IsolateThread thread, long handle, CCharPointer script, CCharPointer inputsJson,
+            NativeCallbacks.WriteCallback writeCallback, PointerBase ctx) {
+        ScriptRuntime runtime = ScriptRuntime.get(handle);
+        if (runtime == null) {
+            return toUnmanagedCString("{\"success\":false,\"error\":\"Unknown engine handle\"}");
+        }
+        String dwScript = CTypeConversion.toJavaString(script);
+        String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
+        return streamToWriteCallback(runtime, dwScript, inputs, writeCallback, ctx);
+    }
+
+    /**
+     * Executes a DataWeave script against a specific engine, with a callback-supplied input
+     * and callback-streamed output. See {@link #runScriptInputOutputCallback} for the callback
+     * contract.
+     *
+     * <p>If {@code handle} does not identify a live engine, returns
+     * {@code {"success":false,"error":"Unknown engine handle"}} rather than throwing.</p>
+     *
+     * @param thread        the isolate thread
+     * @param handle        the target engine's handle
+     * @param script        the DataWeave script (C string)
+     * @param inputsJson    JSON-encoded inputs map (C string), may be null
+     * @param inputName     the binding name for the callback-supplied input (C string)
      * @param inputMimeType the MIME type of the callback-supplied input (C string)
-     * @param inputCharset the charset of the callback-supplied input (C string), may be null
-     * @param readCallback function pointer invoked to read input chunks
-     * @param writeCallback function pointer invoked with output chunks
-     * @param ctx opaque context pointer forwarded to callbacks
-     * @param resolverCallback Callback for resolving external modules
-     * @return an unmanaged C string with JSON metadata/error (must be freed)
-     *
-     * <p><b>NOTE:</b> compiled/linked but intentionally NOT invoked from the Node binding's
-     * TypeScript layer. runTransform() deliberately uses the resolver-less transform entrypoint
-     * instead: transform runs its native call on a background thread, and wiring a resolver
-     * callback there would call back into JS from a non-owning OS thread (undefined behavior /
-     * crash). Do not wire this up without first solving that cross-thread hazard.</p>
+     * @param inputCharset  the charset of the callback-supplied input (C string), may be null for UTF-8
+     * @param readCallback  function pointer invoked to read the next chunk
+     * @param writeCallback function pointer invoked with each output chunk; must return 0 on success
+     * @param ctx           opaque context pointer forwarded to every callback invocation
+     * @return an unmanaged C string with JSON metadata/error
      */
-    @CEntryPoint(name = "run_script_input_output_callback_with_resolver")
-    public static CCharPointer runScriptInputOutputCallbackWithResolver(
-            IsolateThread thread,
-            CCharPointer script,
-            CCharPointer inputsJson,
-            CCharPointer inputName,
-            CCharPointer inputMimeType,
-            CCharPointer inputCharset,
-            NativeCallbacks.ReadCallback readCallback,
-            NativeCallbacks.WriteCallback writeCallback,
-            PointerBase ctx,
-            NativeCallbacks.ResolveModuleCallback resolverCallback) {
-
-        try {
-            // Install resolver
-            ScriptRuntime.setResolver(resolverCallback);
-
-            // Delegate to existing streaming I/O logic
-            String dwScript = CTypeConversion.toJavaString(script);
-            String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
-            String inName = CTypeConversion.toJavaString(inputName);
-            String inMime = CTypeConversion.toJavaString(inputMimeType);
-            String inCharset = inputCharset.isNull() ? null : CTypeConversion.toJavaString(inputCharset);
-
-            // Create a piped input stream session for the callback-supplied input
-            InputStreamSession inputSession = new InputStreamSession(inMime, inCharset);
-            long inputHandle = inputSession.register();
-
-            // Merge the stream handle into the inputs JSON
-            String streamEntry = "{\"streamHandle\":\"" + inputHandle + "\",\"mimeType\":\"" + inMime + "\""
-                    + (inCharset != null ? ",\"charset\":\"" + inCharset + "\"" : "") + "}";
-            String mergedInputs = mergeInputEntry(inputs, inName, streamEntry);
-
-            // Start background thread for reading input
-            final long readCallbackAddr = readCallback.rawValue();
-            final long ctxAddr = ctx.rawValue();
-            Thread feeder = new Thread(new InputCallbackFeeder(
-                    readCallbackAddr, ctxAddr, inputSession), "dw-input-callback-feeder");
-            feeder.setDaemon(true);
-            feeder.start();
-
-            // Execute the script and stream output via the writeCallback
-            ScriptRuntime runtime = ScriptRuntime.getInstance();
-            StreamSession session = runtime.runStreaming(dwScript, mergedInputs);
-
-            if (session.isError()) {
-                cleanupFeeder(feeder, inputHandle);
-                return toUnmanagedCString("{\"success\":false,\"error\":\""
-                        + escapeJsonString(session.getError()) + "\"}");
-            }
-
-            try {
-                byte[] buf = new byte[CALLBACK_BUFFER_SIZE];
-                CCharPointer writeBuf = UnmanagedMemory.malloc(CALLBACK_BUFFER_SIZE);
-                try {
-                    int n;
-                    while ((n = session.read(buf, buf.length)) > 0) {
-                        for (int i = 0; i < n; i++) {
-                            writeBuf.write(i, buf[i]);
-                        }
-                        int rc = writeCallback.invoke(ctx, writeBuf, n);
-                        if (rc != 0) {
-                            cleanupFeeder(feeder, inputHandle);
-                            return toUnmanagedCString("{\"success\":false,\"error\":\""
-                                    + "Write callback returned error: " + rc + "\"}");
-                        }
-                    }
-                } finally {
-                    UnmanagedMemory.free(writeBuf);
-                }
-            } catch (IOException e) {
-                cleanupFeeder(feeder, inputHandle);
-                return toUnmanagedCString("{\"success\":false,\"error\":\""
-                        + escapeJsonString(e.getMessage()) + "\"}");
-            } finally {
-                session.closeStream();
-            }
-
-            cleanupFeeder(feeder, inputHandle);
-
-            return toUnmanagedCString("{\"success\":true"
-                    + ",\"mimeType\":\"" + session.getMimeType() + "\""
-                    + ",\"charset\":\"" + session.getCharset() + "\""
-                    + ",\"binary\":" + session.isBinary()
-                    + "}");
-        } catch (Exception e) {
-            return toUnmanagedCString("{\"success\":false,\"error\":\""
-                + escapeJsonString(e.getMessage()) + "\"}");
+    @CEntryPoint(name = "run_script_input_output_callback_engine")
+    public static CCharPointer runScriptInputOutputCallbackEngine(
+            IsolateThread thread, long handle, CCharPointer script, CCharPointer inputsJson,
+            CCharPointer inputName, CCharPointer inputMimeType, CCharPointer inputCharset,
+            NativeCallbacks.ReadCallback readCallback, NativeCallbacks.WriteCallback writeCallback,
+            PointerBase ctx) {
+        ScriptRuntime runtime = ScriptRuntime.get(handle);
+        if (runtime == null) {
+            return toUnmanagedCString("{\"success\":false,\"error\":\"Unknown engine handle\"}");
         }
+        String dwScript = CTypeConversion.toJavaString(script);
+        String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
+        String inName = CTypeConversion.toJavaString(inputName);
+        String inMime = CTypeConversion.toJavaString(inputMimeType);
+        String inCharset = inputCharset.isNull() ? null : CTypeConversion.toJavaString(inputCharset);
+        return transformViaCallbacks(runtime, dwScript, inputs, inName, inMime, inCharset,
+                readCallback, writeCallback, ctx);
     }
 
 }

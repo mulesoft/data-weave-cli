@@ -580,6 +580,83 @@ class ScriptRuntimeTest {
         System.out.println("=".repeat(50));
     }
 
+    // --- Multi-engine registry (W-23692110) ---
+
+    /** In-memory WeaveResourceResolver fake — the JVM-constructable seam standing
+     *  in for CallbackWeaveResourceResolver (a CFunctionPointer, which cannot be
+     *  built in test mode). */
+    static final class MapResolver
+            implements org.mule.weave.v2.sdk.WeaveResourceResolver {
+        private final java.util.Map<String, String> modules;
+        MapResolver(java.util.Map<String, String> modules) { this.modules = modules; }
+
+        @Override
+        public scala.Option<org.mule.weave.v2.sdk.WeaveResource> resolve(
+                org.mule.weave.v2.parser.ast.variables.NameIdentifier id) {
+            String path = org.mule.weave.v2.sdk.NameIdentifierHelper.toWeaveFilePath(id, "/");
+            String key = path.startsWith("/") ? path.substring(1) : path;
+            String src = modules.get(key);
+            if (src == null) return scala.Option.empty();
+            return scala.Option.apply(org.mule.weave.v2.sdk.WeaveResource.apply(path, src));
+        }
+
+        @Override
+        public scala.collection.immutable.Seq<org.mule.weave.v2.sdk.WeaveResource> resolveAll(
+                org.mule.weave.v2.parser.ast.variables.NameIdentifier id) {
+            scala.Option<org.mule.weave.v2.sdk.WeaveResource> r = resolve(id);
+            if (r.isDefined()) {
+                return scala.collection.JavaConverters
+                        .asScalaBuffer(java.util.Collections.singletonList(r.get())).toList();
+            }
+            return (scala.collection.immutable.Seq<org.mule.weave.v2.sdk.WeaveResource>)
+                    scala.collection.immutable.Seq$.MODULE$.<org.mule.weave.v2.sdk.WeaveResource>empty();
+        }
+    }
+
+    private static final String IMPORT_A =
+            "%dw 2.0\nimport org::test::a\noutput application/json\n---\na::greet(\"X\")";
+    private static final String IMPORT_B =
+            "%dw 2.0\nimport org::test::b\noutput application/json\n---\nb::greet(\"X\")";
+
+    @Test
+    void twoEnginesResolveOnlyTheirOwnModule() {
+        ScriptRuntime engineA = new ScriptRuntime(new MapResolver(java.util.Map.of(
+                "org/test/a.dwl", "%dw 2.0\nfun greet(n: String) = \"A:\" ++ n")));
+        ScriptRuntime engineB = new ScriptRuntime(new MapResolver(java.util.Map.of(
+                "org/test/b.dwl", "%dw 2.0\nfun greet(n: String) = \"B:\" ++ n")));
+
+        long hA = ScriptRuntime.register(engineA);
+        long hB = ScriptRuntime.register(engineB);
+        assertNotNull(ScriptRuntime.get(hA));
+        assertNotNull(ScriptRuntime.get(hB));
+
+        // Each engine resolves its own module...
+        assertEquals("\"A:X\"", Result.parse(ScriptRuntime.get(hA).run(IMPORT_A)).result);
+        assertEquals("\"B:X\"", Result.parse(ScriptRuntime.get(hB).run(IMPORT_B)).result);
+
+        // ...and NOT the other's (no cross-talk).
+        assertNotNull(Result.parse(ScriptRuntime.get(hA).run(IMPORT_B)).error);
+        assertNotNull(Result.parse(ScriptRuntime.get(hB).run(IMPORT_A)).error);
+
+        // destroy removes it; a fresh handle is distinct.
+        assertTrue(ScriptRuntime.destroy(hA));
+        assertNull(ScriptRuntime.get(hA));
+        assertFalse(ScriptRuntime.destroy(hA)); // already gone
+        assertNotNull(ScriptRuntime.get(hB));
+
+        ScriptRuntime.destroy(hB);
+    }
+
+    @Test
+    void engineWithoutResolverStillRunsBuiltins() {
+        ScriptRuntime engine = new ScriptRuntime(null); // ClassLoader-only
+        long h = ScriptRuntime.register(engine);
+        String r = ScriptRuntime.get(h).run(
+                "%dw 2.0\nimport dw::core::Strings\noutput application/json\n---\nStrings::capitalize(\"hello\")");
+        assertEquals("\"Hello\"", Result.parse(r).result);
+        ScriptRuntime.destroy(h);
+    }
+
     static class Result {
         boolean success;
         String result;

@@ -20,9 +20,16 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.util.Base64;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Singleton wrapper around a {@link DWScriptingEngine} used to compile and execute DataWeave scripts.
+ * Wrapper around a {@link DWScriptingEngine} used to compile and execute DataWeave scripts.
+ *
+ * <p>Each {@link ScriptRuntime} instance owns its own engine (and therefore its own module
+ * resolver and script cache), so multiple isolated engines can coexist within one process.
+ * Instances are tracked in a handle-keyed registry so native callers can address a specific
+ * engine by an opaque {@code long} handle.</p>
  *
  * <p>Execution results are returned as a JSON string containing a base64-encoded payload plus metadata
  * (mime type, charset, and whether the result is binary). Errors are returned as a JSON string with
@@ -30,84 +37,82 @@ import java.util.Base64;
  */
 public class ScriptRuntime {
 
-    private static final ScriptRuntime INSTANCE = new ScriptRuntime();
+    // ── Handle registry ──────────────────────────────────────────────────
+    private static final ConcurrentHashMap<Long, ScriptRuntime> REGISTRY = new ConcurrentHashMap<>();
+    private static final AtomicLong NEXT_HANDLE = new AtomicLong(1);
 
-    // Static field for callback resolver, volatile for thread-safe double-checked locking
-    private static volatile CallbackWeaveResourceResolver resolver = null;
+    /** Registers a runtime and returns its non-zero handle. */
+    public static long register(ScriptRuntime runtime) {
+        long handle = NEXT_HANDLE.getAndIncrement();
+        REGISTRY.put(handle, runtime);
+        return handle;
+    }
+
+    /** Returns the runtime for a handle, or {@code null} if unknown/destroyed. */
+    public static ScriptRuntime get(long handle) {
+        return REGISTRY.get(handle);
+    }
+
+    /** Removes a runtime; returns {@code true} if one was present. */
+    public static boolean destroy(long handle) {
+        return REGISTRY.remove(handle) != null;
+    }
+
+    // ── Legacy singleton (ClassLoader-only) for Python entrypoints ────────
+    private static volatile ScriptRuntime defaultInstance = null;
 
     /**
-     * Returns the singleton instance.
+     * Returns the process-wide legacy singleton instance (ClassLoader-only resolver).
      *
      * @return the shared {@link ScriptRuntime}
      */
     public static ScriptRuntime getInstance() {
-        return INSTANCE;
+        ScriptRuntime local = defaultInstance;
+        if (local == null) {
+            synchronized (ScriptRuntime.class) {
+                local = defaultInstance;
+                if (local == null) {
+                    local = new ScriptRuntime(null);
+                    defaultInstance = local;
+                }
+            }
+        }
+        return local;
     }
+
+    // ── Per-instance engine ───────────────────────────────────────────────
+    private final DWScriptingEngine engine;
 
     /**
-     * Sets the module resolver callback and rebuilds the engine.
-     * Can only be called once per process (engine is a singleton).
-     * Thread-safe but should be called early in application lifecycle before script execution.
+     * Builds an engine whose resolver is Composite(ClassLoader-built-ins + {@code customResolver});
+     * a null {@code customResolver} yields ClassLoader-only.
      *
-     * <p><strong>IMPORTANT:</strong> The callback function must be thread-safe if using
-     * GraalVM's threadsafe function pointers, as it may be invoked from multiple threads
-     * during concurrent module resolution.</p>
-     *
-     * @param callback Thread-safe function pointer for resolving modules
+     * @param customResolver additional resolver for user-supplied modules, or {@code null}
      */
-    public static synchronized void setResolver(NativeCallbacks.ResolveModuleCallback callback) {
-        if (resolver != null) {
-            System.err.println("WARNING: Module resolver already set for this process. " +
-                              "Only one resolver configuration is supported. Ignoring new resolver.");
-            return;
-        }
-
-        if (callback.isNull()) {
-            System.err.println("WARNING: Attempted to set null resolver, ignoring.");
-            return;
-        }
-
-        resolver = new CallbackWeaveResourceResolver(callback);
-
-        // Rebuild engine with composite resolver (built-ins + callback)
-        synchronized (INSTANCE) {
-            INSTANCE.engine = DWScriptingEngine.builder()
-                    .withDWModuleComponentsFactory(createModuleComponentsFactory())
-                    .build();
-        }
-    }
-
-    /**
-     * Creates composite resolver: ClassLoader (built-ins) + Callback (user modules).
-     * If no callback resolver is set, returns ClassLoader only.
-     */
-    private static WeaveResourceResolver compositeResolver() {
-        WeaveResourceResolver classLoaderResolver = ClassLoaderWeaveResourceResolver.apply();
-
-        CallbackWeaveResourceResolver currentResolver = resolver;
-        if (currentResolver == null) {
-            return classLoaderResolver;
-        }
-
-        return CompositeWeaveResourceResolver.apply(
-            classLoaderResolver,  // Try built-ins first
-            currentResolver       // Then callback for user modules
-        );
-    }
-
-    private static DWModuleComponentsFactory createModuleComponentsFactory() {
-        return DWModuleComponentsFactory.createSimpleDWModuleComponentsFactoryBuilder()
-                .withWeaveResourceResolver(compositeResolver())
+    public ScriptRuntime(WeaveResourceResolver customResolver) {
+        this.engine = DWScriptingEngine.builder()
+                .withDWModuleComponentsFactory(createModuleComponentsFactory(customResolver))
                 .build();
     }
 
-    // Instance field for the scripting engine, access synchronized in setResolver
-    private volatile DWScriptingEngine engine;
+    /**
+     * Creates composite resolver: ClassLoader (built-ins) + custom (user modules).
+     * If no custom resolver is provided, returns ClassLoader only.
+     */
+    private static WeaveResourceResolver compositeResolver(WeaveResourceResolver customResolver) {
+        WeaveResourceResolver classLoaderResolver = ClassLoaderWeaveResourceResolver.apply();
+        if (customResolver == null) {
+            return classLoaderResolver;
+        }
+        return CompositeWeaveResourceResolver.apply(
+            classLoaderResolver,  // Try built-ins first
+            customResolver        // Then callback for user modules
+        );
+    }
 
-    private ScriptRuntime() {
-        // Initialize with ClassLoader-only resolver (no callback yet)
-        engine = DWScriptingEngine.builder()
-                .withDWModuleComponentsFactory(createModuleComponentsFactory())
+    private static DWModuleComponentsFactory createModuleComponentsFactory(WeaveResourceResolver customResolver) {
+        return DWModuleComponentsFactory.createSimpleDWModuleComponentsFactoryBuilder()
+                .withWeaveResourceResolver(compositeResolver(customResolver))
                 .build();
     }
 
