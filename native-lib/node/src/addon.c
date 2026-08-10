@@ -106,13 +106,18 @@ typedef struct engine_bridge {
 } engine_bridge_t;
 static engine_bridge_t* g_bridges = NULL;  // linked list, guarded by g_mutex
 
-static void resolver_results_track(engine_bridge_t* b, char* buf) {
-    if (b == NULL || buf == NULL) return;
+// Returns true if the buffer is now tracked (or there was nothing to track).
+// Returns false only when a buffer was supplied but the tracking node could
+// not be allocated — in that case the caller owns `buf` again and MUST free
+// it itself, since it will never be reachable from b->results.
+static bool resolver_results_track(engine_bridge_t* b, char* buf) {
+    if (b == NULL || buf == NULL) return true;
     resolver_result_node_t* node = (resolver_result_node_t*)malloc(sizeof(resolver_result_node_t));
-    if (node == NULL) return;  // Leak the buffer rather than crash; best-effort tracking.
+    if (node == NULL) return false;  // OOM: caller must free buf to avoid leaking it untracked.
     node->buf = buf;
     node->next = b->results;
     b->results = node;
+    return true;
 }
 
 static void resolver_results_free_all(engine_bridge_t* b) {
@@ -986,7 +991,13 @@ static char* resolve_module_callback(void* thread, void* ctx, const char* module
     }
     // null/undefined/other → not found (result_source stays NULL)
 
-    resolver_results_track(bridge, result_source);
+    if (!resolver_results_track(bridge, result_source)) {
+        // Tracking-node allocation failed (OOM): result_source would otherwise
+        // be an untracked buffer that nothing ever frees. Free it here and
+        // report "unresolved" instead of leaking it.
+        free(result_source);
+        return NULL;
+    }
     return result_source;  // Native copies this immediately; we free the original after the call.
 }
 
@@ -1001,6 +1012,12 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
     if (fn_attach_thread(g_isolate, &thread) != 0) { napi_throw_error(env, NULL, "Failed to attach thread"); return NULL; }
     long long handle = fn_create_engine(thread);
     fn_detach_thread(thread);
+    // A GraalVM @CEntryPoint that throws on the Java side returns the return
+    // type's default value instead of propagating the exception — 0 for a
+    // long long. The real handle registry only ever hands out handles >= 1, so
+    // any handle <= 0 means construction failed; never hand that back to JS as
+    // if it were usable.
+    if (handle <= 0) { napi_throw_error(env, NULL, "create_engine returned an invalid handle"); return NULL; }
     napi_value out; napi_create_int64(env, (int64_t)handle, &out); return out;
 }
 
@@ -1026,6 +1043,19 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
     }
     long long handle = fn_create_engine_with_resolver(thread, resolve_module_callback, (void*)bridge);
     fn_detach_thread(thread);
+
+    // Same invalid-handle guard as napi_create_engine: a Java-side construction
+    // failure surfaces here as handle == 0 (GraalVM @CEntryPoint default-value
+    // semantics), and any handle <= 0 is never valid. Reject before this bridge
+    // is linked into g_bridges or a cleanup hook is registered for it — at this
+    // point neither has happened yet, so tearing the bridge down is just
+    // deleting the napi_ref and freeing the struct.
+    if (handle <= 0) {
+        napi_delete_reference(env, bridge->resolver_js);
+        free(bridge);
+        napi_throw_error(env, NULL, "create_engine_with_resolver returned an invalid handle");
+        return NULL;
+    }
 
     bridge->handle = handle;
     uv_mutex_lock(&g_mutex); bridge->next = g_bridges; g_bridges = bridge; uv_mutex_unlock(&g_mutex);
