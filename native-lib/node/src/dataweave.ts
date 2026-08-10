@@ -24,23 +24,10 @@ export interface DataWeaveOptions {
    *
    * MUST be synchronous (cannot return Promise).
    *
-   * Note: the native layer installs at most one resolver per process
-   * lifetime, bound on the first resolver-backed {@link DataWeave.run} call
-   * (not on {@link DataWeave.initialize}, which only loads/ref-counts the
-   * native library) and to the thread (main thread or `worker_threads`
-   * Worker) that made that first call. If you construct multiple `DataWeave`
-   * instances with different `resolveModule` callbacks in the same process,
-   * whichever instance's `run()` executes first wins; later instances
-   * silently reuse that resolver instead of their own. If a later instance's
-   * `run()` executes on a *different* thread, its resolver is not invoked at
-   * all and custom module paths resolve as "not found" (see
-   * docs/external-modules.md#multiple-resolvers-in-one-process).
-   *
-   * Concurrency warning: calling a resolver-backed `run()` concurrently from
-   * more than one Worker is not just unsupported — it is memory-unsafe (see
-   * docs/external-modules.md, Worker threads section). Restrict
-   * resolver-backed execution to a single thread, or serialize calls across
-   * Workers.
+   * Each DataWeave instance owns an independent native engine, so multiple
+   * instances with different resolvers coexist in one process with no
+   * cross-talk. Streaming/transform still resolve only built-in modules for a
+   * resolver-backed engine (custom modules fail closed); see external-modules.md.
    *
    * Security: the resolver runs with full process permissions and no
    * sandboxing (same trust model as the CLI resolving `.dwl` files from
@@ -64,6 +51,7 @@ export class DataWeave {
   private readonly libPath: string;
   private readonly resolveModule?: ModuleResolver;
   private initialized = false;
+  private engineHandle: number | null = null;
 
   /**
    * @param options - Configuration options or a legacy libPath string.
@@ -91,6 +79,9 @@ export class DataWeave {
     if (this.initialized) return;
     try {
       ffi.initialize(this.libPath, this.addonPath);
+      this.engineHandle = this.resolveModule
+        ? ffi.createEngineWithResolver(this.resolveModule)
+        : ffi.createEngine();
     } catch (e: unknown) {
       throw new DataWeaveError(`Failed to initialize: ${e instanceof Error ? e.message : e}`);
     }
@@ -103,6 +94,10 @@ export class DataWeave {
    */
   cleanup(): void {
     if (!this.initialized) return;
+    if (this.engineHandle !== null) {
+      ffi.destroyEngine(this.engineHandle);
+      this.engineHandle = null;
+    }
     ffi.cleanup();
     this.initialized = false;
   }
@@ -122,14 +117,7 @@ export class DataWeave {
     this.ensureInitialized();
     const inputsJson = buildInputsJson(inputs ?? {});
 
-    let raw: string;
-    if (this.resolveModule) {
-      // Use resolver-aware entrypoint
-      raw = ffi.runWithResolver(script, inputsJson, "application/json", this.resolveModule);
-    } else {
-      // Use standard entrypoint (backward compatible)
-      raw = ffi.runScript(script, inputsJson);
-    }
+    const raw = ffi.runScriptEngine(this.engineHandle!, script, inputsJson);
 
     const result = parseNativeResponse(raw);
 
@@ -153,7 +141,9 @@ export class DataWeave {
   async *runStreaming(script: string, inputs?: Inputs): AsyncGenerator<Buffer, StreamingResult, undefined> {
     this.ensureInitialized();
     const inputsJson = buildInputsJson(inputs ?? {});
-    return yield* streamFromNative((chunkCb) => ffi.runScriptStreaming(script, inputsJson, chunkCb));
+    return yield* streamFromNative((chunkCb) =>
+      ffi.runScriptStreamingEngine(this.engineHandle!, script, inputsJson, chunkCb)
+    );
   }
 
   /**
@@ -188,7 +178,16 @@ export class DataWeave {
     const readCb = await createChunkReader(input);
 
     return yield* streamFromNative((writeCb) =>
-      ffi.runScriptTransform(script, inputsJson, inputName, inputMimeType, inputCharset, readCb, writeCb)
+      ffi.runScriptTransformEngine(
+        this.engineHandle!,
+        script,
+        inputsJson,
+        inputName,
+        inputMimeType,
+        inputCharset,
+        readCb,
+        writeCb
+      )
     );
   }
 

@@ -6,10 +6,10 @@ import { modulesFromMap } from '../../src/resolver';
 // than the module-level singleton) so each can configure its own resolver.
 // `cleanup()` above only releases the *singleton* (`globalInstance`), which
 // nothing in this file ever creates -- so without this tracking, every
-// explicit instance's native library reference (and the shared addon-level
-// ref-count, see addon.c's g_ref_count) would leak for the lifetime of the
-// test process. Track every instance created in this file and release them
-// all in afterAll.
+// explicit instance's native library reference (and its own engine handle,
+// see addon.c's create_engine/destroy_engine) would leak for the lifetime of
+// the test process. Track every instance created in this file and release
+// them all in afterAll.
 const instances: DataWeave[] = [];
 function trackedDataWeave(...args: ConstructorParameters<typeof DataWeave>): DataWeave {
   const dw = new DataWeave(...args);
@@ -24,24 +24,12 @@ afterAll(() => {
   cleanup();
 });
 
-// ScriptRuntime installs at most one resolver for the whole process lifetime
-// (see ScriptRuntime.setResolver()): whichever DataWeave instance's resolver
-// gets installed first "wins", and every later DataWeave instance in this
-// file — regardless of its own resolveModule map — silently reuses it. Since
-// vitest runs the `it` blocks in this file sequentially in the same process,
-// that's always this first module-map, so it must contain every module path
-// any test below needs to resolve for the first time (including the
-// cross-thread regression test's two never-before-resolved paths).
-const SHARED_RESOLVER_MODULES: Record<string, string> = {
-  'org/test/lib.dwl': '%dw 2.0\nfun greet(n: String) = "Hello " ++ n',
-  'org/test/resolverGuardInstall.dwl': '%dw 2.0\nfun greet(n: String) = "Hello " ++ n',
-  'org/test/resolverGuardStreamed.dwl': '%dw 2.0\nfun greet(n: String) = "Hello " ++ n',
-};
-
 describe('DataWeave with resolver', () => {
   it('resolves imported module from map', () => {
     const dw = trackedDataWeave({
-      resolveModule: modulesFromMap(SHARED_RESOLVER_MODULES),
+      resolveModule: modulesFromMap({
+        'org/test/lib.dwl': '%dw 2.0\nfun greet(n: String) = "Hello " ++ n',
+      }),
     });
     dw.initialize();
 
@@ -106,46 +94,27 @@ describe('DataWeave with resolver', () => {
     expect(JSON.parse(result.getString()!)).toBe("Hello");
   });
 
-  // Regression test for the cross-thread resolver hazard: ScriptRuntime's engine
-  // is a process-wide singleton, so once any .run() call installs a resolver on
-  // it, that same composite resolver is used by ALL later execution paths --
-  // including runStreaming()/runTransform(), whose native call executes on a
-  // background uv_thread (see addon.c's streaming_thread_fn), not the JS thread
-  // that registered the resolver. Before the thread-identity guard in addon.c's
-  // resolve_module_callback, a streamed script importing a non-built-in module
-  // would trigger a napi call from that background thread -- undefined behavior,
-  // typically a crash of the whole process. After the guard, the callback fails
-  // closed (reports "not found" instead of calling back into JS), so the script
-  // fails cleanly with a compile error and the process survives.
-  it('runStreaming fails cleanly (does not crash) for a custom module on the shared singleton engine', async () => {
-    // Once a module name has been resolved anywhere in the process, the
-    // DataWeave compiler caches it and won't call back into the resolver for
-    // that same name again — so the install script and the streaming script
-    // below import two module paths that no earlier test in this file has
-    // imported yet (both pre-registered in SHARED_RESOLVER_MODULES above,
-    // since only the first-installed resolver's map is ever consulted).
+  // Regression test for the cross-thread resolver hazard: each DataWeave
+  // instance now owns its own native engine (see engine_bridge_t in addon.c),
+  // but a resolver-backed engine's runStreaming()/runTransform() still
+  // executes the native call on a background uv_thread (see addon.c's
+  // streaming_thread_fn/transform_thread_fn), not the JS thread that created
+  // the engine and its resolver bridge. resolve_module_callback detects that
+  // thread-identity mismatch and fails closed (reports "not found" instead of
+  // calling back into JS) rather than making an unsafe cross-thread napi
+  // call, so the script fails cleanly with a compile error and the process
+  // survives.
+  it('runStreaming fails cleanly for a custom module on its own resolver-backed engine', async () => {
     const dw = trackedDataWeave({
-      resolveModule: modulesFromMap(SHARED_RESOLVER_MODULES),
+      resolveModule: modulesFromMap({
+        'org/test/resolverGuardStreamed.dwl': '%dw 2.0\nfun greet(n: String) = "Hello " ++ n',
+      }),
     });
     dw.initialize();
 
-    // Install (or confirm already-installed) resolver on the shared singleton
-    // engine via a synchronous run() call. Per ScriptRuntime.setResolver(), only
-    // the first resolver registered for the process is ever used, so this is
-    // safe to call even if an earlier test in this file already installed one.
-    const installResult = dw.run(`
-      %dw 2.0
-      import org::test::resolverGuardInstall
-      output application/json
-      ---
-      resolverGuardInstall::greet("Installer")
-    `);
-    expect(installResult.success).toBe(true);
-
-    // Now stream a script that imports a DIFFERENT non-built-in module, never
-    // resolved before in this process. The singleton engine's composite
-    // resolver (ClassLoader + Callback) will miss in the ClassLoader half (not
-    // a built-in) and fall through to the Callback half, invoking
+    // Stream a script that imports a non-built-in module. This engine's
+    // composite resolver (ClassLoader + Callback) misses in the ClassLoader
+    // half (not a built-in) and falls through to the Callback half, invoking
     // resolve_module_callback from runStreaming's background thread.
     const chunks: Buffer[] = [];
     const gen = dw.runStreaming(`
