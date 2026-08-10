@@ -657,6 +657,31 @@ class ScriptRuntimeTest {
         ScriptRuntime.destroy(h);
     }
 
+    /**
+     * Locks in the hard contract for the per-engine FFI entrypoints
+     * ({@code run_script_engine}, {@code run_script_callback_engine},
+     * {@code run_script_input_output_callback_engine} in {@link NativeLib}): running a
+     * script against an unknown or already-destroyed engine handle must return exactly
+     * {@code {"success":false,"error":"Unknown engine handle"}} rather than throwing.
+     *
+     * <p>The {@code @CEntryPoint} methods themselves cannot be invoked from a plain JVM
+     * unit test — they take GraalVM word types ({@code IsolateThread}, {@code CCharPointer})
+     * whose boxing infrastructure is only initialized inside a compiled native image (calling
+     * e.g. {@code WordFactory.nullPointer()} from a hosted JVM test throws
+     * {@code NullPointerException} from {@code WordBoxFactory}). All three entrypoints funnel
+     * the unknown-handle case through the same {@code UNKNOWN_ENGINE_HANDLE_JSON} constant, so
+     * asserting on that constant — combined with {@link #twoEnginesResolveOnlyTheirOwnModule}
+     * proving {@link ScriptRuntime#get} returns {@code null} for an unregistered/destroyed
+     * handle — verifies the full contract without needing the native runtime.</p>
+     */
+    @Test
+    void unknownEngineHandleProducesExactErrorJson() {
+        long unregisteredHandle = Long.MAX_VALUE;
+        assertNull(ScriptRuntime.get(unregisteredHandle));
+        assertEquals("{\"success\":false,\"error\":\"Unknown engine handle\"}",
+                NativeLib.UNKNOWN_ENGINE_HANDLE_JSON);
+    }
+
     static class Result {
         boolean success;
         String result;

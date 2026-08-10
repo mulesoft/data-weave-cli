@@ -20,6 +20,17 @@ import java.nio.charset.StandardCharsets;
 public class NativeLib {
 
     /**
+     * The exact JSON error payload returned by the per-engine entrypoints
+     * ({@link #runScriptEngine}, {@link #runScriptCallbackEngine},
+     * {@link #runScriptInputOutputCallbackEngine}) when {@code handle} does not identify a
+     * live engine. Package-visible (rather than embedded as a string literal at each call
+     * site) so the exact contract can be asserted directly from a JVM unit test, since the
+     * {@code @CEntryPoint} methods themselves rely on GraalVM word types that only resolve
+     * inside a compiled native image.
+     */
+    static final String UNKNOWN_ENGINE_HANDLE_JSON = "{\"success\":false,\"error\":\"Unknown engine handle\"}";
+
+    /**
      * Native method that executes a DataWeave script with inputs and returns the result.
      * Can be called from Python via FFI.
      *
@@ -417,7 +428,7 @@ public class NativeLib {
             IsolateThread thread, long handle, CCharPointer script, CCharPointer inputsJson) {
         ScriptRuntime runtime = ScriptRuntime.get(handle);
         if (runtime == null) {
-            return toUnmanagedCString("{\"success\":false,\"error\":\"Unknown engine handle\"}");
+            return toUnmanagedCString(UNKNOWN_ENGINE_HANDLE_JSON);
         }
         String dwScript = CTypeConversion.toJavaString(script);
         String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
@@ -445,7 +456,7 @@ public class NativeLib {
             NativeCallbacks.WriteCallback writeCallback, PointerBase ctx) {
         ScriptRuntime runtime = ScriptRuntime.get(handle);
         if (runtime == null) {
-            return toUnmanagedCString("{\"success\":false,\"error\":\"Unknown engine handle\"}");
+            return toUnmanagedCString(UNKNOWN_ENGINE_HANDLE_JSON);
         }
         String dwScript = CTypeConversion.toJavaString(script);
         String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
@@ -480,7 +491,7 @@ public class NativeLib {
             PointerBase ctx) {
         ScriptRuntime runtime = ScriptRuntime.get(handle);
         if (runtime == null) {
-            return toUnmanagedCString("{\"success\":false,\"error\":\"Unknown engine handle\"}");
+            return toUnmanagedCString(UNKNOWN_ENGINE_HANDLE_JSON);
         }
         String dwScript = CTypeConversion.toJavaString(script);
         String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
