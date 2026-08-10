@@ -97,6 +97,11 @@ Or directly, once the wrapper is built (`./gradlew native-lib:buildNodePackage`)
     node runners/node/emit.mjs                            # writes results/node-<ts>.json
     node report/report.mjs results/*.json                 # renders the table
 
+`gen-inputs.mjs` reuses an existing `corpus/inputs/generated/records-large.json` so
+every runner in a comparison uses the same bytes. `BENCH_LARGE_N` is applied only when
+the file is first generated; delete `corpus/inputs/generated/records-large.json` before
+running the generator to create a corpus with a different record count.
+
 Results (`results/*.json`) are local-only and gitignored; no history is accumulated (see the
 design spec). To publish a snapshot, render a self-contained Markdown report with charts:
 
