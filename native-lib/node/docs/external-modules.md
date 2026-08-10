@@ -26,7 +26,7 @@ console.log(result.getString());  // "Hello World"
 
 **Important:** The module-level convenience functions (`run()`, `runStreaming()`, `runTransform()` exported directly from `dataweave-native`) operate on a lazily-initialized singleton that takes no constructor options and therefore cannot be configured with `resolveModule` — you **must** construct your own `DataWeave` instance to use external modules, as shown above.
 
-Additionally, external module resolution is currently supported only through `.run()` (the synchronous API). `.runStreaming()` and `.runTransform()` do not yet support external modules and will only have access to built-in modules.
+Additionally, external module resolution is currently supported only through `.run()` (the synchronous API). For a resolver-backed engine, `.runStreaming()` and `.runTransform()` execute on a background thread and cannot invoke that engine's `resolveModule` callback — they always resolve only built-in modules, and any custom-module import fails closed (module "not found") rather than crashing or hanging.
 
 ## Resolver Factories
 
@@ -113,7 +113,7 @@ Best for: Layered resolution with fallbacks (overrides, shared libraries, vendor
 
 ## How It Works
 
-- **One resolver per process**: The native engine maintains a single resolver per process lifetime. Only the first resolver registered is used; subsequent `DataWeave` instances with different resolvers will silently reuse the first one.
+- **Independent engines**: each `DataWeave` instance owns its own native engine, resolver, and script cache; instances with different resolvers coexist with no cross-talk.
 - **Resolution at compile time**: The resolver is invoked during script compilation, not per execution.
 - **Synchronous resolution**: The resolver callback must be synchronous (no `async`/`await`, no Promise return).
 - **Built-in modules**: Built-in modules (CompositeResolver) are always available and work alongside custom resolvers.
@@ -173,9 +173,12 @@ if (!result.success) {
 
 **Debugging:** By default, a resolver failure logs only a fixed, content-free diagnostic line to stderr — the actual exception message and stack are suppressed, since they can carry resolver-controlled data (module source, credentials, filesystem paths). To see the detailed message and stack for diagnosing a failing resolver (e.g., directory does not exist, file unreadable due to permissions), set `DATAWEAVE_RESOLVER_DEBUG=1` in the process environment before running. Only enable this in a trusted debugging context, since the detailed output may expose sensitive resolver-controlled data.
 
-### Multiple Resolvers in One Process
+### Multiple Independent Engines
 
-If you construct multiple `DataWeave` instances with different resolvers in the same process:
+Each `DataWeave` instance owns its own native engine, resolver, and script
+cache. You can construct as many resolver-backed instances as you want in the
+same process — each one only ever resolves its own modules, with no
+cross-talk between instances:
 
 ```typescript
 const dw1 = new DataWeave({
@@ -186,57 +189,42 @@ dw1.initialize();
 const dw2 = new DataWeave({
   resolveModule: modulesFromMap({ 'b.dwl': '...' }),
 });
-dw2.initialize();  // Only loads/ref-counts the native library — does NOT register a resolver
+dw2.initialize();
 
-dw1.run('...');    // First resolver-backed run() in the process: installs dw1's resolver
-dw2.run('...');    // Logs warning, silently reuses dw1's resolver instead of dw2's
+dw1.run('...');  // Only 'a.dwl' is available to dw1
+dw2.run('...');  // Only 'b.dwl' is available to dw2 — dw1's modules are not visible here
 
-// Both dw1 and dw2 use dw1's resolver (only 'a.dwl' is available)
+dw1.cleanup();
+dw2.cleanup();
 ```
 
-**The rule is "first resolver-backed `run()` wins," not "first `initialize()` wins."**
-`initialize()` only loads and ref-counts the native library; the resolver
-itself is registered lazily, on whichever instance's `run()` executes first
-with a resolver configured. If `dw2.run()` happens to execute before
-`dw1.run()` — even though `dw1.initialize()` ran first — `dw2`'s resolver
-wins instead.
+**`cleanup()` is required for every instance.** Each `DataWeave` instance's
+engine is tracked in a native registry keyed by handle. `cleanup()` destroys
+the engine and removes its registry entry; an instance that is never
+`cleanup()`'d keeps its engine (and the JS `resolveModule` closure it holds a
+reference to) alive for the lifetime of the process, even if the `DataWeave`
+object itself is garbage-collected on the JS side. Always `cleanup()` in a
+`finally` block, as shown throughout this document.
 
-**Workaround:** Use `composeResolvers()` to combine all modules into a single resolver:
+`composeResolvers()` is not a workaround for any resolver-sharing limitation
+— each engine already has its own resolver. It's simply a layering tool for
+building one resolver out of several fallback sources (overrides, then a
+shared directory, then vendor JARs); see [composeResolvers](#composeresolvers)
+above.
 
-```typescript
-const resolver = composeResolvers(
-  modulesFromMap({ 'a.dwl': '...' }),
-  modulesFromMap({ 'b.dwl': '...' })
-);
-
-const dw1 = new DataWeave({ resolveModule: resolver });
-dw1.initialize();
-
-const dw2 = new DataWeave({ resolveModule: resolver });
-dw2.initialize();  // Both use the same resolver
-```
-
-**Worker threads:** the same one-resolver-per-process rule applies across
-`worker_threads` Workers, not just across instances on one thread. The
-resolver callback is additionally bound to the specific thread that first
-registered it. A resolver-backed `DataWeave` constructed and initialized on a
-Worker other than the one that registered the process's resolver will not
-have its `resolveModule` invoked at all — custom module paths resolve as "not
-found" (falling back to built-ins only) rather than crashing. There is
-currently no supported way to run distinct custom-module resolvers on
-different Workers in the same process; either resolve modules on the thread
-that owns the process's resolver, or avoid resolver-backed instances in
-worker pools.
-
-**Concurrent resolver-backed runs across Workers are unsupported and
-memory-unsafe.** Beyond the "not found" fallback described above, calling a
-resolver-backed `run()` concurrently from more than one Worker is not just
-unsupported behavior — it is a memory-safety hazard. The native layer tracks
-in-flight resolver results in unsynchronized, process-global state, and one
-Worker's cleanup can free memory another Worker's concurrent call is still
-using. Restrict resolver-backed execution to a single thread (or fully
-serialize resolver-backed calls across Workers) until a future release
-isolates per-instance engine state.
+**Worker threads and thread ownership:** each resolver-backed engine is bound
+to the thread that created it (the thread that called `new DataWeave(...)`
+and `initialize()` with a `resolveModule` configured). Only that thread's
+synchronous `run()` calls can invoke the engine's `resolveModule` callback.
+`runStreaming()` and `runTransform()` execute on a background thread even
+when called from the owner thread, so they can never invoke that engine's
+resolver — nor can `run()` calls made from any other `worker_threads` Worker.
+In all of these cases the engine fails closed: custom module paths resolve as
+"not found" (falling back to built-ins only) rather than crashing or hanging.
+There is no supported way to invoke one engine's resolver from a thread other
+than the one that created it; if you need custom modules on multiple
+Workers, construct and use a separate resolver-backed `DataWeave` instance
+on each Worker.
 
 ## Security / Trust Model
 

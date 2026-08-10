@@ -453,16 +453,16 @@ The Node.js binding uses **N-API** (Node-API) for C addon integration:
 
 **Important:** Do not share a single `DataWeave` instance across Worker threads. Use the module-level functions (which use a global singleton) or create separate instances per thread.
 
-**Custom module resolvers and Worker threads:** the native layer installs at
-most one resolver callback for the whole process lifetime, and it is bound to
-the Worker (main thread or a `worker_threads` Worker) that registered it
-first — see [External Modules: Multiple Resolvers](docs/external-modules.md#multiple-resolvers-in-one-process).
+**Custom module resolvers and Worker threads:** each resolver-backed
+`DataWeave` instance's native engine is bound to the thread that created it
+(main thread or a `worker_threads` Worker) — see
+[External Modules: Multiple Independent Engines](docs/external-modules.md#multiple-independent-engines).
 Custom-module resolution attempted from any *other* thread is not routed to
-that thread's own `resolveModule` callback; it silently falls back to
-built-in modules only (custom module paths resolve as "not found" rather than
-crashing or hanging). If you need per-Worker custom modules, resolve them on
-the thread that first constructs a resolver-backed `DataWeave` instance, or
-avoid resolver-backed instances in worker pools altogether.
+that engine's `resolveModule` callback; it silently falls back to built-in
+modules only (custom module paths resolve as "not found" rather than
+crashing or hanging). If you need custom modules on multiple Workers,
+construct and use a separate resolver-backed `DataWeave` instance on each
+Worker, created on that Worker itself.
 
 ## Platform Support
 
