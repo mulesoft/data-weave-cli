@@ -63,8 +63,16 @@ public class CallbackWeaveResourceResolver implements WeaveResourceResolver {
                 );
             }
         } catch (Exception e) {
-            // Log and return empty on any error
-            System.err.println("Error resolving module " + path + ": " + e.getMessage());
+            // Log and return empty on any error. Mirrors the C-side resolver bridge's
+            // policy (see resolve_module_callback in addon.c): the exception message
+            // may carry resolver-controlled data (module source, file paths,
+            // credentials), so suppress it by default and only include it when the
+            // caller has opted in via DATAWEAVE_RESOLVER_DEBUG=1.
+            if ("1".equals(System.getenv("DATAWEAVE_RESOLVER_DEBUG"))) {
+                System.err.println("Error resolving module " + path + ": " + e.getMessage());
+            } else {
+                System.err.println("Error resolving module: " + path);
+            }
             return Option.empty();
         }
     }

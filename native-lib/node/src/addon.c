@@ -250,7 +250,10 @@ static void init_thread_fn(void* arg) {
   uv_dlsym(&g_lib, "run_script_callback", (void**)&fn_run_script_callback);
   uv_dlsym(&g_lib, "run_script_input_output_callback", (void**)&fn_run_script_input_output_callback);
 
-  // Load per-engine entrypoints (optional - newer symbols)
+  // Load per-engine entrypoints. Every initialize() call creates an engine via
+  // create_engine/create_engine_with_resolver (see dataweave.ts), so these are
+  // load-time required, not optional, even though they are newer than the
+  // legacy singleton symbols above.
   uv_dlsym(&g_lib, "create_engine", (void**)&fn_create_engine);
   uv_dlsym(&g_lib, "create_engine_with_resolver", (void**)&fn_create_engine_with_resolver);
   uv_dlsym(&g_lib, "destroy_engine", (void**)&fn_destroy_engine);
@@ -260,6 +263,21 @@ static void init_thread_fn(void* arg) {
 
   if (!fn_create_isolate || !fn_run_script || !fn_free_cstring) {
     snprintf(args->error, sizeof(args->error), "Missing required symbols in library");
+    args->result = -2;
+    return;
+  }
+
+  // Fail fast, with a clear message, if the loaded dwlib predates the
+  // per-engine ABI (W-23692110). Without this check, the library would load
+  // "successfully" here and every initialize() call would still fail later
+  // deep inside createEngine()/createEngineWithResolver() with a confusing
+  // "not available in native library" error instead of this one.
+  if (!fn_create_engine || !fn_create_engine_with_resolver || !fn_destroy_engine ||
+      !fn_run_script_engine || !fn_run_script_callback_engine ||
+      !fn_run_script_input_output_callback_engine) {
+    snprintf(args->error, sizeof(args->error),
+             "dwlib is missing required per-engine symbols (expected in dwlib "
+             "built with W-23692110 or later) - rebuild/upgrade the native library");
     args->result = -2;
     return;
   }
