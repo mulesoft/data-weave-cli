@@ -242,23 +242,6 @@ tasks.register('nodeTest', Exec) {
   }
 }
 
-tasks.register('benchmark', Exec) {
-  // Opt-in only: skipped unless -Pbenchmark=true. Never part of build/test.
-  // Standalone Node-only convenience: emit + render the report by itself.
-  // For the cross-runner comparison use the root :benchmarkCompare task.
-  onlyIf { project.findProperty('benchmark')?.toString()?.toBoolean() == true }
-
-  dependsOn tasks.named('buildNodePackage')
-  workingDir("${rootDir}/benchmarks")
-
-  def script = 'node corpus/gen-inputs.mjs && node runners/node/emit.mjs && node report/report.mjs results/*.json'
-  if (System.getProperty('os.name').toLowerCase().contains('windows')) {
-    commandLine('cmd', '/c', script)
-  } else {
-    commandLine('bash', '-c', script)
-  }
-}
-
 // The Node runner as an aggregator-registered runner: emits its result file but
 // does NOT render the report (the root :benchmarkCompare renders once over all
 // runners). Tagged `benchmarkRunner` so :benchmarkCompare discovers it automatically.
@@ -266,7 +249,9 @@ tasks.register('benchmarkNode', Exec) {
   onlyIf { project.findProperty('benchmark')?.toString()?.toBoolean() == true }
   ext.benchmarkRunner = true
 
-  dependsOn tasks.named('buildNodePackage')
+  if (!System.getenv('DW_BENCH_NODE_PACKAGE')) {
+    dependsOn tasks.named('buildNodePackage')
+  }
   workingDir("${rootDir}/benchmarks")
 
   // Generate the shared input (idempotent, deterministic) then emit; no report here.
@@ -287,7 +272,9 @@ tasks.register('benchmarkPython', Exec) {
   onlyIf { project.findProperty('benchmark')?.toString()?.toBoolean() == true }
   ext.benchmarkRunner = true
 
-  dependsOn tasks.named('stagePythonNativeLib')
+  if (!System.getenv('DW_BENCH_PY_SITE')) {
+    dependsOn tasks.named('stagePythonNativeLib')
+  }
   workingDir("${rootDir}/benchmarks")
 
   // Generate the shared input via the Node generator (idempotent, deterministic,
@@ -318,7 +305,7 @@ tasks.register('benchmarkJsUnitTest', Exec) {
   }
   workingDir("${rootDir}/benchmarks")
   def files = 'lib/stats.test.mjs lib/manifest.test.mjs lib/env.test.mjs ' +
-    'report/report.test.mjs runners/node/emit.test.mjs ' +
+    'report/report.test.mjs runners/node/emit.test.mjs runners/node/wrapper.test.mjs ' +
     'runners/cli/locate.test.mjs runners/cli/emit.test.mjs'
   def script = 'node --test ' + files
   if (System.getProperty('os.name').toLowerCase().contains('windows')) {

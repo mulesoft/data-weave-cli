@@ -24,12 +24,15 @@ function readCommit() {
   }
 }
 
-// Best-effort identity of the staged dwlib: first 8 hex of a sha256 over
+// Best-effort identity of the selected dwlib: first 8 hex of a sha256 over
 // (size + first 64KB). Cheap, stable, and enough to detect a lib swap.
-function readDwlibBuildId() {
-  const base = join(REPO_ROOT, "native-lib", "node", "native");
-  for (const ext of [".dylib", ".so", ".dll"]) {
-    const p = join(base, `dwlib${ext}`);
+function readDwlibBuildId(dwlibPath) {
+  const paths = dwlibPath && existsSync(dwlibPath)
+    ? [dwlibPath]
+    : [".dylib", ".so", ".dll"].map((ext) => {
+      return join(REPO_ROOT, "native-lib", "node", "native", `dwlib${ext}`);
+    });
+  for (const p of paths) {
     if (existsSync(p)) {
       const buf = readFileSync(p).subarray(0, 65536);
       const size = statSync(p).size;
@@ -40,9 +43,9 @@ function readDwlibBuildId() {
 }
 
 /**
- * @param {{runner:string, runtimeVersion:string}} opts
+ * @param {{runner:string, runtimeVersion:string, dwlibPath?:string}} opts
  */
-export function gatherEnv({ runner, runtimeVersion }) {
+export function gatherEnv({ runner, runtimeVersion, dwlibPath }) {
   const cpus = os.cpus();
   return {
     runner,
@@ -51,6 +54,6 @@ export function gatherEnv({ runner, runtimeVersion }) {
     runtimeVersion,
     weaveVersion: readWeaveVersion(),
     commit: readCommit(),
-    dwlibBuildId: readDwlibBuildId(),
+    dwlibBuildId: readDwlibBuildId(dwlibPath),
   };
 }

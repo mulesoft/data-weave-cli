@@ -45,9 +45,7 @@ and `JAVA_HOME` set to it (see the root README / `CLAUDE.md`). The pinned build 
 `graalvmVersion` in `gradle.properties`. The **engine runner alone** drives the JVM
 `DataWeaveScriptingEngine` and runs on any JDK — no native image required.
 
-The **CLI runner** requires the bench-enabled binary
-(`./gradlew native-cli:nativeCompile -Pbenchmark=true`); set `DW_BENCH_BIN` to
-point at a prebuilt one. Like the library runners it needs the GraalVM toolchain.
+`DW_BENCH_BIN` points to a prebuilt benchmark-enabled `dw` binary; the CLI runner does not build it when the override is supplied.
 
 ## Running
 
@@ -55,9 +53,36 @@ The one-shot cross-runner comparison — runs **every** registered runner and pr
 
     ./gradlew benchmarkCompare -Pbenchmark=true          # all runners + comparison report
 
+### Running against pre-built wrapper artifacts
+
+The Node and Python runners can benchmark pre-built wrapper artifacts via env vars, skipping
+their corresponding local wrapper build or staging task:
+
+- **`DW_BENCH_NODE_PACKAGE`** — absolute path to an extracted `@dataweave/native` package
+  directory (must contain `dist/index.js`). Example:
+
+      DW_BENCH_NODE_PACKAGE=/tmp/artifacts/node/package \
+        ./gradlew native-lib:benchmarkNode -Pbenchmark=true
+
+- **`DW_BENCH_PY_SITE`** — absolute path to a site-packages-style directory containing
+  `dataweave/__init__.py`. Populate with `pip install --target <dir> <wheel>`. Example:
+
+      pip install --target /tmp/artifacts/py dataweave-0.0.1-py3-none-any.whl
+      DW_BENCH_PY_SITE=/tmp/artifacts/py \
+        ./gradlew native-lib:benchmarkPython -Pbenchmark=true
+
+If the env var is set but the target is invalid, the runner fails immediately rather than
+falling back to the source tree. For a cross-runner comparison with both wrapper overrides:
+
+    DW_BENCH_NODE_PACKAGE=/tmp/artifacts/node/package \
+      DW_BENCH_PY_SITE=/tmp/artifacts/py \
+      ./gradlew benchmarkCompare -Pbenchmark=true
+
+The CLI runner does not yet support an artifact override (deferred to a follow-up).
+
 Single-runner options:
 
-    ./gradlew native-lib:benchmark -Pbenchmark=true              # Node only: build wrapper, run, report
+    ./gradlew native-lib:benchmarkNode -Pbenchmark=true          # Node only: writes results/node-<ts>.json
     ./gradlew benchmarks-engine:benchmarkEngine -Pbenchmark=true # engine (JVM) only: writes results/engine-<ts>.json
     ./gradlew native-lib:benchmarkPython -Pbenchmark=true        # Python only: writes results/python-<ts>.json
     ./gradlew native-cli:benchmarkCli -Pbenchmark=true            # CLI only: writes results/cli-<ts>.json

@@ -199,7 +199,9 @@ tasks.register('benchmarkCli', Exec) {
     onlyIf { project.findProperty('benchmark')?.toString()?.toBoolean() == true }
     ext.benchmarkRunner = true
 
-    dependsOn tasks.named('nativeCompile')
+    if (!System.getenv('DW_BENCH_BIN')) {
+        dependsOn tasks.named('nativeCompile')
+    }
     workingDir("${rootDir}/benchmarks")
 
     def script = 'node corpus/gen-inputs.mjs && node runners/cli/emit.mjs'
