@@ -9,17 +9,16 @@ const BIN_NAME = process.platform === "win32" ? "dw.exe" : "dw";
 const DEFAULT_BIN = join(REPO_ROOT, "native-cli", "build", "native", "nativeCompile", BIN_NAME);
 
 /**
- * Resolve the benchmark-enabled `dw` native binary. Honors DW_BENCH_BIN (absolute
- * path to a bench-built dw); otherwise the default nativeCompile output. The binary
- * must be built with -Pbenchmark=true so BenchmarkHarness is reachable.
+ * Resolve a `dw` native executable. Honors DW_BENCH_BIN (absolute path to an
+ * executable); otherwise the default nativeCompile output.
  */
 export function locateBinary() {
   const candidate = process.env.DW_BENCH_BIN || DEFAULT_BIN;
   if (!existsSync(candidate)) {
     throw new Error(
-      `dw benchmark binary not found at ${candidate}. ` +
-        `Build it with: ./gradlew native-cli:nativeCompile -Pbenchmark=true ` +
-        `(or set DW_BENCH_BIN to a bench-enabled dw).`
+      `dw binary not found at ${candidate}. ` +
+        `Build it with: ./gradlew native-cli:nativeCompile ` +
+        `(or set DW_BENCH_BIN to a dw executable).`
     );
   }
   return candidate;

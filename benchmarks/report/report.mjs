@@ -150,6 +150,12 @@ export function renderMermaidCharts(table) {
   return blocks.join("\n\n");
 }
 
+export function renderMetricNotes(results) {
+  if (!results.some((result) => result.runner === "cli")) return "";
+  return "CLI `first-run` is end-to-end `dw run` command latency. " +
+    "Other runners' `first-run` is in-process compile-and-execute latency.";
+}
+
 /**
  * A self-contained Markdown report: provenance (commit + date), the numeric
  * table, then a Mermaid bar chart per (case, metric) — one bar per runner.
@@ -168,6 +174,8 @@ export function renderMarkdown(table, results, { baselineRunner, stamp }) {
     "> Indicative only — timings are from a single run on one machine, not a dedicated bench box.",
     ""
   );
+  const metricNotes = renderMetricNotes(results);
+  if (metricNotes) out.push(metricNotes, "");
 
   out.push("## Table", "");
   out.push("| " + table.header.join(" | ") + " |");
@@ -212,6 +220,11 @@ export function main(argv) {
   const skew = detectSkew(results);
   if (skew.length > 1) {
     console.log(`⚠️  WEAVE VERSION SKEW: comparing across ${skew.join(" vs ")} — deltas are not clean.`);
+    console.log("");
+  }
+  const metricNotes = renderMetricNotes(results);
+  if (metricNotes) {
+    console.log(metricNotes);
     console.log("");
   }
 

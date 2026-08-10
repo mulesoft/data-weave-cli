@@ -30,14 +30,6 @@ import static picocli.CommandLine.Model.UsageMessageSpec.SECTION_KEY_COMMAND_LIS
 
 public class DWCLI {
     public static void main(String[] args) {
-        // Benchmark dispatch: only reachable in a build made with -Pbenchmark=true.
-        // The outer compile-time constant lets javac remove this block from production.
-        if (BenchmarkMode.ENABLED) {
-            if (System.getenv("DW_BENCH") != null) {
-                org.mule.weave.dwnative.benchmark.BenchmarkHarness.main(args);
-                return;
-            }
-        }
         new DWCLI().run(args, DefaultConsole$.MODULE$);
     }
 

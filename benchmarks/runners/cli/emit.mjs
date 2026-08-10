@@ -5,8 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadManifest, validateResultIds } from "../../lib/manifest.mjs";
 import { gatherEnv } from "../../lib/env.mjs";
 import { locateBinary } from "./locate.mjs";
-import { runColdStartAndFirstRun } from "./coldstart.mjs";
-import { runWarm } from "./warm.mjs";
+import { runFirstRun } from "./first-run.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CORPUS = join(__dirname, "..", "..", "corpus");
@@ -41,10 +40,7 @@ export async function main() {
   // The CLI is a native binary, not the staged dwlib — override the lib fingerprint.
   env.dwlibBuildId = "n/a-cli";
 
-  const coldRows = await runColdStartAndFirstRun(manifest);
-  const warmRows = await runWarm(manifest);
-
-  const cases = [...coldRows, ...warmRows];
+  const cases = await runFirstRun(manifest);
   validateResultIds(manifest, cases);
 
   mkdirSync(RESULTS_DIR, { recursive: true });

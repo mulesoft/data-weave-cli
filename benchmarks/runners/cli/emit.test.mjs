@@ -13,7 +13,7 @@ test("buildResult produces a schema-shaped object with runner 'cli'", () => {
     runner: "cli", os: "x", cpu: "y", runtimeVersion: "dw vX",
     weaveVersion: "2.12.0-x", commit: "abc", dwlibBuildId: "n/a-cli",
   };
-  const cases = [{ id: "trivial", metric: "cold-start", unit: "ms", stats: { median: 1 }, iterations: 10 }];
+  const cases = [{ id: "trivial", metric: "first-run", unit: "ms", stats: { median: 1 }, iterations: 10 }];
   const r = buildResult(env, cases);
   assert.equal(r.schemaVersion, "1.0");
   assert.equal(r.runner, "cli");

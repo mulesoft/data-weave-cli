@@ -2,6 +2,13 @@
 
 _2026-07-27_
 
+> **Superseded:** This document records the original CLI runner design. The
+> current design is [CLI End-to-End Benchmark](2026-08-10-cli-end-to-end-benchmark-design.md).
+> For current task wiring, including `DW_BENCH_BIN`, and runner usage, use
+> [`benchmarks/README.md`](../../benchmarks/README.md) and
+> [`benchmarks/runners/cli/`](../../benchmarks/runners/cli/). Retain this
+> document for its original decisions and rationale.
+
 ## Goal
 
 Add a fourth runner to the `benchmarks/` harness that measures the **`dw` native

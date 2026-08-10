@@ -5,6 +5,12 @@
 **Parent spec:** [`2026-07-22-native-lib-benchmarks-design.md`](./2026-07-22-native-lib-benchmarks-design.md) — the corpus/schema/report contract every runner shares, which lists the Python runner as an explicit follow-up.
 **Sibling precedent:** [`2026-07-23-engine-runner-design.md`](./2026-07-23-engine-runner-design.md) — the closest structural template; this mirrors its self-contained-emit-with-parity-test playbook, one language over.
 
+> **Superseded by current implementation:** This document records the original
+> Python runner design. For current task wiring, external-artifact overrides, and
+> test coverage, use [`benchmarks/README.md`](../../benchmarks/README.md) and
+> [`benchmarks/runners/python/`](../../benchmarks/runners/python/). Retain this
+> document for its original decisions and rationale.
+
 ## Purpose
 
 Build the **Python runner** — the third benchmark surface, alongside the Node wrapper and the JVM engine baseline. It drives the DataWeave **Python** binding (`native-lib/python`, which wraps the same staged `dwlib` the Node wrapper does) over the **same shared corpus** and emits the **same JSON schema**, so `report/report.mjs` joins its results and produces cross-binding deltas: **Python wrapper vs. Node wrapper vs. JVM engine** — all at the same `weaveVersion`, all through the aggregator (`benchmarkCompare`).
