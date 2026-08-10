@@ -77,12 +77,25 @@ export class DataWeave {
    */
   initialize(): void {
     if (this.initialized) return;
+    let libRefAcquired = false;
     try {
       ffi.initialize(this.libPath, this.addonPath);
+      libRefAcquired = true;
       this.engineHandle = this.resolveModule
         ? ffi.createEngineWithResolver(this.resolveModule)
         : ffi.createEngine();
     } catch (e: unknown) {
+      // If ffi.initialize() already succeeded but engine creation then threw,
+      // we already hold an increment of the native library's ref-counted
+      // handle. this.initialized stays false below (we're about to throw),
+      // so cleanup()'s early-return guard (`if (!this.initialized) return;`)
+      // means nothing else will ever call ffi.cleanup() for this instance --
+      // release the ref-count ourselves here or it leaks for the process
+      // lifetime.
+      if (libRefAcquired) {
+        ffi.cleanup();
+      }
+      this.engineHandle = null;
       throw new DataWeaveError(`Failed to initialize: ${e instanceof Error ? e.message : e}`);
     }
     this.initialized = true;
