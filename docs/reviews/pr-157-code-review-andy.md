@@ -1,0 +1,8 @@
+Findings
+1. High native-lib/node/src/addon.c:925-936, native-lib/node/src/dataweave.ts:105-111
+   cleanup() destroys the Java engine and immediately frees its resolver bridge. An active runStreaming() or runTransform() worker may already have retrieved that ScriptRuntime; a later module lookup then invokes resolve_module_callback() with the freed engine_bridge_t context. This is a use-after-free and can crash the Node process. Destruction needs to wait for active engine execution or retain/ref-count the bridge until completion.
+2. Medium native-lib/node/src/addon.c:157-163,880, native-lib/node/src/dataweave.ts:81-83
+   The addon treats the new engine symbols as optional when loading dwlib, but every DataWeave.initialize() now requires createEngine or createEngineWithResolver. Supplying an older, previously compatible dwlib through libPath will load successfully and then fail initialization even for resolver-less callers. Either require/check the new ABI up front with a clear compatibility error, or retain the legacy resolver-less path.
+3. Medium Missing coverage for resolver-backed reinitialization and resolver errors. native-lib/node/tests/integration/edge-cases.test.ts:86-99 verifies reinitialization only without a resolver, and native-lib/node/tests/integration/dataweave-resolver.test.ts does not exercise a throwing resolver. These are the lifecycle/error paths newly affected by per-engine bridge allocation, destruction, and exception clearing.
+   There were no existing PR review comments or reviews to incorporate. I reviewed the PR description, design document, commits, and diff in an isolated detached worktree at:
+   /var/folders/qq/l28gmrtn0q15g333pg6nr8qw0000gn/T/opencode/pr157-review

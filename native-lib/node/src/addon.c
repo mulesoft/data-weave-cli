@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
 // GraalVM function pointer types
 typedef int (*graal_create_isolate_fn)(void*, void**, void**);
@@ -93,6 +94,14 @@ typedef struct engine_bridge {
     napi_ref resolver_js;             // NULL => resolver-less engine (no bridge created)
     uv_thread_t owner;                // JS thread that created and must run this engine
     resolver_result_node_t* results;  // buffers to free after each run on this engine
+    // Lifecycle accounting, mutated only under g_mutex. A streaming/transform op
+    // runs the native call on a background uv_thread that can still call back into
+    // resolve_module_callback with this bridge as ctx, so the bridge must outlive
+    // every in-flight op. in_flight counts ops that can still dereference this
+    // bridge; destroy_pending marks that destroyEngine ran while in_flight > 0 and
+    // freeing was deferred to the last op draining on the owner thread.
+    int in_flight;
+    bool destroy_pending;
     struct engine_bridge* next;
 } engine_bridge_t;
 static engine_bridge_t* g_bridges = NULL;  // linked list, guarded by g_mutex
@@ -124,6 +133,88 @@ static engine_bridge_t* bridge_find(long long handle) {
         if (b->handle == handle) return b;
     }
     return NULL;
+}
+
+// Fully dispose of a bridge: delete its napi_ref, free tracked result buffers,
+// free the struct. napi_ref/napi_env are thread-affine, so this MUST run on the
+// bridge's owner thread (the JS/Worker thread that created it) while that env is
+// still alive. The bridge must already be unlinked from g_bridges. Do NOT hold
+// g_mutex across this call — it invokes N-API. Callers that freed a bridge
+// *early* (destroyEngine / streaming completion) must first drop the env cleanup
+// hook via napi_remove_env_cleanup_hook so Node never invokes it on freed memory;
+// the hook path itself (bridge_env_cleanup) must not remove itself and calls this
+// directly.
+static void bridge_finalize(engine_bridge_t* b) {
+    if (b == NULL) return;
+    if (b->resolver_js != NULL && b->env != NULL) {
+        napi_delete_reference(b->env, b->resolver_js);
+    }
+    resolver_results_free_all(b);
+    free(b);
+}
+
+// Env cleanup hook (F2): registered per resolver-backed bridge at creation via
+// napi_add_env_cleanup_hook, so each Worker/main env disposes its OWN bridges on
+// its OWN thread when that env tears down — instead of napi_cleanup deleting
+// refs from whichever thread happens to release the last DataWeave instance,
+// which is undefined behavior for thread-affine napi_env/napi_ref. Runs on the
+// owner thread with the env still alive, which is exactly where napi_ref deletion
+// is legal.
+static void bridge_env_cleanup(void* arg) {
+    engine_bridge_t* b = (engine_bridge_t*)arg;
+    if (b == NULL) return;
+
+    uv_mutex_lock(&g_mutex);
+    // Unlink from g_bridges if still present (destroyEngine may have already
+    // unlinked it while deferring a free — see below).
+    engine_bridge_t** pp = &g_bridges;
+    while (*pp != NULL) {
+        if (*pp == b) { *pp = b->next; break; }
+        pp = &(*pp)->next;
+    }
+    // An in-flight streaming/transform op holds a live threadsafe function that
+    // keeps this env's event loop alive, so the env should never tear down while
+    // in_flight > 0. Guard defensively anyway: mark destroy_pending and let the
+    // op's completion path drain and finalize it (do NOT finalize here, the op's
+    // background thread could still dereference this bridge).
+    if (b->in_flight > 0) {
+        b->destroy_pending = true;
+        uv_mutex_unlock(&g_mutex);
+        return;
+    }
+    uv_mutex_unlock(&g_mutex);
+
+    // We are inside Node's invocation of this hook, so we must not (and need not)
+    // call napi_remove_env_cleanup_hook for ourselves here.
+    bridge_finalize(b);
+}
+
+// Begin a streaming/transform op on a resolver-backed engine: look up the bridge
+// and mark one op in flight so it (and its napi_ref) cannot be freed while the
+// background uv_thread can still call resolve_module_callback with it (F1).
+// Returns the bridge pointer (stable for the op's lifetime, since in_flight > 0
+// blocks both destroyEngine and the env cleanup hook from freeing it) or NULL for
+// a resolver-less engine / unknown handle, in which case there is nothing to
+// protect and completion must not call bridge_end_op.
+static engine_bridge_t* bridge_begin_op(long long handle) {
+    uv_mutex_lock(&g_mutex);
+    engine_bridge_t* b = bridge_find(handle);
+    if (b != NULL) b->in_flight++;
+    uv_mutex_unlock(&g_mutex);
+    return b;
+}
+
+// End a streaming/transform op. Runs on the owner (JS) thread from the completion
+// sentinel. If destroyEngine (or the env cleanup hook) ran while this op was in
+// flight, it deferred the free — already unlinked from g_bridges — so the last op
+// to drain finalizes the bridge here, on the legal (owner) thread.
+static void bridge_end_op(engine_bridge_t* b) {
+    if (b == NULL) return;
+    uv_mutex_lock(&g_mutex);
+    b->in_flight--;
+    bool finalize = (b->destroy_pending && b->in_flight == 0);
+    uv_mutex_unlock(&g_mutex);
+    if (finalize) bridge_finalize(b);
 }
 
 // --- Initialization ---
@@ -331,6 +422,9 @@ struct streaming_work {
   long long handle;
   char* script;
   char* inputs_json;
+  // Non-NULL only for resolver-backed engines: the bridge whose in_flight count
+  // this op holds. The completion sentinel calls bridge_end_op on it (F1).
+  engine_bridge_t* bridge;
 };
 
 static void call_js_write(napi_env env, napi_value js_callback, void* context, void* data) {
@@ -350,6 +444,10 @@ static void call_js_write(napi_env env, napi_value js_callback, void* context, v
 
     uv_thread_join(&w->tid);
     napi_release_threadsafe_function(w->tsfn, napi_tsfn_release);
+    // Drop the in-flight hold last, on this owner thread: if destroyEngine ran
+    // during the op it deferred the free to here (F1). After this the bridge may
+    // be freed, so touch nothing on it afterward.
+    bridge_end_op(w->bridge);
     free(w);
     return;
   }
@@ -452,6 +550,13 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
   napi_value promise;
   napi_create_promise(env, &w->deferred, &promise);
 
+  // Pin the resolver bridge (if any) for the whole op so it outlives a concurrent
+  // destroyEngine/cleanup and the background thread can safely call back into
+  // resolve_module_callback (F1). NULL for resolver-less engines. Must happen
+  // before spawning the thread; the completion sentinel releases it via
+  // bridge_end_op. No early return exists between here and the spawn.
+  w->bridge = bridge_begin_op(w->handle);
+
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
   opts.stack_size = 2 * 1024 * 1024;
@@ -473,6 +578,9 @@ struct transform_work {
   char* input_name;
   char* input_mime_type;
   char* input_charset;
+  // Non-NULL only for resolver-backed engines: the bridge whose in_flight count
+  // this op holds. The completion sentinel calls bridge_end_op on it (F1).
+  engine_bridge_t* bridge;
 };
 
 struct read_request {
@@ -620,6 +728,10 @@ static void call_js_transform_write(napi_env env, napi_value js_callback, void* 
     uv_thread_join(&w->tid);
     napi_release_threadsafe_function(w->read_tsfn, napi_tsfn_release);
     napi_release_threadsafe_function(w->write_tsfn, napi_tsfn_release);
+    // Drop the in-flight hold last, on this owner thread: if destroyEngine ran
+    // during the op it deferred the free to here (F1). After this the bridge may
+    // be freed, so touch nothing on it afterward.
+    bridge_end_op(w->bridge);
     free(w);
     return;
   }
@@ -729,6 +841,13 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
 
   napi_value promise;
   napi_create_promise(env, &w->deferred, &promise);
+
+  // Pin the resolver bridge (if any) for the whole op so it outlives a concurrent
+  // destroyEngine/cleanup and the background thread can safely call back into
+  // resolve_module_callback (F1). NULL for resolver-less engines. Must happen
+  // before spawning the thread; the completion sentinel releases it via
+  // bridge_end_op. No early return exists between here and the spawn.
+  w->bridge = bridge_begin_op(w->handle);
 
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
@@ -910,6 +1029,11 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
 
     bridge->handle = handle;
     uv_mutex_lock(&g_mutex); bridge->next = g_bridges; g_bridges = bridge; uv_mutex_unlock(&g_mutex);
+    // Register a per-env cleanup hook so THIS Worker/main thread disposes this
+    // bridge's napi_ref on its own thread when its env tears down (F2). napi_cleanup
+    // no longer touches bridge refs. destroyEngine removes this hook before an
+    // early free so Node never calls it on freed memory.
+    napi_add_env_cleanup_hook(env, bridge_env_cleanup, bridge);
     napi_value out; napi_create_int64(env, (int64_t)handle, &out); return out;
 }
 
@@ -926,13 +1050,27 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
         void* thread = NULL;
         if (fn_attach_thread(g_isolate, &thread) == 0) { fn_destroy_engine(thread, handle); fn_detach_thread(thread); }
     }
+    // Unlink the bridge from g_bridges, but only free it now if no streaming/
+    // transform op is still in flight. A background op can still call back into
+    // resolve_module_callback with this bridge as ctx (F1), so if in_flight > 0
+    // we mark destroy_pending and defer the free to the completion sentinel,
+    // which drains on this same owner thread. Deleting the napi_ref is only legal
+    // on the owner thread, and destroyEngine is called from it, so we finalize
+    // here in the common (not-in-flight) case.
     uv_mutex_lock(&g_mutex);
     engine_bridge_t** pp = &g_bridges; engine_bridge_t* found = NULL;
     while (*pp != NULL) { if ((*pp)->handle == handle) { found = *pp; *pp = found->next; break; } pp = &(*pp)->next; }
+    bool defer = false;
+    if (found != NULL) {
+        if (found->in_flight > 0) { found->destroy_pending = true; defer = true; }
+    }
     uv_mutex_unlock(&g_mutex);
     if (found != NULL) {
-        if (found->resolver_js != NULL && found->env != NULL) napi_delete_reference(found->env, found->resolver_js);
-        resolver_results_free_all(found); free(found);
+        // Drop the env cleanup hook: whether we finalize now or defer to the
+        // draining op, the free happens explicitly, so Node must never invoke
+        // the hook on this (soon-to-be or already) freed bridge.
+        napi_remove_env_cleanup_hook(env, bridge_env_cleanup, found);
+        if (!defer) bridge_finalize(found);
     }
     return NULL;
 }
@@ -1002,22 +1140,15 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
   if (g_initialized) {
     g_ref_count--;
     if (g_ref_count <= 0) {
-      // Tear down any engine bridges never explicitly destroyed. We already
-      // hold g_mutex here, so walk g_bridges inline (no re-lock): delete each
-      // bridge's napi_ref on its own env, free its tracked result buffers, and
-      // free the node.
-      engine_bridge_t* b = g_bridges;
-      while (b != NULL) {
-        engine_bridge_t* next = b->next;
-        if (b->resolver_js != NULL && b->env != NULL) {
-          napi_delete_reference(b->env, b->resolver_js);
-        }
-        resolver_results_free_all(b);
-        free(b);
-        b = next;
-      }
-      g_bridges = NULL;
-
+      // F2: do NOT walk g_bridges to delete napi_refs here. napi_env/napi_ref are
+      // thread-affine, and this last-release call can arrive on any Worker thread —
+      // not necessarily the one that owns a given bridge. Deleting a reference from
+      // the wrong thread is undefined behavior. Instead, each resolver-backed bridge
+      // registered a per-env cleanup hook (bridge_env_cleanup) at creation, so its
+      // owning Worker/main thread disposes its own napi_ref on its own thread when
+      // that env tears down. Any bridge still linked in g_bridges is owned by such a
+      // hook and must be left alone here. Only the process-global GraalVM isolate
+      // teardown below is safe to run once, on the last release, from this thread.
       uv_thread_t tid;
       uv_thread_options_t opts;
       opts.flags = UV_THREAD_HAS_STACK_SIZE;
