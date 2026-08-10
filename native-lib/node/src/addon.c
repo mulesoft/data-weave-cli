@@ -13,21 +13,19 @@ typedef void* (*run_script_fn)(void*, const char*, const char*);
 typedef void (*free_cstring_fn)(void*, void*);
 typedef int (*write_callback_t)(void* ctx, const char* buf, int len);
 typedef int (*read_callback_t)(void* ctx, char* buf, int buf_size);
-typedef char* (*resolve_module_callback_t)(void* thread, const char* module_path);
+typedef char* (*resolve_module_callback_t)(void* thread, void* ctx, const char* module_path);
 typedef void* (*run_script_callback_fn)(void*, const char*, const char*, write_callback_t, void*);
 typedef void* (*run_script_input_output_callback_fn)(void*, const char*, const char*, const char*, const char*, const char*, read_callback_t, write_callback_t, void*);
 
-// Resolver-aware entrypoint types
-// NOTE: run_script_with_resolver has no mimeType parameter on the native side
-// (NativeLib.runScriptWithResolver(thread, script, inputsJson, resolverCallback)
-// delegates to ScriptRuntime.run(script, inputsJson), which infers/hardcodes
-// output mime type internally). The JS-facing mimeType argument is accepted
-// for API symmetry with other entrypoints but is NOT forwarded across the FFI
-// boundary — passing it here would misalign the native call's argument
-// registers and corrupt the callback function pointer.
-typedef char* (*run_script_with_resolver_fn)(void*, const char*, const char*, resolve_module_callback_t);
-typedef void* (*run_script_callback_with_resolver_fn)(void*, const char*, const char*, const char*, write_callback_t, void*, resolve_module_callback_t);
-typedef void* (*run_script_input_output_callback_with_resolver_fn)(void*, const char*, const char*, const char*, const char*, const char*, read_callback_t, write_callback_t, void*, resolve_module_callback_t);
+// Per-engine entrypoint types. Handles are Java long values and MUST be C
+// long long everywhere (plain long is 32-bit on Windows LLP64 and would
+// truncate a 64-bit handle).
+typedef long long (*create_engine_fn)(void*);
+typedef long long (*create_engine_with_resolver_fn)(void*, resolve_module_callback_t, void*);
+typedef void (*destroy_engine_fn)(void*, long long);
+typedef void* (*run_script_engine_fn)(void*, long long, const char*, const char*);
+typedef void* (*run_script_callback_engine_fn)(void*, long long, const char*, const char*, write_callback_t, void*);
+typedef void* (*run_script_input_output_callback_engine_fn)(void*, long long, const char*, const char*, const char*, const char*, const char*, read_callback_t, write_callback_t, void*);
 
 // Global state
 static uv_lib_t g_lib;
@@ -54,14 +52,28 @@ static free_cstring_fn fn_free_cstring = NULL;
 static run_script_callback_fn fn_run_script_callback = NULL;
 static run_script_input_output_callback_fn fn_run_script_input_output_callback = NULL;
 
-// Resolver-aware entrypoints
-static run_script_with_resolver_fn fn_run_script_with_resolver = NULL;
-static run_script_callback_with_resolver_fn fn_run_script_callback_with_resolver = NULL;
-static run_script_input_output_callback_with_resolver_fn fn_run_script_input_output_callback_with_resolver = NULL;
+// Per-engine entrypoints
+static create_engine_fn fn_create_engine = NULL;
+static create_engine_with_resolver_fn fn_create_engine_with_resolver = NULL;
+static destroy_engine_fn fn_destroy_engine = NULL;
+static run_script_engine_fn fn_run_script_engine = NULL;
+static run_script_callback_engine_fn fn_run_script_callback_engine = NULL;
+static run_script_input_output_callback_engine_fn fn_run_script_input_output_callback_engine = NULL;
 
-// Resolver bridge state (one resolver per process).
+// A single run may trigger resolve_module_callback multiple times (one script
+// can import several modules). Native copies each returned buffer immediately,
+// but the copy is made *after* our callback returns — we don't get a per-call
+// "done freeing" signal, only "the whole run finished". So track every buffer
+// allocated during one run and free them all once the native call returns.
+typedef struct resolver_result_node {
+    char* buf;
+    struct resolver_result_node* next;
+} resolver_result_node_t;
+
+// Per-engine resolver bridge: one node per resolver-backed engine, passed to
+// Java as the callback ctx word and forwarded back to resolve_module_callback.
 //
-// Unlike the streaming/transform entrypoints, runWithResolver's native call
+// Unlike the streaming/transform entrypoints, runScriptEngine's native call
 // executes synchronously on the very thread that invoked it from JS — no
 // background uv_thread is spawned. So when native code calls back into
 // resolve_module_callback(), we are already on the correct (JS) thread and
@@ -70,51 +82,48 @@ static run_script_input_output_callback_with_resolver_fn fn_run_script_input_out
 // caller on a condition variable until it's serviced — but if the caller
 // *is* the JS thread, it can never service its own queued item, causing a
 // deadlock (a real bug fixed in this codebase — see Task 11 report).
-static napi_env g_resolver_env = NULL;
-static napi_ref g_resolver_ref = NULL;
+//
+// napi_env/napi_ref are thread-affine; each bridge records the JS thread that
+// created it (owner) so resolve_module_callback can detect a mismatch — e.g. a
+// streamed/transform custom-module lookup arriving on the background uv_thread
+// — and fail closed (return "not found") instead of crashing.
+typedef struct engine_bridge {
+    long long handle;
+    napi_env env;
+    napi_ref resolver_js;             // NULL => resolver-less engine (no bridge created)
+    uv_thread_t owner;                // JS thread that created and must run this engine
+    resolver_result_node_t* results;  // buffers to free after each run on this engine
+    struct engine_bridge* next;
+} engine_bridge_t;
+static engine_bridge_t* g_bridges = NULL;  // linked list, guarded by g_mutex
 
-// The OS thread that first installed the resolver (see napi_run_with_resolver
-// below). ScriptRuntime's engine is a process-wide singleton, so once a
-// resolver is installed, resolve_module_callback() can be reached from ANY
-// entrypoint that later compiles a script against that shared engine —
-// including runScriptStreaming/runScriptTransform, whose native calls run on
-// a background uv_thread (see streaming_thread_fn/transform_thread_fn), not
-// the JS thread. napi_env/napi_ref are thread-affine; calling into them from
-// a thread other than the one that created them is undefined behavior. We
-// record the owning thread here so resolve_module_callback can detect the
-// mismatch and fail closed (return "not found") instead of crashing.
-static uv_thread_t g_resolver_thread;
-
-// A single runWithResolver call may trigger resolve_module_callback multiple
-// times (one script can import several modules). Native copies each
-// returned buffer immediately, but the copy is made *after* our callback
-// returns — we don't get a per-call "done freeing" signal, only "the whole
-// run finished". So track every buffer allocated during one call and free
-// them all once fn_run_script_with_resolver returns.
-typedef struct resolver_result_node {
-    char* buf;
-    struct resolver_result_node* next;
-} resolver_result_node_t;
-static resolver_result_node_t* g_resolver_results = NULL;
-
-static void resolver_results_track(char* buf) {
-    if (buf == NULL) return;
+static void resolver_results_track(engine_bridge_t* b, char* buf) {
+    if (b == NULL || buf == NULL) return;
     resolver_result_node_t* node = (resolver_result_node_t*)malloc(sizeof(resolver_result_node_t));
     if (node == NULL) return;  // Leak the buffer rather than crash; best-effort tracking.
     node->buf = buf;
-    node->next = g_resolver_results;
-    g_resolver_results = node;
+    node->next = b->results;
+    b->results = node;
 }
 
-static void resolver_results_free_all(void) {
-    resolver_result_node_t* node = g_resolver_results;
+static void resolver_results_free_all(engine_bridge_t* b) {
+    if (b == NULL) return;
+    resolver_result_node_t* node = b->results;
     while (node != NULL) {
         resolver_result_node_t* next = node->next;
         free(node->buf);
         free(node);
         node = next;
     }
-    g_resolver_results = NULL;
+    b->results = NULL;
+}
+
+// Call under g_mutex.
+static engine_bridge_t* bridge_find(long long handle) {
+    for (engine_bridge_t* b = g_bridges; b != NULL; b = b->next) {
+        if (b->handle == handle) return b;
+    }
+    return NULL;
 }
 
 // --- Initialization ---
@@ -145,15 +154,13 @@ static void init_thread_fn(void* arg) {
   uv_dlsym(&g_lib, "run_script_callback", (void**)&fn_run_script_callback);
   uv_dlsym(&g_lib, "run_script_input_output_callback", (void**)&fn_run_script_input_output_callback);
 
-  // Load resolver-aware entrypoints (optional - newer symbols)
-  uv_dlsym(&g_lib, "run_script_with_resolver", (void**)&fn_run_script_with_resolver);
-  // fn_run_script_callback_with_resolver / fn_run_script_input_output_callback_with_resolver
-  // are resolved here but intentionally never called from this file. Wiring them into
-  // runScriptStreaming/runScriptTransform would put the resolver callback on a background
-  // uv_thread, which is unsafe for the same reason resolve_module_callback() above guards
-  // against cross-thread napi calls — do not wire these up without solving that hazard first.
-  uv_dlsym(&g_lib, "run_script_callback_with_resolver", (void**)&fn_run_script_callback_with_resolver);
-  uv_dlsym(&g_lib, "run_script_input_output_callback_with_resolver", (void**)&fn_run_script_input_output_callback_with_resolver);
+  // Load per-engine entrypoints (optional - newer symbols)
+  uv_dlsym(&g_lib, "create_engine", (void**)&fn_create_engine);
+  uv_dlsym(&g_lib, "create_engine_with_resolver", (void**)&fn_create_engine_with_resolver);
+  uv_dlsym(&g_lib, "destroy_engine", (void**)&fn_destroy_engine);
+  uv_dlsym(&g_lib, "run_script_engine", (void**)&fn_run_script_engine);
+  uv_dlsym(&g_lib, "run_script_callback_engine", (void**)&fn_run_script_callback_engine);
+  uv_dlsym(&g_lib, "run_script_input_output_callback_engine", (void**)&fn_run_script_input_output_callback_engine);
 
   if (!fn_create_isolate || !fn_run_script || !fn_free_cstring) {
     snprintf(args->error, sizeof(args->error), "Missing required symbols in library");
@@ -321,6 +328,7 @@ struct streaming_work {
   uv_thread_t tid;
   napi_threadsafe_function tsfn;
   napi_deferred deferred;
+  long long handle;
   char* script;
   char* inputs_json;
 };
@@ -386,8 +394,8 @@ static void streaming_thread_fn(void* arg) {
     snprintf(err, sizeof(err), "{\"success\":false,\"error\":\"Failed to attach thread (code %d)\"}", rc);
     meta_result = strdup(err);
   } else {
-    void* result_ptr = fn_run_script_callback(
-      worker_thread, w->script, w->inputs_json, streaming_write_cb, (void*)w->tsfn
+    void* result_ptr = fn_run_script_callback_engine(
+      worker_thread, w->handle, w->script, w->inputs_json, streaming_write_cb, (void*)w->tsfn
     );
     if (result_ptr) {
       meta_result = strdup((const char*)result_ptr);
@@ -404,38 +412,42 @@ static void streaming_thread_fn(void* arg) {
   napi_call_threadsafe_function(w->tsfn, sentinel, napi_tsfn_blocking);
 }
 
-static napi_value napi_run_script_streaming(napi_env env, napi_callback_info info) {
+static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_info info) {
   if (!g_initialized) {
     napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
     return NULL;
   }
-  if (!fn_run_script_callback) {
-    napi_throw_error(env, NULL, "run_script_callback not available in native library");
+  if (!fn_run_script_callback_engine) {
+    napi_throw_error(env, NULL, "run_script_callback_engine not available in native library");
     return NULL;
   }
 
-  size_t argc = 3;
-  napi_value argv[3];
+  size_t argc = 4;
+  napi_value argv[4];
   napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
 
-  if (argc < 3) {
-    napi_throw_error(env, NULL, "runScriptStreaming requires (script, inputsJson, chunkCallback)");
+  if (argc < 4) {
+    napi_throw_error(env, NULL, "runScriptStreamingEngine requires (handle, script, inputsJson, chunkCallback)");
     return NULL;
   }
 
+  int64_t handle64;
+  napi_get_value_int64(env, argv[0], &handle64);
+
   size_t script_len, inputs_len;
-  napi_get_value_string_utf8(env, argv[0], NULL, 0, &script_len);
-  napi_get_value_string_utf8(env, argv[1], NULL, 0, &inputs_len);
+  napi_get_value_string_utf8(env, argv[1], NULL, 0, &script_len);
+  napi_get_value_string_utf8(env, argv[2], NULL, 0, &inputs_len);
 
   struct streaming_work* w = calloc(1, sizeof(struct streaming_work));
+  w->handle = (long long)handle64;
   w->script = malloc(script_len + 1);
   w->inputs_json = malloc(inputs_len + 1);
-  napi_get_value_string_utf8(env, argv[0], w->script, script_len + 1, NULL);
-  napi_get_value_string_utf8(env, argv[1], w->inputs_json, inputs_len + 1, NULL);
+  napi_get_value_string_utf8(env, argv[1], w->script, script_len + 1, NULL);
+  napi_get_value_string_utf8(env, argv[2], w->inputs_json, inputs_len + 1, NULL);
 
   napi_value resource_name;
   napi_create_string_utf8(env, "dwStreaming", NAPI_AUTO_LENGTH, &resource_name);
-  napi_create_threadsafe_function(env, argv[2], NULL, resource_name, 0, 1, NULL, NULL, w, call_js_write, &w->tsfn);
+  napi_create_threadsafe_function(env, argv[3], NULL, resource_name, 0, 1, NULL, NULL, w, call_js_write, &w->tsfn);
 
   napi_value promise;
   napi_create_promise(env, &w->deferred, &promise);
@@ -455,6 +467,7 @@ struct transform_work {
   napi_threadsafe_function read_tsfn;
   napi_threadsafe_function write_tsfn;
   napi_deferred deferred;
+  long long handle;
   char* script;
   char* inputs_json;
   char* input_name;
@@ -635,8 +648,8 @@ static void transform_thread_fn(void* arg) {
     snprintf(err, sizeof(err), "{\"success\":false,\"error\":\"Failed to attach thread (code %d)\"}", rc);
     meta_result = strdup(err);
   } else {
-    void* result_ptr = fn_run_script_input_output_callback(
-      worker_thread, w->script, w->inputs_json,
+    void* result_ptr = fn_run_script_input_output_callback_engine(
+      worker_thread, w->handle, w->script, w->inputs_json,
       w->input_name, w->input_mime_type, w->input_charset,
       transform_read_cb, transform_write_cb, (void*)w
     );
@@ -656,50 +669,54 @@ static void transform_thread_fn(void* arg) {
   napi_call_threadsafe_function(w->write_tsfn, sentinel, napi_tsfn_blocking);
 }
 
-static napi_value napi_run_script_transform(napi_env env, napi_callback_info info) {
+static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_info info) {
   if (!g_initialized) {
     napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
     return NULL;
   }
-  if (!fn_run_script_input_output_callback) {
-    napi_throw_error(env, NULL, "run_script_input_output_callback not available in native library");
+  if (!fn_run_script_input_output_callback_engine) {
+    napi_throw_error(env, NULL, "run_script_input_output_callback_engine not available in native library");
     return NULL;
   }
 
-  size_t argc = 7;
-  napi_value argv[7];
+  size_t argc = 8;
+  napi_value argv[8];
   napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
 
-  if (argc < 7) {
-    napi_throw_error(env, NULL, "runScriptTransform requires 7 arguments");
+  if (argc < 8) {
+    napi_throw_error(env, NULL, "runScriptTransformEngine requires 8 arguments");
     return NULL;
   }
 
   struct transform_work* w = calloc(1, sizeof(struct transform_work));
   size_t len;
 
-  napi_get_value_string_utf8(env, argv[0], NULL, 0, &len);
-  w->script = malloc(len + 1);
-  napi_get_value_string_utf8(env, argv[0], w->script, len + 1, NULL);
+  int64_t handle64;
+  napi_get_value_int64(env, argv[0], &handle64);
+  w->handle = (long long)handle64;
 
   napi_get_value_string_utf8(env, argv[1], NULL, 0, &len);
-  w->inputs_json = malloc(len + 1);
-  napi_get_value_string_utf8(env, argv[1], w->inputs_json, len + 1, NULL);
+  w->script = malloc(len + 1);
+  napi_get_value_string_utf8(env, argv[1], w->script, len + 1, NULL);
 
   napi_get_value_string_utf8(env, argv[2], NULL, 0, &len);
-  w->input_name = malloc(len + 1);
-  napi_get_value_string_utf8(env, argv[2], w->input_name, len + 1, NULL);
+  w->inputs_json = malloc(len + 1);
+  napi_get_value_string_utf8(env, argv[2], w->inputs_json, len + 1, NULL);
 
   napi_get_value_string_utf8(env, argv[3], NULL, 0, &len);
+  w->input_name = malloc(len + 1);
+  napi_get_value_string_utf8(env, argv[3], w->input_name, len + 1, NULL);
+
+  napi_get_value_string_utf8(env, argv[4], NULL, 0, &len);
   w->input_mime_type = malloc(len + 1);
-  napi_get_value_string_utf8(env, argv[3], w->input_mime_type, len + 1, NULL);
+  napi_get_value_string_utf8(env, argv[4], w->input_mime_type, len + 1, NULL);
 
   napi_valuetype type;
-  napi_typeof(env, argv[4], &type);
+  napi_typeof(env, argv[5], &type);
   if (type == napi_string) {
-    napi_get_value_string_utf8(env, argv[4], NULL, 0, &len);
+    napi_get_value_string_utf8(env, argv[5], NULL, 0, &len);
     w->input_charset = malloc(len + 1);
-    napi_get_value_string_utf8(env, argv[4], w->input_charset, len + 1, NULL);
+    napi_get_value_string_utf8(env, argv[5], w->input_charset, len + 1, NULL);
   } else {
     w->input_charset = NULL;
   }
@@ -707,8 +724,8 @@ static napi_value napi_run_script_transform(napi_env env, napi_callback_info inf
   napi_value resource_name;
   napi_create_string_utf8(env, "dwTransform", NAPI_AUTO_LENGTH, &resource_name);
 
-  napi_create_threadsafe_function(env, argv[5], NULL, resource_name, 0, 1, NULL, NULL, NULL, call_js_read, &w->read_tsfn);
-  napi_create_threadsafe_function(env, argv[6], NULL, resource_name, 0, 1, NULL, NULL, w, call_js_transform_write, &w->write_tsfn);
+  napi_create_threadsafe_function(env, argv[6], NULL, resource_name, 0, 1, NULL, NULL, NULL, call_js_read, &w->read_tsfn);
+  napi_create_threadsafe_function(env, argv[7], NULL, resource_name, 0, 1, NULL, NULL, w, call_js_transform_write, &w->write_tsfn);
 
   napi_value promise;
   napi_create_promise(env, &w->deferred, &promise);
@@ -724,35 +741,36 @@ static napi_value napi_run_script_transform(napi_env env, napi_callback_info inf
 // --- Resolver callback bridge ---
 
 // Called by native code, synchronously, on the same JS thread that invoked
-// runWithResolver (see the comment on g_resolver_env above for why this must
-// NOT hop through napi_threadsafe_function). Calls the JS resolver directly
-// and returns its result copied onto the heap; the caller (napi_run_with_resolver)
-// frees it via g_resolver_last_result after the native side has copied it.
-static char* resolve_module_callback(void* thread, const char* module_path) {
+// runScriptEngine for a resolver-backed engine (see the comment on
+// engine_bridge_t above for why this must NOT hop through
+// napi_threadsafe_function). The ctx word is the engine's own engine_bridge_t*,
+// passed to Java in create_engine_with_resolver and forwarded back here. Calls
+// the JS resolver directly and returns its result copied onto the heap; the
+// caller frees the tracked buffers after the native side has copied them.
+static char* resolve_module_callback(void* thread, void* ctx, const char* module_path) {
     (void)thread;
 
-    if (g_resolver_env == NULL || g_resolver_ref == NULL) {
-        return NULL;  // No resolver set
+    engine_bridge_t* bridge = (engine_bridge_t*)ctx;
+    if (bridge == NULL || bridge->env == NULL || bridge->resolver_js == NULL) {
+        return NULL;  // No resolver for this engine
     }
 
-    // Guard against cross-thread napi calls. The engine that triggers this
-    // callback is a process-wide singleton shared by run()/runStreaming()/
-    // runTransform(); streaming and transform execute their native call on a
-    // background uv_thread (streaming_thread_fn/transform_thread_fn), not the
-    // JS thread that registered g_resolver_env/g_resolver_ref. If we're not
-    // on the thread that owns this napi_env, calling napi_get_reference_value
+    // Guard against cross-thread napi calls. Streaming and transform execute
+    // their native call on a background uv_thread (streaming_thread_fn/
+    // transform_thread_fn), not the JS thread that created this bridge. If we're
+    // not on the thread that owns this napi_env, calling napi_get_reference_value
     // or napi_call_function here is undefined behavior (typically a crash).
     // Fail closed instead: report "not found", which matches the documented
     // built-ins-only fallback for streaming/transform.
     uv_thread_t current = uv_thread_self();
-    if (!uv_thread_equal(&current, &g_resolver_thread)) {
+    if (!uv_thread_equal(&current, &bridge->owner)) {
         return NULL;
     }
 
-    napi_env env = g_resolver_env;
+    napi_env env = bridge->env;
 
     napi_value js_callback;
-    if (napi_get_reference_value(env, g_resolver_ref, &js_callback) != napi_ok) {
+    if (napi_get_reference_value(env, bridge->resolver_js, &js_callback) != napi_ok) {
         return NULL;
     }
 
@@ -849,130 +867,114 @@ static char* resolve_module_callback(void* thread, const char* module_path) {
     }
     // null/undefined/other → not found (result_source stays NULL)
 
-    resolver_results_track(result_source);
+    resolver_results_track(bridge, result_source);
     return result_source;  // Native copies this immediately; we free the original after the call.
 }
 
-// N-API method: runWithResolver
-static napi_value napi_run_with_resolver(napi_env env, napi_callback_info info) {
-    if (!g_initialized) {
-        napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
-        return NULL;
-    }
-    if (!fn_run_script_with_resolver) {
-        napi_throw_error(env, NULL, "run_script_with_resolver not available in native library");
-        return NULL;
-    }
+// --- Per-engine N-API methods ---
 
-    size_t argc = 5;
-    napi_value args[5];
-    napi_get_cb_info(env, info, &argc, args, NULL, NULL);
-
-    if (argc < 5) {
-        napi_throw_error(env, NULL, "Expected 5 arguments: script, inputs, mimeType, resolverCallback, isolate");
-        return NULL;
-    }
-
-    // Extract script, inputs, mimeType
-    size_t script_len, inputs_len, mime_len;
-    napi_get_value_string_utf8(env, args[0], NULL, 0, &script_len);
-    napi_get_value_string_utf8(env, args[1], NULL, 0, &inputs_len);
-    napi_get_value_string_utf8(env, args[2], NULL, 0, &mime_len);
-
-    char* script = (char*)malloc(script_len + 1);
-    char* inputs = (char*)malloc(inputs_len + 1);
-    char* mime_type = (char*)malloc(mime_len + 1);
-
-    if (script == NULL || inputs == NULL || mime_type == NULL) {
-        free(script);
-        free(inputs);
-        free(mime_type);
-        napi_throw_error(env, NULL, "Failed to allocate memory for arguments");
-        return NULL;
-    }
-
-    napi_get_value_string_utf8(env, args[0], script, script_len + 1, NULL);
-    napi_get_value_string_utf8(env, args[1], inputs, inputs_len + 1, NULL);
-    napi_get_value_string_utf8(env, args[2], mime_type, mime_len + 1, NULL);
-
-    // Resolver is installed once per process lifetime. Subsequent calls with
-    // different resolver callbacks will reuse the first resolver, as enforced by
-    // ScriptRuntime.setResolver() on the native side (one resolver per engine).
-    //
-    // No thread-hop machinery is needed: fn_run_script_with_resolver() below
-    // runs on this very thread, so resolve_module_callback() (invoked from
-    // inside that call) can call directly back into JS via the stored
-    // napi_ref. See the comment on g_resolver_env for why napi_threadsafe_function
-    // must NOT be used here.
-    uv_mutex_lock(&g_mutex);
-    if (g_resolver_ref == NULL) {
-        napi_status status = napi_create_reference(env, args[3], 1, &g_resolver_ref);
-        if (status != napi_ok) {
-            uv_mutex_unlock(&g_mutex);
-            free(script);
-            free(inputs);
-            free(mime_type);
-            napi_throw_error(env, NULL, "Failed to reference resolver callback");
-            return NULL;
-        }
-        g_resolver_env = env;
-        g_resolver_thread = uv_thread_self();
-    }
-    // Note: subsequent calls reuse the first resolver for this process lifetime.
-    uv_mutex_unlock(&g_mutex);
-
-    // Need to attach thread for this call
+// createEngine() -> number
+static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
+    (void)info;
+    if (!g_initialized) { napi_throw_error(env, NULL, "Not initialized. Call initialize() first."); return NULL; }
+    if (!fn_create_engine) { napi_throw_error(env, NULL, "create_engine not available in native library"); return NULL; }
     void* thread = NULL;
-    int rc = fn_attach_thread(g_isolate, &thread);
-    if (rc != 0) {
-        free(script);
-        free(inputs);
-        free(mime_type);
-        napi_throw_error(env, NULL, "Failed to attach thread");
-        return NULL;
+    if (fn_attach_thread(g_isolate, &thread) != 0) { napi_throw_error(env, NULL, "Failed to attach thread"); return NULL; }
+    long long handle = fn_create_engine(thread);
+    fn_detach_thread(thread);
+    napi_value out; napi_create_int64(env, (int64_t)handle, &out); return out;
+}
+
+// createEngineWithResolver(resolver) -> number
+static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_info info) {
+    if (!g_initialized) { napi_throw_error(env, NULL, "Not initialized. Call initialize() first."); return NULL; }
+    if (!fn_create_engine_with_resolver) { napi_throw_error(env, NULL, "create_engine_with_resolver not available in native library"); return NULL; }
+    size_t argc = 1; napi_value argv[1];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (argc < 1) { napi_throw_error(env, NULL, "createEngineWithResolver requires (resolverCallback)"); return NULL; }
+
+    engine_bridge_t* bridge = (engine_bridge_t*)calloc(1, sizeof(engine_bridge_t));
+    if (bridge == NULL) { napi_throw_error(env, NULL, "Failed to allocate engine bridge"); return NULL; }
+    if (napi_create_reference(env, argv[0], 1, &bridge->resolver_js) != napi_ok) {
+        free(bridge); napi_throw_error(env, NULL, "Failed to reference resolver callback"); return NULL;
     }
+    bridge->env = env; bridge->owner = uv_thread_self(); bridge->results = NULL;
 
-    // Call native with resolver callback. mime_type is accepted from JS for API
-    // symmetry but is not part of the native run_script_with_resolver signature
-    // (see run_script_with_resolver_fn typedef comment) — do not forward it.
-    char* result = fn_run_script_with_resolver(
-        thread,
-        script,
-        inputs,
-        resolve_module_callback
-    );
-
-    // Native has copied every resolver result returned during this call; free
-    // our copies now that it's done.
-    resolver_results_free_all();
-
-    // result (if non-NULL) is a GraalVM UnmanagedMemory.malloc'd buffer, like
-    // every other native result pointer in this file; it must be released via
-    // fn_free_cstring(), not libc free(), and while the isolate thread is
-    // still attached. Copy it to a libc-owned buffer first so we can build
-    // the JS string after detaching, matching the strdup + fn_free_cstring
-    // pattern used by run_script_thread_fn/streaming_thread_fn/transform_thread_fn.
-    char* result_copy = result ? strdup(result) : NULL;
-    if (result != NULL) {
-        fn_free_cstring(thread, result);
+    void* thread = NULL;
+    if (fn_attach_thread(g_isolate, &thread) != 0) {
+        napi_delete_reference(env, bridge->resolver_js); free(bridge);
+        napi_throw_error(env, NULL, "Failed to attach thread"); return NULL;
     }
-
+    long long handle = fn_create_engine_with_resolver(thread, resolve_module_callback, (void*)bridge);
     fn_detach_thread(thread);
 
-    free(script);
-    free(inputs);
-    free(mime_type);
+    bridge->handle = handle;
+    uv_mutex_lock(&g_mutex); bridge->next = g_bridges; g_bridges = bridge; uv_mutex_unlock(&g_mutex);
+    napi_value out; napi_create_int64(env, (int64_t)handle, &out); return out;
+}
 
-    if (result_copy == NULL) {
-        napi_throw_error(env, NULL, "Script execution failed");
-        return NULL;
+// destroyEngine(handle) -> void
+static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
+    if (!g_initialized) return NULL;
+    size_t argc = 1; napi_value argv[1];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (argc < 1) { napi_throw_error(env, NULL, "destroyEngine requires (handle)"); return NULL; }
+    int64_t handle64; napi_get_value_int64(env, argv[0], &handle64);
+    long long handle = (long long)handle64;
+
+    if (fn_destroy_engine) {
+        void* thread = NULL;
+        if (fn_attach_thread(g_isolate, &thread) == 0) { fn_destroy_engine(thread, handle); fn_detach_thread(thread); }
     }
+    uv_mutex_lock(&g_mutex);
+    engine_bridge_t** pp = &g_bridges; engine_bridge_t* found = NULL;
+    while (*pp != NULL) { if ((*pp)->handle == handle) { found = *pp; *pp = found->next; break; } pp = &(*pp)->next; }
+    uv_mutex_unlock(&g_mutex);
+    if (found != NULL) {
+        if (found->resolver_js != NULL && found->env != NULL) napi_delete_reference(found->env, found->resolver_js);
+        resolver_results_free_all(found); free(found);
+    }
+    return NULL;
+}
 
-    napi_value result_str;
-    napi_create_string_utf8(env, result_copy, NAPI_AUTO_LENGTH, &result_str);
-    free(result_copy);
+// runScriptEngine(handle, script, inputsJson) -> string
+static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) {
+    if (!g_initialized) { napi_throw_error(env, NULL, "Not initialized. Call initialize() first."); return NULL; }
+    if (!fn_run_script_engine) { napi_throw_error(env, NULL, "run_script_engine not available in native library"); return NULL; }
+    size_t argc = 3; napi_value argv[3];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (argc < 3) { napi_throw_error(env, NULL, "runScriptEngine requires (handle, script, inputsJson)"); return NULL; }
+    int64_t handle64; napi_get_value_int64(env, argv[0], &handle64);
+    long long handle = (long long)handle64;
 
-    return result_str;
+    size_t script_len, inputs_len;
+    napi_get_value_string_utf8(env, argv[1], NULL, 0, &script_len);
+    napi_get_value_string_utf8(env, argv[2], NULL, 0, &inputs_len);
+    char* script = (char*)malloc(script_len + 1);
+    char* inputs = (char*)malloc(inputs_len + 1);
+    if (script == NULL || inputs == NULL) { free(script); free(inputs); napi_throw_error(env, NULL, "OOM"); return NULL; }
+    napi_get_value_string_utf8(env, argv[1], script, script_len + 1, NULL);
+    napi_get_value_string_utf8(env, argv[2], inputs, inputs_len + 1, NULL);
+
+    void* thread = NULL;
+    if (fn_attach_thread(g_isolate, &thread) != 0) { free(script); free(inputs); napi_throw_error(env, NULL, "Failed to attach thread"); return NULL; }
+
+    char* result = (char*)fn_run_script_engine(thread, handle, script, inputs);
+
+    uv_mutex_lock(&g_mutex);
+    engine_bridge_t* bridge = bridge_find(handle);
+    uv_mutex_unlock(&g_mutex);
+    if (bridge != NULL) resolver_results_free_all(bridge);
+
+    char* result_copy = result ? strdup(result) : NULL;
+    if (result != NULL) fn_free_cstring(thread, result);
+    fn_detach_thread(thread);
+    free(script); free(inputs);
+
+    napi_value out;
+    if (result_copy) { napi_create_string_utf8(env, result_copy, NAPI_AUTO_LENGTH, &out); free(result_copy); }
+    else { napi_create_string_utf8(env, "", 0, &out); }
+    return out;
 }
 
 // --- Cleanup (must run on a separate thread to avoid V8 signal handler conflict) ---
@@ -1000,13 +1002,21 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
   if (g_initialized) {
     g_ref_count--;
     if (g_ref_count <= 0) {
-      // Clean up resolver reference
-      if (g_resolver_ref != NULL && g_resolver_env != NULL) {
-        napi_delete_reference(g_resolver_env, g_resolver_ref);
+      // Tear down any engine bridges never explicitly destroyed. We already
+      // hold g_mutex here, so walk g_bridges inline (no re-lock): delete each
+      // bridge's napi_ref on its own env, free its tracked result buffers, and
+      // free the node.
+      engine_bridge_t* b = g_bridges;
+      while (b != NULL) {
+        engine_bridge_t* next = b->next;
+        if (b->resolver_js != NULL && b->env != NULL) {
+          napi_delete_reference(b->env, b->resolver_js);
+        }
+        resolver_results_free_all(b);
+        free(b);
+        b = next;
       }
-      g_resolver_ref = NULL;
-      g_resolver_env = NULL;
-      resolver_results_free_all();
+      g_bridges = NULL;
 
       uv_thread_t tid;
       uv_thread_options_t opts;
@@ -1042,14 +1052,23 @@ static napi_value Init(napi_env env, napi_value exports) {
   napi_create_function(env, "runScript", NAPI_AUTO_LENGTH, dw_napi_run_script, NULL, &fn);
   napi_set_named_property(env, exports, "runScript", fn);
 
-  napi_create_function(env, "runScriptStreaming", NAPI_AUTO_LENGTH, napi_run_script_streaming, NULL, &fn);
-  napi_set_named_property(env, exports, "runScriptStreaming", fn);
+  napi_create_function(env, "createEngine", NAPI_AUTO_LENGTH, napi_create_engine, NULL, &fn);
+  napi_set_named_property(env, exports, "createEngine", fn);
 
-  napi_create_function(env, "runScriptTransform", NAPI_AUTO_LENGTH, napi_run_script_transform, NULL, &fn);
-  napi_set_named_property(env, exports, "runScriptTransform", fn);
+  napi_create_function(env, "createEngineWithResolver", NAPI_AUTO_LENGTH, napi_create_engine_with_resolver, NULL, &fn);
+  napi_set_named_property(env, exports, "createEngineWithResolver", fn);
 
-  napi_create_function(env, "runWithResolver", NAPI_AUTO_LENGTH, napi_run_with_resolver, NULL, &fn);
-  napi_set_named_property(env, exports, "runWithResolver", fn);
+  napi_create_function(env, "destroyEngine", NAPI_AUTO_LENGTH, napi_destroy_engine, NULL, &fn);
+  napi_set_named_property(env, exports, "destroyEngine", fn);
+
+  napi_create_function(env, "runScriptEngine", NAPI_AUTO_LENGTH, napi_run_script_engine, NULL, &fn);
+  napi_set_named_property(env, exports, "runScriptEngine", fn);
+
+  napi_create_function(env, "runScriptStreamingEngine", NAPI_AUTO_LENGTH, napi_run_script_streaming_engine, NULL, &fn);
+  napi_set_named_property(env, exports, "runScriptStreamingEngine", fn);
+
+  napi_create_function(env, "runScriptTransformEngine", NAPI_AUTO_LENGTH, napi_run_script_transform_engine, NULL, &fn);
+  napi_set_named_property(env, exports, "runScriptTransformEngine", fn);
 
   napi_create_function(env, "cleanup", NAPI_AUTO_LENGTH, napi_cleanup, NULL, &fn);
   napi_set_named_property(env, exports, "cleanup", fn);
