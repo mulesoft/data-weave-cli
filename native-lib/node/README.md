@@ -197,15 +197,15 @@ for await (const chunk of generator) {
 
 **Returns:** `StreamingResult`
 
-#### `cleanup(): void`
+#### `cleanup(): Promise<void>`
 
-Clean up the global DataWeave runtime instance. Called automatically on process exit.
+Clean up the global DataWeave runtime instance. Called automatically on process exit (fire-and-forget — the exit hook does not await it). Resolves once native teardown has actually finished; if a streaming/transform operation is still in flight anywhere in the process, teardown waits for it to drain before resolving.
 
 ```javascript
 import { cleanup } from 'dataweave-native';
 
 // Manual cleanup (usually not needed)
-cleanup();
+await cleanup();
 ```
 
 ### Class-Based API
@@ -222,13 +222,13 @@ try {
   const result = dw.run('2 + 2');
   console.log(result.getString());
 } finally {
-  dw.cleanup();
+  await dw.cleanup();
 }
 ```
 
 **Methods:**
 - `initialize()`: Initialize the native library
-- `cleanup()`: Release native resources
+- `cleanup(): Promise<void>`: Release native resources; resolves once native teardown finishes
 - `run(script, inputs?, opts?)`: Same as module-level `run()`
 - `runStreaming(script, inputs?)`: Same as module-level `runStreaming()`
 - `runTransform(script, input, opts?)`: Same as module-level `runTransform()`
