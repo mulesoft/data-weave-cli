@@ -1504,10 +1504,35 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
   uv_thread_options_t waiter_opts;
   waiter_opts.flags = UV_THREAD_HAS_STACK_SIZE;
   waiter_opts.stack_size = 2 * 1024 * 1024;
-  uv_thread_create_ex(&waiter_tid, &waiter_opts, teardown_waiter_thread_fn, NULL);
+  int spawn_rc = uv_thread_create_ex(&waiter_tid, &waiter_opts, teardown_waiter_thread_fn, NULL);
   // Deliberately not joined -- this thread finishes on its own and resolves
   // every waiter's promise itself; joining here would reintroduce exactly
   // the blocking-JS-thread problem this fix removes.
+
+  if (spawn_rc != 0) {
+    // Best-effort degradation: if the waiter thread never starts, nothing
+    // will ever clear g_teardown_pending, which would otherwise permanently
+    // wedge every future initialize()/cleanup() call. Roll back to "teardown
+    // did not start" -- the isolate stays up and the caller's promise still
+    // resolves, mirroring the fast path's ignore-teardown-return-code posture.
+    g_teardown_pending = false;
+    g_teardown_waiters = NULL;
+
+    napi_value undefined;
+    napi_get_undefined(env, &undefined);
+    napi_resolve_deferred(env, waiter->deferred, undefined);
+
+    napi_release_threadsafe_function(waiter->tsfn, napi_tsfn_release);
+    free(waiter);
+
+    // The isolate never hit zero refs -- it is still live and un-torn-down,
+    // so the process must not believe otherwise. g_initialized/g_isolate stay
+    // untouched (still valid).
+    g_ref_count = 1;
+
+    uv_mutex_unlock(&g_mutex);
+    return promise;
+  }
 
   uv_mutex_unlock(&g_mutex);
   return promise;
