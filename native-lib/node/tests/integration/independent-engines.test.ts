@@ -8,7 +8,10 @@ function tracked(...args: ConstructorParameters<typeof DataWeave>): DataWeave {
   instances.push(dw);
   return dw;
 }
-afterAll(() => { for (const dw of instances) dw.cleanup(); cleanup(); });
+afterAll(async () => {
+  for (const dw of instances) await dw.cleanup();
+  await cleanup();
+});
 
 const scriptImporting = (mod: string) =>
   `%dw 2.0\nimport org::test::${mod}\noutput application/json\n---\n${mod}::greet("X")`;

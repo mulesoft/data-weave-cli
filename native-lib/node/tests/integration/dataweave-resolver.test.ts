@@ -18,11 +18,11 @@ function trackedDataWeave(...args: ConstructorParameters<typeof DataWeave>): Dat
   return dw;
 }
 
-afterAll(() => {
+afterAll(async () => {
   for (const dw of instances) {
-    dw.cleanup();
+    await dw.cleanup();
   }
-  cleanup();
+  await cleanup();
 });
 
 describe('DataWeave with resolver', () => {
@@ -175,14 +175,14 @@ describe('DataWeave with resolver', () => {
   // handle, and the following initialize() must build a brand new bridge
   // (new napi_ref on the resolver, new owner-thread record) that resolves
   // custom modules again, not a stale or dangling one.
-  it('resolver-backed instance resolves a custom module again after initialize -> cleanup -> initialize', () => {
+  it('resolver-backed instance resolves a custom module again after initialize -> cleanup -> initialize', async () => {
     const dw = trackedDataWeave({
       resolveModule: modulesFromMap({
         'org/test/reinitLib.dwl': '%dw 2.0\nfun greet(n: String) = "Hello " ++ n',
       }),
     });
     dw.initialize();
-    dw.cleanup();
+    await dw.cleanup();
     dw.initialize();
 
     const result = dw.run(`
@@ -273,14 +273,14 @@ describe('DataWeave with resolver', () => {
   // contract; the native "Unknown engine handle" string is the deeper
   // contract the addon enforces if it were ever called with a stale handle,
   // which this guard prevents from happening via the public API.
-  it('run() after cleanup() throws a DataWeaveError via the TS-level ensureInitialized guard', () => {
+  it('run() after cleanup() throws a DataWeaveError via the TS-level ensureInitialized guard', async () => {
     const dw = trackedDataWeave({
       resolveModule: modulesFromMap({
         'org/test/destroyedHandleLib.dwl': '...',
       }),
     });
     dw.initialize();
-    dw.cleanup();
+    await dw.cleanup();
 
     expect(() => dw.run('1 + 1')).toThrow(DataWeaveError);
     expect(() => dw.run('1 + 1')).toThrow(/DataWeave runtime not initialized/);
