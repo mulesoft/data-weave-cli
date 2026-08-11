@@ -1422,18 +1422,33 @@ static void teardown_waiter_thread_fn(void* arg) {
   // thread to the isolate (g_thread from graal_create_isolate's bootstrap
   // thread is invalid here -- see cleanup_thread_fn's comment), then tear
   // down. Ignore the return code, matching today's behavior.
+  bool torn_down = false;
   if (fn_tear_down_isolate && fn_attach_thread && g_isolate) {
     void* local_thread = NULL;
     if (fn_attach_thread(g_isolate, &local_thread) == 0 && local_thread != NULL) {
       fn_tear_down_isolate(local_thread);
+      torn_down = true;
     }
+    // else: attach failed -- the isolate is still alive. Do NOT clear g_isolate,
+    // or it becomes unreachable and can never be torn down.
+  } else {
+    // Nothing to tear down (no isolate / FFI unavailable) -- safe to clear.
+    torn_down = true;
   }
 
   uv_mutex_lock(&g_mutex);
-  g_thread = NULL;
-  g_isolate = NULL;
-  g_initialized = 0;
-  g_ref_count = 0;
+  if (torn_down) {
+    g_thread = NULL;
+    g_isolate = NULL;
+    g_initialized = 0;
+    g_ref_count = 0;
+  }
+  // g_teardown_pending must clear regardless: this waiter thread is done, and
+  // leaving it set would permanently wedge future initialize()/cleanup(). On the
+  // attach-failure path the isolate stays live and g_initialized stays 1, so a
+  // later initialize() will correctly ref-count the existing isolate rather than
+  // build a second one, and this failed teardown is simply retried on the next
+  // last-release cleanup().
   g_teardown_pending = false;
   // Release any initialize() call blocked waiting for teardown to finish
   // (see Task 3).
