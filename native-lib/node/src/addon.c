@@ -375,7 +375,12 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
   opts.stack_size = 16 * 1024 * 1024;
-  uv_thread_create_ex(&tid, &opts, init_thread_fn, &args);
+  int spawn_rc = uv_thread_create_ex(&tid, &opts, init_thread_fn, &args);
+  if (spawn_rc != 0) {
+    uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "Failed to spawn initialization thread");
+    return NULL;
+  }
   uv_thread_join(&tid);
 
   if (args.result != 0) {
@@ -454,7 +459,13 @@ static napi_value dw_napi_run_script(napi_env env, napi_callback_info info) {
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
   opts.stack_size = 2 * 1024 * 1024;
-  uv_thread_create_ex(&tid, &opts, run_script_thread_fn, &call_args);
+  int spawn_rc = uv_thread_create_ex(&tid, &opts, run_script_thread_fn, &call_args);
+  if (spawn_rc != 0) {
+    free(script);
+    free(inputs);
+    napi_throw_error(env, NULL, "Failed to spawn script execution thread");
+    return NULL;
+  }
   uv_thread_join(&tid);
 
   free(script);
@@ -1490,9 +1501,15 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
     uv_thread_options_t opts;
     opts.flags = UV_THREAD_HAS_STACK_SIZE;
     opts.stack_size = 2 * 1024 * 1024;
-    uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, NULL);
-    uv_thread_join(&tid);
-
+    int spawn_rc = uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, NULL);
+    if (spawn_rc == 0) {
+      uv_thread_join(&tid);
+    }
+    // Whether or not the teardown thread ran, treat this as the last release:
+    // clear global state so the addon is back to an uninitialized, re-initializable
+    // state. If the spawn failed the isolate may not have been torn down (a
+    // best-effort degradation, matching the fast path's existing ignore-return
+    // posture), but we must not join an uninitialized tid (UB).
     g_thread = NULL;
     g_isolate = NULL;
     g_initialized = 0;
