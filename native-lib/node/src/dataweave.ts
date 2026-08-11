@@ -104,14 +104,21 @@ export class DataWeave {
   /**
    * Releases the native runtime. Idempotent — a no-op if not initialized. After
    * cleanup the instance can be re-initialized via {@link DataWeave.initialize}.
+   *
+   * Resolves once the underlying native isolate has actually finished tearing
+   * down. If a streaming/transform operation on this or any other instance is
+   * still in flight when the last reference is released, native teardown
+   * waits for it to drain before resolving — awaiting this rather than
+   * firing-and-forgetting avoids racing a subsequent {@link initialize} against
+   * an isolate that is still tearing down.
    */
-  cleanup(): void {
+  async cleanup(): Promise<void> {
     if (!this.initialized) return;
     if (this.engineHandle !== null) {
       ffi.destroyEngine(this.engineHandle);
       this.engineHandle = null;
     }
-    ffi.cleanup();
+    await ffi.cleanup();
     this.initialized = false;
   }
 
@@ -262,9 +269,10 @@ export function runTransform(
  * Releases the shared {@link DataWeave} singleton, if one was created. A fresh
  * singleton is created lazily on the next convenience-API call.
  */
-export function cleanup(): void {
+export async function cleanup(): Promise<void> {
   if (globalInstance) {
-    globalInstance.cleanup();
+    const instance = globalInstance;
     globalInstance = null;
+    await instance.cleanup();
   }
 }

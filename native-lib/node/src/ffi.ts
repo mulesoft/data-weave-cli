@@ -24,7 +24,7 @@ interface NativeAddon {
     readCb: (bufSize: number) => Buffer | null,
     writeCb: (chunk: Buffer) => void
   ): Promise<string>;
-  cleanup(): void;
+  cleanup(): Promise<void>;
 }
 
 let addon: NativeAddon | null = null;
@@ -91,6 +91,6 @@ export function runScriptTransformEngine(
   );
 }
 
-export function cleanup(): void {
-  getAddon().cleanup();
+export function cleanup(): Promise<void> {
+  return getAddon().cleanup();
 }
