@@ -502,17 +502,25 @@ struct streaming_work {
 };
 
 static void call_js_write(napi_env env, napi_value js_callback, void* context, void* data) {
-  // env==NULL here is safe: no synchronously-blocked waiter, unlike call_js_read.
-  // Completion is driven by a separately-enqueued sentinel chunk (len == -1), not
-  // by a thread blocked on a condition variable waiting on this callback.
-  if (env == NULL || data == NULL) return;
+  // data == NULL: nothing was queued, nothing to free or finalize.
+  if (data == NULL) return;
   struct chunk_data* chunk = (struct chunk_data*)data;
   struct streaming_work* w = (struct streaming_work*)context;
 
   if (chunk->len == -1) {
-    napi_value result;
-    napi_create_string_utf8(env, chunk->buf, strlen(chunk->buf), &result);
-    napi_resolve_deferred(env, w->deferred, result);
+    // Completion sentinel. env == NULL means the environment is tearing down
+    // (e.g. a Worker terminating mid-op): we must not call any napi value or
+    // JS-calling API (napi_create_string_utf8/napi_resolve_deferred need a
+    // live env), but we must still perform every bit of native finalization
+    // -- join the worker, release the tsfn, drop the bridge in-flight hold,
+    // and free every heap field -- exactly once. Skipping this on env == NULL
+    // would leak `w` and could strand a bridge marked for deferred destruction
+    // indefinitely.
+    if (env != NULL) {
+      napi_value result;
+      napi_create_string_utf8(env, chunk->buf, strlen(chunk->buf), &result);
+      napi_resolve_deferred(env, w->deferred, result);
+    }
 
     free(chunk->buf);
     free(chunk);
@@ -526,6 +534,15 @@ static void call_js_write(napi_env env, napi_value js_callback, void* context, v
     // be freed, so touch nothing on it afterward.
     bridge_end_op(w->bridge);
     free(w);
+    return;
+  }
+
+  // Non-sentinel data chunk. If env == NULL the environment is gone and we
+  // cannot deliver it to JS; free it and return without touching `w` (its
+  // finalization happens only on the sentinel, above).
+  if (env == NULL) {
+    free(chunk->buf);
+    free(chunk);
     return;
   }
 
@@ -839,17 +856,25 @@ static int transform_write_cb(void* ctx, const char* buf, int len) {
 }
 
 static void call_js_transform_write(napi_env env, napi_value js_callback, void* context, void* data) {
-  // env==NULL here is safe: no synchronously-blocked waiter, unlike call_js_read.
-  // Completion is driven by a separately-enqueued sentinel chunk (len == -1), not
-  // by a thread blocked on a condition variable waiting on this callback.
-  if (env == NULL || data == NULL) return;
+  // data == NULL: nothing was queued, nothing to free or finalize.
+  if (data == NULL) return;
   struct chunk_data* chunk = (struct chunk_data*)data;
   struct transform_work* w = (struct transform_work*)context;
 
   if (chunk->len == -1) {
-    napi_value result;
-    napi_create_string_utf8(env, chunk->buf, strlen(chunk->buf), &result);
-    napi_resolve_deferred(env, w->deferred, result);
+    // Completion sentinel. env == NULL means the environment is tearing down
+    // (e.g. a Worker terminating mid-op): we must not call any napi value or
+    // JS-calling API (napi_create_string_utf8/napi_resolve_deferred need a
+    // live env), but we must still perform every bit of native finalization
+    // -- join the worker, release both tsfns, drop the bridge in-flight hold,
+    // and free every heap field -- exactly once. Skipping this on env == NULL
+    // would leak `w` and could strand a bridge marked for deferred destruction
+    // indefinitely.
+    if (env != NULL) {
+      napi_value result;
+      napi_create_string_utf8(env, chunk->buf, strlen(chunk->buf), &result);
+      napi_resolve_deferred(env, w->deferred, result);
+    }
 
     free(chunk->buf);
     free(chunk);
@@ -867,6 +892,15 @@ static void call_js_transform_write(napi_env env, napi_value js_callback, void* 
     // be freed, so touch nothing on it afterward.
     bridge_end_op(w->bridge);
     free(w);
+    return;
+  }
+
+  // Non-sentinel data chunk. If env == NULL the environment is gone and we
+  // cannot deliver it to JS; free it and return without touching `w` (its
+  // finalization happens only on the sentinel, above).
+  if (env == NULL) {
+    free(chunk->buf);
+    free(chunk);
     return;
   }
 
