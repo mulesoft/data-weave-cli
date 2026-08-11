@@ -517,7 +517,7 @@ static void call_js_write(napi_env env, napi_value js_callback, void* context, v
     // or perform teardown itself (see the waiter thread in Task 2).
     uv_mutex_lock(&g_mutex);
     g_active_ops--;
-    uv_cond_signal(&g_teardown_cond);
+    uv_cond_broadcast(&g_teardown_cond);
     uv_mutex_unlock(&g_mutex);
     free(w);
     return;
@@ -817,7 +817,7 @@ static void call_js_transform_write(napi_env env, napi_value js_callback, void* 
     // or perform teardown itself (see the waiter thread in Task 2).
     uv_mutex_lock(&g_mutex);
     g_active_ops--;
-    uv_cond_signal(&g_teardown_cond);
+    uv_cond_broadcast(&g_teardown_cond);
     uv_mutex_unlock(&g_mutex);
     free(w);
     return;
