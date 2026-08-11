@@ -220,16 +220,40 @@ export class DataWeave {
 
 // Module-level convenience API with lazy singleton
 let globalInstance: DataWeave | null = null;
+// Guards against beforeExit and exit both driving cleanup for the same
+// shutdown. Belt-and-suspenders on top of cleanup()'s own idempotency.
+let cleanupStarted = false;
 
 /**
  * Returns the process-wide {@link DataWeave} singleton, creating and
- * initializing it (and registering a process-exit cleanup hook) on first use.
+ * initializing it (and registering exit-cleanup hooks) on first use.
+ *
+ * Two hooks are registered, covering complementary cases:
+ * - `beforeExit` fires when the event loop is about to drain naturally and
+ *   CAN run async work (Node keeps the loop alive until it settles), so it
+ *   drains any in-flight streaming/transform operation gracefully. This is
+ *   the common case.
+ * - `exit` fires unconditionally but runs strictly synchronously — it is
+ *   the last-ditch fallback for `process.exit()`, uncaught exceptions, and
+ *   fatal signals, none of which trigger `beforeExit`. It can only perform
+ *   a best-effort synchronous cleanup, so an in-flight async operation may
+ *   still be abandoned in that narrow set of cases.
+ * The `cleanupStarted` guard ensures only one of the two hooks actually
+ * runs cleanup for a given shutdown.
  */
 function getGlobalInstance(): DataWeave {
   if (!globalInstance) {
     globalInstance = new DataWeave();
     globalInstance.initialize();
-    process.on("exit", () => cleanup());
+    process.on("beforeExit", async () => {
+      if (cleanupStarted) return;
+      cleanupStarted = true;
+      await cleanup(); // beforeExit can await: drains in-flight ops
+    });
+    process.on("exit", () => {
+      if (cleanupStarted) return; // beforeExit already handled it
+      cleanup(); // fallback: best-effort sync fast path
+    });
   }
   return globalInstance;
 }

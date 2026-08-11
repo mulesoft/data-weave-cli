@@ -199,7 +199,7 @@ for await (const chunk of generator) {
 
 #### `cleanup(): Promise<void>`
 
-Clean up the global DataWeave runtime instance. Called automatically on process exit (fire-and-forget — the exit hook does not await it). Resolves once native teardown has actually finished; if a streaming/transform operation is still in flight anywhere in the process, teardown waits for it to drain before resolving.
+Clean up the global DataWeave runtime instance. Called automatically on process shutdown via two hooks: `beforeExit` awaits it, so a streaming/transform operation still in flight drains gracefully before the process exits normally; `exit` is a synchronous last-ditch fallback for `process.exit()`, uncaught exceptions, and fatal signals — cases where `beforeExit` never fires — and cannot await the drain. Called manually, it resolves once native teardown has actually finished; if a streaming/transform operation is still in flight anywhere in the process, teardown waits for it to drain before resolving.
 
 ```javascript
 import { cleanup } from 'dataweave-native';
