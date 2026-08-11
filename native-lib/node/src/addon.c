@@ -106,6 +106,34 @@ typedef struct engine_bridge {
 } engine_bridge_t;
 static engine_bridge_t* g_bridges = NULL;  // linked list, guarded by g_mutex
 
+// --- Teardown-vs-active-ops coordination (deadlock fix) ---
+//
+// napi_cleanup's last-release path used to synchronously join a thread that
+// calls graal_tear_down_isolate(), which blocks until every GraalVM-attached
+// thread detaches. A runStreaming()/runTransform() background worker stays
+// attached and can be mid-delivery in napi_call_threadsafe_function(...,
+// napi_tsfn_blocking), which needs the JS thread to run its callback -- but
+// the JS thread is the one blocked in the join. g_active_ops tracks every
+// in-flight streaming/transform op (resolver-backed or not, since teardown
+// blocks on ANY attached worker) so napi_cleanup can wait for them to drain
+// on a dedicated thread instead of blocking the calling JS thread.
+static int g_active_ops = 0;
+static bool g_teardown_pending = false;
+static uv_cond_t g_teardown_cond;
+
+// One node per cleanup() call that arrived while a teardown was already
+// pending. napi_env/napi_deferred/napi_threadsafe_function are thread-affine,
+// so a second cleanup() call from a different Worker's env cannot have its
+// promise resolved via another env's tsfn -- each waiting caller gets its own
+// node, created on its own env, resolved by the waiter thread on completion.
+typedef struct teardown_waiter {
+    napi_env env;
+    napi_deferred deferred;
+    napi_threadsafe_function tsfn;
+    struct teardown_waiter* next;
+} teardown_waiter_t;
+static teardown_waiter_t* g_teardown_waiters = NULL;  // linked list, guarded by g_mutex
+
 // Returns true if the buffer is now tracked (or there was nothing to track).
 // Returns false only when a buffer was supplied but the tracking node could
 // not be allocated — in that case the caller owns `buf` again and MUST free
@@ -471,6 +499,14 @@ static void call_js_write(napi_env env, napi_value js_callback, void* context, v
     // during the op it deferred the free to here (F1). After this the bridge may
     // be freed, so touch nothing on it afterward.
     bridge_end_op(w->bridge);
+    // Mirror the decrement for the process-global op count and wake a
+    // pending teardown waiter (if any) once this op is fully done. This is
+    // the only new responsibility added here -- it does not spawn anything
+    // or perform teardown itself (see the waiter thread in Task 2).
+    uv_mutex_lock(&g_mutex);
+    g_active_ops--;
+    uv_cond_signal(&g_teardown_cond);
+    uv_mutex_unlock(&g_mutex);
     free(w);
     return;
   }
@@ -579,6 +615,14 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
   // before spawning the thread; the completion sentinel releases it via
   // bridge_end_op. No early return exists between here and the spawn.
   w->bridge = bridge_begin_op(w->handle);
+
+  // Count this op globally so a concurrent cleanup() knows to wait for it
+  // before tearing down the isolate (see g_active_ops comment above). Same
+  // timing/invariant as bridge_begin_op: before spawning the worker thread,
+  // no early return in between.
+  uv_mutex_lock(&g_mutex);
+  g_active_ops++;
+  uv_mutex_unlock(&g_mutex);
 
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
@@ -755,6 +799,14 @@ static void call_js_transform_write(napi_env env, napi_value js_callback, void* 
     // during the op it deferred the free to here (F1). After this the bridge may
     // be freed, so touch nothing on it afterward.
     bridge_end_op(w->bridge);
+    // Mirror the decrement for the process-global op count and wake a
+    // pending teardown waiter (if any) once this op is fully done. This is
+    // the only new responsibility added here -- it does not spawn anything
+    // or perform teardown itself (see the waiter thread in Task 2).
+    uv_mutex_lock(&g_mutex);
+    g_active_ops--;
+    uv_cond_signal(&g_teardown_cond);
+    uv_mutex_unlock(&g_mutex);
     free(w);
     return;
   }
@@ -871,6 +923,14 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
   // before spawning the thread; the completion sentinel releases it via
   // bridge_end_op. No early return exists between here and the spawn.
   w->bridge = bridge_begin_op(w->handle);
+
+  // Count this op globally so a concurrent cleanup() knows to wait for it
+  // before tearing down the isolate (see g_active_ops comment above). Same
+  // timing/invariant as bridge_begin_op: before spawning the worker thread,
+  // no early return in between.
+  uv_mutex_lock(&g_mutex);
+  g_active_ops++;
+  uv_mutex_unlock(&g_mutex);
 
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
@@ -1221,6 +1281,7 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
 
 static void init_g_mutex(void) {
   uv_mutex_init(&g_mutex);
+  uv_cond_init(&g_teardown_cond);
 }
 
 static napi_value Init(napi_env env, napi_value exports) {
