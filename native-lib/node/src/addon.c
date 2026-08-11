@@ -643,7 +643,29 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
   opts.stack_size = 2 * 1024 * 1024;
-  uv_thread_create_ex(&w->tid, &opts, streaming_thread_fn, w);
+  int spawn_rc = uv_thread_create_ex(&w->tid, &opts, streaming_thread_fn, w);
+
+  if (spawn_rc != 0) {
+    // The worker never ran, so nothing will ever decrement g_active_ops,
+    // release the bridge hold, or resolve the promise -- unwind everything
+    // committed above ourselves, in reverse order, mirroring call_js_write's
+    // completion branch (minus uv_thread_join: there is no thread to join).
+    uv_mutex_lock(&g_mutex);
+    g_active_ops--;
+    uv_cond_broadcast(&g_teardown_cond);
+    uv_mutex_unlock(&g_mutex);
+
+    bridge_end_op(w->bridge);
+    napi_release_threadsafe_function(w->tsfn, napi_tsfn_release);
+
+    napi_value result;
+    napi_create_string_utf8(env, "{\"success\":false,\"error\":\"Failed to spawn streaming worker thread\"}", NAPI_AUTO_LENGTH, &result);
+    napi_resolve_deferred(env, w->deferred, result);
+
+    free(w->script);
+    free(w->inputs_json);
+    free(w);
+  }
 
   return promise;
 }
@@ -951,7 +973,34 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
   opts.stack_size = 2 * 1024 * 1024;
-  uv_thread_create_ex(&w->tid, &opts, transform_thread_fn, w);
+  int spawn_rc = uv_thread_create_ex(&w->tid, &opts, transform_thread_fn, w);
+
+  if (spawn_rc != 0) {
+    // The worker never ran, so nothing will ever decrement g_active_ops,
+    // release the bridge hold, or resolve the promise -- unwind everything
+    // committed above ourselves, in reverse order, mirroring
+    // call_js_transform_write's completion branch (minus uv_thread_join:
+    // there is no thread to join).
+    uv_mutex_lock(&g_mutex);
+    g_active_ops--;
+    uv_cond_broadcast(&g_teardown_cond);
+    uv_mutex_unlock(&g_mutex);
+
+    bridge_end_op(w->bridge);
+    napi_release_threadsafe_function(w->read_tsfn, napi_tsfn_release);
+    napi_release_threadsafe_function(w->write_tsfn, napi_tsfn_release);
+
+    napi_value result;
+    napi_create_string_utf8(env, "{\"success\":false,\"error\":\"Failed to spawn transform worker thread\"}", NAPI_AUTO_LENGTH, &result);
+    napi_resolve_deferred(env, w->deferred, result);
+
+    free(w->script);
+    free(w->inputs_json);
+    free(w->input_name);
+    free(w->input_mime_type);
+    free(w->input_charset);
+    free(w);
+  }
 
   return promise;
 }
