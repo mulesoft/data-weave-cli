@@ -265,6 +265,187 @@ describe('DataWeave with resolver', () => {
     }
   });
 
+  // Deadlock regression: unlike the F1 test above (which races cleanup()
+  // against a stream that fails before emitting data), this test uses a
+  // script that produces real output with enough volume that the worker
+  // thread is genuinely attached and mid-delivery -- blocked in
+  // napi_call_threadsafe_function(..., napi_tsfn_blocking) -- when cleanup()
+  // drops the last native reference. Before the fix (napi_cleanup's
+  // synchronous uv_thread_join), this scenario hung the process; after the
+  // fix, cleanup() defers teardown to a waiter thread until this op drains,
+  // so both the cleanup() promise and the streaming generator settle.
+  it('cleanup() during an active, output-producing runStreaming() does not deadlock', async () => {
+    const dw = trackedDataWeave();
+    dw.initialize();
+
+    const gen = dw.runStreaming(
+      'output application/json --- (1 to 5000) map {id: $, name: "item_" ++ $}'
+    );
+
+    // Pin the operation without draining it: exactly one .next() call runs
+    // the generator's synchronous prefix (including the native call that
+    // hands the op to a background thread) up to its first await.
+    const firstNext = gen.next();
+
+    const cleanupPromise = dw.cleanup();
+
+    await expect(
+      Promise.race([
+        cleanupPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('cleanup() timed out')), 10000)),
+      ])
+    ).resolves.toBeUndefined();
+
+    // Drain whatever remains; the stream itself must also settle, not hang.
+    let result = await firstNext;
+    while (!result.done) {
+      result = await gen.next();
+    }
+    expect(result.value).toBeDefined();
+  }, 15000);
+
+  // Same deadlock regression as above, for runTransform() -- the design doc
+  // notes the same problem applies to transform's write_tsfn delivery path.
+  it('cleanup() during an active, output-producing runTransform() does not deadlock', async () => {
+    const dw = trackedDataWeave();
+    dw.initialize();
+
+    const parts: Buffer[] = [Buffer.from("[")];
+    for (let i = 1; i <= 2000; i++) {
+      if (i > 1) parts.push(Buffer.from(","));
+      parts.push(Buffer.from(`{"id":${i}}`));
+    }
+    parts.push(Buffer.from("]"));
+    const inputData = [Buffer.concat(parts)];
+
+    const gen = dw.runTransform(
+      "output application/json\n---\npayload map $",
+      inputData,
+      { mimeType: "application/json" }
+    );
+
+    const firstNext = gen.next();
+
+    // Unlike runStreaming (whose native call is synchronous up to its first
+    // await), runTransform's generator body awaits createChunkReader(input)
+    // -- itself a microtask, not real async work for a sync-iterable input --
+    // before reaching the native runScriptTransformEngine call. A single
+    // un-awaited .next() only advances the generator to that intermediate
+    // await, not past it, so the native op would not yet be dispatched
+    // (g_active_ops still 0) when cleanup() below fires. One extra microtask
+    // tick lets that internal await settle so the native call is actually
+    // in flight, which is what this test needs to race against.
+    await Promise.resolve();
+
+    const cleanupPromise = dw.cleanup();
+
+    await expect(
+      Promise.race([
+        cleanupPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('cleanup() timed out')), 10000)),
+      ])
+    ).resolves.toBeUndefined();
+
+    let result = await firstNext;
+    while (!result.done) {
+      result = await gen.next();
+    }
+    expect(result.value).toBeDefined();
+  }, 15000);
+
+  // Fast-path regression guard: cleanup() called once a stream has already
+  // fully drained (g_active_ops back to 0 by the time the last reference is
+  // released) must still resolve via the original, unchanged inline fast
+  // path -- confirming the new deferred-teardown branch didn't silently
+  // become the only path through napi_cleanup.
+  it('cleanup() after a stream has already fully drained resolves via the fast path', async () => {
+    const dw = trackedDataWeave();
+    dw.initialize();
+
+    const gen = dw.runStreaming('output application/json --- {a: 1}');
+    let result = await gen.next();
+    while (!result.done) {
+      result = await gen.next();
+    }
+    expect(result.value.success).toBe(true);
+
+    await expect(dw.cleanup()).resolves.toBeUndefined();
+  });
+
+  // Idempotency / re-entrant cleanup: two cleanup() calls that both arrive
+  // while a stream is active must both resolve off the same underlying
+  // teardown -- without spawning a second waiter thread, throwing, or
+  // decrementing g_ref_count below 0.
+  it('two concurrent cleanup() calls during an active stream both resolve cleanly', async () => {
+    const dw = trackedDataWeave();
+    dw.initialize();
+
+    const gen = dw.runStreaming(
+      'output application/json --- (1 to 3000) map {id: $}'
+    );
+    const firstNext = gen.next();
+
+    const [r1, r2] = await Promise.all([
+      Promise.race([
+        dw.cleanup(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('first cleanup() timed out')), 10000)),
+      ]),
+      Promise.race([
+        dw.cleanup(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('second cleanup() timed out')), 10000)),
+      ]),
+    ]);
+    expect(r1).toBeUndefined();
+    expect(r2).toBeUndefined();
+
+    let result = await firstNext;
+    while (!result.done) {
+      result = await gen.next();
+    }
+  }, 15000);
+
+  // Re-initialize during pending teardown: starting a stream, calling
+  // cleanup() without awaiting it, then immediately calling initialize()
+  // again must block (at the native layer, inside napi_initialize) until the
+  // pending teardown finishes, rather than racing a second
+  // graal_create_isolate against an isolate that is still tearing down. The
+  // instance must be fully usable afterward.
+  it('initialize() called during a pending teardown waits for it and then works', async () => {
+    const dw = trackedDataWeave();
+    dw.initialize();
+
+    const gen = dw.runStreaming(
+      'output application/json --- (1 to 3000) map {id: $}'
+    );
+    const firstNext = gen.next();
+
+    // Deliberately not awaited -- this is the pending-teardown state under test.
+    const cleanupPromise = dw.cleanup();
+
+    // dw.cleanup() already set dw's own initialized flag false only after its
+    // internal await resolves; to exercise the *native* pending-teardown path
+    // independent of this specific instance's TS-level guard, drive a second,
+    // fresh instance's initialize() concurrently -- it shares the same
+    // process-global isolate/g_ref_count.
+    const dw2 = trackedDataWeave();
+    const secondInitDone = new Promise<void>((resolve) => {
+      dw2.initialize();
+      resolve();
+    });
+
+    await Promise.race([
+      Promise.all([cleanupPromise, secondInitDone]),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('initialize()-during-teardown timed out')), 10000)),
+    ]);
+
+    expect(dw2.run("6 * 7").getString()).toBe("42");
+
+    let result = await firstNext;
+    while (!result.done) {
+      result = await gen.next();
+    }
+  }, 15000);
+
   // Node-layer contract (F4-adjacent): once cleanup() has torn an instance
   // down, run() must be rejected by dataweave.ts's own ensureInitialized()
   // guard -- a DataWeaveError with a "not initialized" message -- rather than
