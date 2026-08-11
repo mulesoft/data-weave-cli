@@ -298,5 +298,12 @@ export async function cleanup(): Promise<void> {
     const instance = globalInstance;
     globalInstance = null;
     await instance.cleanup();
+    // Reset the guard only after the drain has fully completed, so a
+    // revived singleton (created by a later getGlobalInstance() call)
+    // gets its own live hooks for the next real exit. This must stay
+    // last: resetting earlier could let a concurrent `exit` firing on
+    // this same shutdown re-enter cleanup while the async drain above
+    // is still in flight.
+    cleanupStarted = false;
   }
 }
