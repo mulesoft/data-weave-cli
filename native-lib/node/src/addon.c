@@ -348,6 +348,18 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   napi_get_value_string_utf8(env, argv[0], lib_path, sizeof(lib_path), &len);
 
   uv_mutex_lock(&g_mutex);
+
+  // If a teardown from a prior cleanup() is still draining (the isolate is
+  // being torn down on the waiter thread from Task 2), do not race a fresh
+  // graal_create_isolate against it -- wait until the isolate is fully gone
+  // (g_teardown_pending false AND g_isolate NULL) before proceeding. This is
+  // a narrow, rare path (re-initializing mid-drain), not a fast path, so a
+  // blocking wait here is acceptable and matches this function's existing
+  // fully-synchronous contract.
+  while (g_teardown_pending || (g_isolate != NULL && !g_initialized)) {
+    uv_cond_wait(&g_teardown_cond, &g_mutex);
+  }
+
   if (g_initialized) {
     g_ref_count++;
     uv_mutex_unlock(&g_mutex);
