@@ -511,14 +511,6 @@ static void call_js_write(napi_env env, napi_value js_callback, void* context, v
     // during the op it deferred the free to here (F1). After this the bridge may
     // be freed, so touch nothing on it afterward.
     bridge_end_op(w->bridge);
-    // Mirror the decrement for the process-global op count and wake a
-    // pending teardown waiter (if any) once this op is fully done. This is
-    // the only new responsibility added here -- it does not spawn anything
-    // or perform teardown itself (see the waiter thread in Task 2).
-    uv_mutex_lock(&g_mutex);
-    g_active_ops--;
-    uv_cond_broadcast(&g_teardown_cond);
-    uv_mutex_unlock(&g_mutex);
     free(w);
     return;
   }
@@ -574,6 +566,18 @@ static void streaming_thread_fn(void* arg) {
     }
     fn_detach_thread(worker_thread);
   }
+
+  // Decrement here, once this thread has fully detached from the isolate --
+  // not in call_js_write's completion branch. call_js_write only runs when
+  // the JS thread's event loop turns, and napi_initialize's pending-teardown
+  // wait (Task 3) can block that same event loop indefinitely; decrementing
+  // from the JS-thread callback made the two waits circular. Decrementing
+  // here ties g_active_ops to the actual invariant isolate teardown needs
+  // (no GraalVM-attached thread remains), independent of the event loop.
+  uv_mutex_lock(&g_mutex);
+  g_active_ops--;
+  uv_cond_broadcast(&g_teardown_cond);
+  uv_mutex_unlock(&g_mutex);
 
   struct chunk_data* sentinel = malloc(sizeof(struct chunk_data));
   sentinel->buf = meta_result;
@@ -811,14 +815,6 @@ static void call_js_transform_write(napi_env env, napi_value js_callback, void* 
     // during the op it deferred the free to here (F1). After this the bridge may
     // be freed, so touch nothing on it afterward.
     bridge_end_op(w->bridge);
-    // Mirror the decrement for the process-global op count and wake a
-    // pending teardown waiter (if any) once this op is fully done. This is
-    // the only new responsibility added here -- it does not spawn anything
-    // or perform teardown itself (see the waiter thread in Task 2).
-    uv_mutex_lock(&g_mutex);
-    g_active_ops--;
-    uv_cond_broadcast(&g_teardown_cond);
-    uv_mutex_unlock(&g_mutex);
     free(w);
     return;
   }
@@ -861,6 +857,14 @@ static void transform_thread_fn(void* arg) {
     }
     fn_detach_thread(worker_thread);
   }
+
+  // See streaming_thread_fn's comment: decrement here (after detach), not in
+  // call_js_transform_write's completion branch, to avoid the same
+  // circular-wait deadlock against napi_initialize's pending-teardown wait.
+  uv_mutex_lock(&g_mutex);
+  g_active_ops--;
+  uv_cond_broadcast(&g_teardown_cond);
+  uv_mutex_unlock(&g_mutex);
 
   struct chunk_data* sentinel = malloc(sizeof(struct chunk_data));
   sentinel->buf = meta_result;
