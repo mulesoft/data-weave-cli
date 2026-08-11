@@ -491,6 +491,9 @@ struct streaming_work {
 };
 
 static void call_js_write(napi_env env, napi_value js_callback, void* context, void* data) {
+  // env==NULL here is safe: no synchronously-blocked waiter, unlike call_js_read.
+  // Completion is driven by a separately-enqueued sentinel chunk (len == -1), not
+  // by a thread blocked on a condition variable waiting on this callback.
   if (env == NULL || data == NULL) return;
   struct chunk_data* chunk = (struct chunk_data*)data;
   struct streaming_work* w = (struct streaming_work*)context;
@@ -698,66 +701,78 @@ struct read_request {
 };
 
 static void call_js_read(napi_env env, napi_value js_callback, void* context, void* data) {
-  if (env == NULL || data == NULL) return;
+  if (data == NULL) return;  // nothing to signal
   struct read_request* req = (struct read_request*)data;
 
-  napi_value buf_size_val;
-  napi_create_int32(env, req->buffer_size, &buf_size_val);
-
-  napi_value global;
-  napi_get_global(env, &global);
-
-  napi_value result;
-  napi_status status = napi_call_function(env, global, js_callback, 1, &buf_size_val, &result);
-
-  if (status == napi_ok && result != NULL) {
-    bool is_buffer;
-    napi_is_buffer(env, result, &is_buffer);
-    if (is_buffer) {
-      void* buf_data;
-      size_t buf_len;
-      napi_get_buffer_info(env, result, &buf_data, &buf_len);
-      int n = (int)buf_len < req->buffer_size ? (int)buf_len : req->buffer_size;
-      if (n > 0) memcpy(req->buffer, buf_data, n);
-      req->bytes_read = n;
-    } else {
-      req->bytes_read = 0;
-    }
+  if (env == NULL) {
+    // N-API can invoke a threadsafe-function callback with env == NULL when
+    // the environment is tearing down with items still queued (e.g. a Worker
+    // terminating mid-transform). transform_read_cb is synchronously blocked
+    // on req->cond waiting for this callback to signal it -- unlike
+    // call_js_write/call_js_transform_write, there is no sentinel-driven path
+    // that would otherwise unblock it. Treat this as a terminal read error so
+    // the blocked thread wakes up, detects the failure via bytes_read == -1,
+    // and the worker can detach from the isolate instead of hanging forever.
+    req->bytes_read = -1;
   } else {
-    // Clear pending exception to prevent propagation
-    if (status == napi_pending_exception) {
-      napi_value exception;
-      napi_get_and_clear_last_exception(env, &exception);
+    napi_value buf_size_val;
+    napi_create_int32(env, req->buffer_size, &buf_size_val);
 
-      // Extract and log exception details before discarding
-      napi_value message_prop, stack_prop;
-      char message_buf[512] = {0};
-      char stack_buf[2048] = {0};
-      size_t message_len = 0, stack_len = 0;
+    napi_value global;
+    napi_get_global(env, &global);
 
-      // Try to get the message property
-      if (napi_get_named_property(env, exception, "message", &message_prop) == napi_ok) {
-        napi_get_value_string_utf8(env, message_prop, message_buf, sizeof(message_buf), &message_len);
-      }
+    napi_value result;
+    napi_status status = napi_call_function(env, global, js_callback, 1, &buf_size_val, &result);
 
-      // Try to get the stack property
-      if (napi_get_named_property(env, exception, "stack", &stack_prop) == napi_ok) {
-        napi_get_value_string_utf8(env, stack_prop, stack_buf, sizeof(stack_buf), &stack_len);
+    if (status == napi_ok && result != NULL) {
+      bool is_buffer;
+      napi_is_buffer(env, result, &is_buffer);
+      if (is_buffer) {
+        void* buf_data;
+        size_t buf_len;
+        napi_get_buffer_info(env, result, &buf_data, &buf_len);
+        int n = (int)buf_len < req->buffer_size ? (int)buf_len : req->buffer_size;
+        if (n > 0) memcpy(req->buffer, buf_data, n);
+        req->bytes_read = n;
+      } else {
+        req->bytes_read = 0;
       }
+    } else {
+      // Clear pending exception to prevent propagation
+      if (status == napi_pending_exception) {
+        napi_value exception;
+        napi_get_and_clear_last_exception(env, &exception);
 
-      // Log the exception to stderr for diagnostics
-      fprintf(stderr, "[DataWeave Node addon] Read callback threw exception:\n");
-      if (message_len > 0) {
-        fprintf(stderr, "  Message: %s\n", message_buf);
+        // Extract and log exception details before discarding
+        napi_value message_prop, stack_prop;
+        char message_buf[512] = {0};
+        char stack_buf[2048] = {0};
+        size_t message_len = 0, stack_len = 0;
+
+        // Try to get the message property
+        if (napi_get_named_property(env, exception, "message", &message_prop) == napi_ok) {
+          napi_get_value_string_utf8(env, message_prop, message_buf, sizeof(message_buf), &message_len);
+        }
+
+        // Try to get the stack property
+        if (napi_get_named_property(env, exception, "stack", &stack_prop) == napi_ok) {
+          napi_get_value_string_utf8(env, stack_prop, stack_buf, sizeof(stack_buf), &stack_len);
+        }
+
+        // Log the exception to stderr for diagnostics
+        fprintf(stderr, "[DataWeave Node addon] Read callback threw exception:\n");
+        if (message_len > 0) {
+          fprintf(stderr, "  Message: %s\n", message_buf);
+        }
+        if (stack_len > 0) {
+          fprintf(stderr, "  Stack:\n%s\n", stack_buf);
+        }
+        if (message_len == 0 && stack_len == 0) {
+          fprintf(stderr, "  (Unable to extract exception details)\n");
+        }
       }
-      if (stack_len > 0) {
-        fprintf(stderr, "  Stack:\n%s\n", stack_buf);
-      }
-      if (message_len == 0 && stack_len == 0) {
-        fprintf(stderr, "  (Unable to extract exception details)\n");
-      }
+      req->bytes_read = -1;  // Signal error
     }
-    req->bytes_read = -1;  // Signal error
   }
 
   uv_mutex_lock(&req->mutex);
@@ -813,6 +828,9 @@ static int transform_write_cb(void* ctx, const char* buf, int len) {
 }
 
 static void call_js_transform_write(napi_env env, napi_value js_callback, void* context, void* data) {
+  // env==NULL here is safe: no synchronously-blocked waiter, unlike call_js_read.
+  // Completion is driven by a separately-enqueued sentinel chunk (len == -1), not
+  // by a thread blocked on a condition variable waiting on this callback.
   if (env == NULL || data == NULL) return;
   struct chunk_data* chunk = (struct chunk_data*)data;
   struct transform_work* w = (struct transform_work*)context;
