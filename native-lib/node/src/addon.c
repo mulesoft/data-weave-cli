@@ -1228,6 +1228,36 @@ static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) 
 
 // --- Cleanup (must run on a separate thread to avoid V8 signal handler conflict) ---
 
+// Called on each waiter's own env/thread (via its own napi_threadsafe_function)
+// once the waiter thread has finished isolate teardown. Resolves that specific
+// caller's promise, then releases its tsfn and frees the node. `data` is
+// unused (NULL) -- there is nothing to report beyond "done".
+//
+// napi_call_threadsafe_function(..., napi_tsfn_blocking) only ENQUEUES this
+// callback for the target env's event loop to run later; it does not wait for
+// it to actually execute. So the waiter node and its tsfn must stay alive
+// until this callback runs and must be released/freed HERE, not by the
+// thread that enqueued the call (teardown_waiter_thread_fn) -- freeing there
+// right after the enqueueing call would be a use-after-free once this
+// callback later dereferences `context`. Same ownership pattern as
+// call_js_write/call_js_transform_write freeing their own work struct from
+// inside their own completion branch.
+static void call_js_teardown_done(napi_env env, napi_value js_callback, void* context, void* data) {
+  (void)js_callback;
+  (void)data;
+  teardown_waiter_t* waiter = (teardown_waiter_t*)context;
+  if (waiter == NULL) return;
+
+  if (env != NULL) {
+    napi_value undefined;
+    napi_get_undefined(env, &undefined);
+    napi_resolve_deferred(env, waiter->deferred, undefined);
+  }
+
+  napi_release_threadsafe_function(waiter->tsfn, napi_tsfn_release);
+  free(waiter);
+}
+
 static void cleanup_thread_fn(void* arg) {
   (void)arg;
   // graal_tear_down_isolate() must be passed the IsolateThread belonging to the
@@ -1246,35 +1276,176 @@ static void cleanup_thread_fn(void* arg) {
   fn_tear_down_isolate(local_thread);
 }
 
-static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
-  uv_mutex_lock(&g_mutex);
-  if (g_initialized) {
-    g_ref_count--;
-    if (g_ref_count <= 0) {
-      // F2: do NOT walk g_bridges to delete napi_refs here. napi_env/napi_ref are
-      // thread-affine, and this last-release call can arrive on any Worker thread —
-      // not necessarily the one that owns a given bridge. Deleting a reference from
-      // the wrong thread is undefined behavior. Instead, each resolver-backed bridge
-      // registered a per-env cleanup hook (bridge_env_cleanup) at creation, so its
-      // owning Worker/main thread disposes its own napi_ref on its own thread when
-      // that env tears down. Any bridge still linked in g_bridges is owned by such a
-      // hook and must be left alone here. Only the process-global GraalVM isolate
-      // teardown below is safe to run once, on the last release, from this thread.
-      uv_thread_t tid;
-      uv_thread_options_t opts;
-      opts.flags = UV_THREAD_HAS_STACK_SIZE;
-      opts.stack_size = 2 * 1024 * 1024;
-      uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, NULL);
-      uv_thread_join(&tid);
+// Spawned only when napi_cleanup finds g_active_ops > 0 on the last release
+// (case 5 in the design doc). Blocks until every active streaming/transform
+// op has drained, performs isolate teardown exactly like cleanup_thread_fn
+// does on the unchanged fast path, then resolves every caller who is waiting
+// on this same teardown (there may be more than one -- see g_teardown_waiters).
+static void teardown_waiter_thread_fn(void* arg) {
+  (void)arg;
 
-      g_thread = NULL;
-      g_isolate = NULL;
-      g_initialized = 0;
-      g_ref_count = 0;
-    }
+  uv_mutex_lock(&g_mutex);
+  while (g_active_ops > 0) {
+    uv_cond_wait(&g_teardown_cond, &g_mutex);
   }
   uv_mutex_unlock(&g_mutex);
-  return NULL;
+
+  // Perform teardown exactly as the unchanged fast path does: attach a local
+  // thread to the isolate (g_thread from graal_create_isolate's bootstrap
+  // thread is invalid here -- see cleanup_thread_fn's comment), then tear
+  // down. Ignore the return code, matching today's behavior.
+  if (fn_tear_down_isolate && fn_attach_thread && g_isolate) {
+    void* local_thread = NULL;
+    if (fn_attach_thread(g_isolate, &local_thread) == 0 && local_thread != NULL) {
+      fn_tear_down_isolate(local_thread);
+    }
+  }
+
+  uv_mutex_lock(&g_mutex);
+  g_thread = NULL;
+  g_isolate = NULL;
+  g_initialized = 0;
+  g_ref_count = 0;
+  g_teardown_pending = false;
+  // Release any initialize() call blocked waiting for teardown to finish
+  // (see Task 3).
+  uv_cond_broadcast(&g_teardown_cond);
+  teardown_waiter_t* waiters = g_teardown_waiters;
+  g_teardown_waiters = NULL;
+  uv_mutex_unlock(&g_mutex);
+
+  // Resolve every waiting caller's promise on its own env/thread via its own
+  // tsfn -- napi_deferred/napi_env are thread-affine, so this cannot be done
+  // from this waiter thread directly. napi_call_threadsafe_function only
+  // ENQUEUES the call for the target thread to run later; it does not wait
+  // for call_js_teardown_done to execute. So do NOT free/release here --
+  // call_js_teardown_done owns and releases each node after it actually runs
+  // (freeing it here instead would be a use-after-free the moment the
+  // enqueued callback later dereferences it).
+  while (waiters != NULL) {
+    teardown_waiter_t* next = waiters->next;
+    napi_call_threadsafe_function(waiters->tsfn, waiters, napi_tsfn_blocking);
+    waiters = next;
+  }
+}
+
+// Creates a promise, a threadsafe function bound to call_js_teardown_done for
+// THIS call's env, and a teardown_waiter_t node carrying both. The node is
+// NOT linked into g_teardown_waiters here -- the caller does that under
+// g_mutex, since callers append at two different points in napi_cleanup
+// (case 3: joining an existing pending teardown; case 5: starting a new one).
+// Returns NULL (and throws) if node allocation fails.
+static teardown_waiter_t* teardown_waiter_create(napi_env env, napi_value* out_promise) {
+  teardown_waiter_t* waiter = (teardown_waiter_t*)calloc(1, sizeof(teardown_waiter_t));
+  if (waiter == NULL) {
+    napi_throw_error(env, NULL, "Failed to allocate teardown waiter");
+    return NULL;
+  }
+  waiter->env = env;
+
+  napi_create_promise(env, &waiter->deferred, out_promise);
+
+  napi_value resource_name;
+  napi_create_string_utf8(env, "dwTeardown", NAPI_AUTO_LENGTH, &resource_name);
+  napi_create_threadsafe_function(
+    env, NULL, NULL, resource_name, 0, 1, NULL, NULL, waiter, call_js_teardown_done, &waiter->tsfn
+  );
+
+  return waiter;
+}
+
+// Creates an already-resolved promise -- used by napi_cleanup's two
+// "nothing to wait for" branches (not-the-last-release, and last-release
+// with no active ops) so the function's return type is uniformly "a
+// promise" regardless of which branch runs.
+static napi_value already_resolved_promise(napi_env env) {
+  napi_deferred deferred;
+  napi_value promise;
+  napi_create_promise(env, &deferred, &promise);
+  napi_value undefined;
+  napi_get_undefined(env, &undefined);
+  napi_resolve_deferred(env, deferred, undefined);
+  return promise;
+}
+
+static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
+  (void)info;
+  uv_mutex_lock(&g_mutex);
+
+  // Case 1/2: not the last release (or nothing was ever initialized). Decrement
+  // only if positive -- a second cleanup() call while g_ref_count is already at
+  // 0 (e.g. one already dropped it while teardown is pending) must not go
+  // negative.
+  if (g_ref_count > 0) {
+    g_ref_count--;
+  }
+  if (g_ref_count > 0) {
+    uv_mutex_unlock(&g_mutex);
+    return already_resolved_promise(env);
+  }
+
+  // Case 3: a teardown from an earlier cleanup() call is already pending
+  // (possibly triggered from a different Worker/env). Join its waiter list
+  // instead of spawning a second waiter thread.
+  if (g_teardown_pending) {
+    napi_value promise;
+    teardown_waiter_t* waiter = teardown_waiter_create(env, &promise);
+    if (waiter == NULL) {
+      uv_mutex_unlock(&g_mutex);
+      return NULL;  // teardown_waiter_create already threw
+    }
+    waiter->next = g_teardown_waiters;
+    g_teardown_waiters = waiter;
+    uv_mutex_unlock(&g_mutex);
+    return promise;
+  }
+
+  // Case 4: last release, no teardown pending, and nothing active -- the
+  // original, unchanged synchronous fast path.
+  if (g_active_ops == 0) {
+    uv_thread_t tid;
+    uv_thread_options_t opts;
+    opts.flags = UV_THREAD_HAS_STACK_SIZE;
+    opts.stack_size = 2 * 1024 * 1024;
+    uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, NULL);
+    uv_thread_join(&tid);
+
+    g_thread = NULL;
+    g_isolate = NULL;
+    g_initialized = 0;
+    g_ref_count = 0;
+    uv_mutex_unlock(&g_mutex);
+    return already_resolved_promise(env);
+  }
+
+  // Case 5: last release, but streaming/transform ops are still active.
+  // Defer teardown to a dedicated waiter thread instead of blocking this JS
+  // thread -- this is the deadlock fix. g_initialized/g_isolate/g_thread stay
+  // set until the waiter thread finishes, matching today's behavior of
+  // treating "still tearing down" as "still initialized" for concurrent
+  // initialize() calls (see Task 3).
+  g_teardown_pending = true;
+  napi_value promise;
+  teardown_waiter_t* waiter = teardown_waiter_create(env, &promise);
+  if (waiter == NULL) {
+    g_teardown_pending = false;
+    uv_mutex_unlock(&g_mutex);
+    return NULL;  // teardown_waiter_create already threw
+  }
+  waiter->next = NULL;
+  g_teardown_waiters = waiter;
+
+  uv_thread_t waiter_tid;
+  uv_thread_options_t waiter_opts;
+  waiter_opts.flags = UV_THREAD_HAS_STACK_SIZE;
+  waiter_opts.stack_size = 2 * 1024 * 1024;
+  uv_thread_create_ex(&waiter_tid, &waiter_opts, teardown_waiter_thread_fn, NULL);
+  // Deliberately not joined -- this thread finishes on its own and resolves
+  // every waiter's promise itself; joining here would reintroduce exactly
+  // the blocking-JS-thread problem this fix removes.
+
+  uv_mutex_unlock(&g_mutex);
+  return promise;
 }
 
 // --- Module init ---
