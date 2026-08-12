@@ -168,18 +168,24 @@ static engine_bridge_t* bridge_find(long long handle) {
     return NULL;
 }
 
-// Fully dispose of a bridge: delete its napi_ref, free tracked result buffers,
-// free the struct. napi_ref/napi_env are thread-affine, so this MUST run on the
-// bridge's owner thread (the JS/Worker thread that created it) while that env is
-// still alive. The bridge must already be unlinked from g_bridges. Do NOT hold
-// g_mutex across this call — it invokes N-API. Callers that freed a bridge
-// *early* (destroyEngine / streaming completion) must first drop the env cleanup
-// hook via napi_remove_env_cleanup_hook so Node never invokes it on freed memory;
-// the hook path itself (bridge_env_cleanup) must not remove itself and calls this
-// directly.
-static void bridge_finalize(engine_bridge_t* b) {
+// Fully dispose of a bridge: delete its napi_ref (if the owning env is still
+// alive), free tracked result buffers, free the struct. napi_ref/napi_env are
+// thread-affine, so napi_delete_reference MUST run on the bridge's owner
+// thread (the JS/Worker thread that created it) while that env is still
+// alive -- `env_still_alive` must be false whenever the caller knows the
+// owning env is tearing down/dead (e.g. the env == NULL sentinel path in
+// call_js_write/call_js_transform_write), even though b->env itself is never
+// cleared and stays non-NULL. When env_still_alive is false the napi_ref is
+// simply skipped -- Node auto-reclaims refs when their env is destroyed, so
+// nothing leaks. The bridge must already be unlinked from g_bridges. Do NOT
+// hold g_mutex across this call — it invokes N-API. Callers that freed a
+// bridge *early* (destroyEngine / streaming completion) must first drop the
+// env cleanup hook via napi_remove_env_cleanup_hook so Node never invokes it
+// on freed memory; the hook path itself (bridge_env_cleanup) must not remove
+// itself and calls this directly.
+static void bridge_finalize(engine_bridge_t* b, bool env_still_alive) {
     if (b == NULL) return;
-    if (b->resolver_js != NULL && b->env != NULL) {
+    if (env_still_alive && b->resolver_js != NULL && b->env != NULL) {
         napi_delete_reference(b->env, b->resolver_js);
     }
     resolver_results_free_all(b);
@@ -218,8 +224,10 @@ static void bridge_env_cleanup(void* arg) {
     uv_mutex_unlock(&g_mutex);
 
     // We are inside Node's invocation of this hook, so we must not (and need not)
-    // call napi_remove_env_cleanup_hook for ourselves here.
-    bridge_finalize(b);
+    // call napi_remove_env_cleanup_hook for ourselves here. The env is still
+    // alive here -- that is the whole point of this hook's design (see above) --
+    // so the napi_ref deletion in bridge_finalize is legal.
+    bridge_finalize(b, /*env_still_alive=*/true);
 }
 
 // Begin a streaming/transform op on a resolver-backed engine: look up the bridge
@@ -240,14 +248,17 @@ static engine_bridge_t* bridge_begin_op(long long handle) {
 // End a streaming/transform op. Runs on the owner (JS) thread from the completion
 // sentinel. If destroyEngine (or the env cleanup hook) ran while this op was in
 // flight, it deferred the free — already unlinked from g_bridges — so the last op
-// to drain finalizes the bridge here, on the legal (owner) thread.
-static void bridge_end_op(engine_bridge_t* b) {
+// to drain finalizes the bridge here, on the legal (owner) thread. `env_still_alive`
+// must be false when the caller is running the env == NULL sentinel path (the
+// owning env is tearing down/dead), so a finalize triggered from here does not
+// call napi_delete_reference on a dead env.
+static void bridge_end_op(engine_bridge_t* b, bool env_still_alive) {
     if (b == NULL) return;
     uv_mutex_lock(&g_mutex);
     b->in_flight--;
     bool finalize = (b->destroy_pending && b->in_flight == 0);
     uv_mutex_unlock(&g_mutex);
-    if (finalize) bridge_finalize(b);
+    if (finalize) bridge_finalize(b, env_still_alive);
 }
 
 // --- Initialization ---
@@ -531,8 +542,10 @@ static void call_js_write(napi_env env, napi_value js_callback, void* context, v
     napi_release_threadsafe_function(w->tsfn, napi_tsfn_release);
     // Drop the in-flight hold last, on this owner thread: if destroyEngine ran
     // during the op it deferred the free to here (F1). After this the bridge may
-    // be freed, so touch nothing on it afterward.
-    bridge_end_op(w->bridge);
+    // be freed, so touch nothing on it afterward. env == NULL means this env is
+    // dead/tearing down -- tell bridge_end_op (and any bridge_finalize it
+    // triggers) not to touch the napi_ref, since b->env is this same dead env.
+    bridge_end_op(w->bridge, /*env_still_alive=*/env != NULL);
     free(w);
     return;
   }
@@ -686,7 +699,8 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
     uv_cond_broadcast(&g_teardown_cond);
     uv_mutex_unlock(&g_mutex);
 
-    bridge_end_op(w->bridge);
+    // Synchronous call on the JS thread -- env is live here.
+    bridge_end_op(w->bridge, /*env_still_alive=*/true);
     napi_release_threadsafe_function(w->tsfn, napi_tsfn_release);
 
     napi_value result;
@@ -889,8 +903,10 @@ static void call_js_transform_write(napi_env env, napi_value js_callback, void* 
     napi_release_threadsafe_function(w->write_tsfn, napi_tsfn_release);
     // Drop the in-flight hold last, on this owner thread: if destroyEngine ran
     // during the op it deferred the free to here (F1). After this the bridge may
-    // be freed, so touch nothing on it afterward.
-    bridge_end_op(w->bridge);
+    // be freed, so touch nothing on it afterward. env == NULL means this env is
+    // dead/tearing down -- tell bridge_end_op (and any bridge_finalize it
+    // triggers) not to touch the napi_ref, since b->env is this same dead env.
+    bridge_end_op(w->bridge, /*env_still_alive=*/env != NULL);
     free(w);
     return;
   }
@@ -1049,7 +1065,8 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
     uv_cond_broadcast(&g_teardown_cond);
     uv_mutex_unlock(&g_mutex);
 
-    bridge_end_op(w->bridge);
+    // Synchronous call on the JS thread -- env is live here.
+    bridge_end_op(w->bridge, /*env_still_alive=*/true);
     napi_release_threadsafe_function(w->read_tsfn, napi_tsfn_release);
     napi_release_threadsafe_function(w->write_tsfn, napi_tsfn_release);
 
@@ -1261,7 +1278,8 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
     // bridge->results via resolver_results_track; bridge_finalize frees those
     // tracked buffers too, so nothing is dropped on the floor.
     if (handle <= 0) {
-        bridge_finalize(bridge);
+        // Synchronous call on the JS thread -- env is live here.
+        bridge_finalize(bridge, /*env_still_alive=*/true);
         napi_throw_error(env, NULL, "create_engine_with_resolver returned an invalid handle");
         return NULL;
     }
@@ -1309,7 +1327,8 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
         // draining op, the free happens explicitly, so Node must never invoke
         // the hook on this (soon-to-be or already) freed bridge.
         napi_remove_env_cleanup_hook(env, bridge_env_cleanup, found);
-        if (!defer) bridge_finalize(found);
+        // Synchronous call on the JS thread -- env is live here.
+        if (!defer) bridge_finalize(found, /*env_still_alive=*/true);
     }
     return NULL;
 }
@@ -1386,8 +1405,15 @@ static void call_js_teardown_done(napi_env env, napi_value js_callback, void* co
   free(waiter);
 }
 
+// `arg` is an int* out-param: the caller (napi_cleanup's case 4) must set it
+// to 0 before spawning this thread and read it after uv_thread_join returns.
+// Mirrors teardown_waiter_thread_fn's `torn_down` local exactly, so the
+// caller can tell "isolate torn down / nothing to tear down" (safe to clear
+// g_thread/g_isolate/g_initialized/g_ref_count) apart from "attach failed,
+// isolate still alive" (must leave those globals set, or the isolate becomes
+// unreachable and can never be torn down).
 static void cleanup_thread_fn(void* arg) {
-  (void)arg;
+  int* out_torn_down = (int*)arg;
   // graal_tear_down_isolate() must be passed the IsolateThread belonging to the
   // *calling* OS thread. g_thread was created by graal_create_isolate() on the
   // (now-exited, already-joined) init thread, so it is invalid here — passing it
@@ -1395,13 +1421,19 @@ static void cleanup_thread_fn(void* arg) {
   // StackOverflowError during teardown. Attach this cleanup thread to the isolate
   // to obtain a valid local IsolateThread, then tear down with that.
   if (!fn_tear_down_isolate || !fn_attach_thread || !g_isolate) {
+    // Nothing to tear down (no isolate / FFI unavailable) -- safe to clear.
+    *out_torn_down = 1;
     return;
   }
   void* local_thread = NULL;
   if (fn_attach_thread(g_isolate, &local_thread) != 0 || local_thread == NULL) {
+    // Attach failed -- the isolate is still alive. Leave *out_torn_down at 0
+    // (its caller-initialized value) so the caller does NOT clear g_isolate,
+    // or it becomes unreachable and can never be torn down.
     return;
   }
   fn_tear_down_isolate(local_thread);
+  *out_torn_down = 1;
 }
 
 // Spawned only when napi_cleanup finds g_active_ops > 0 on the last release
@@ -1550,19 +1582,33 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
     uv_thread_options_t opts;
     opts.flags = UV_THREAD_HAS_STACK_SIZE;
     opts.stack_size = 2 * 1024 * 1024;
-    int spawn_rc = uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, NULL);
+    // torn_down is cleanup_thread_fn's out-param (mirrors teardown_waiter_thread_fn's
+    // `torn_down` local exactly): must be initialized to 0 before the thread runs so
+    // the attach-failure early-return path (which never touches it) leaves it false.
+    // uv_thread_join is synchronous, so when spawn_rc == 0 this stack variable safely
+    // outlives the thread's write to it.
+    int torn_down = 0;
+    int spawn_rc = uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, &torn_down);
     if (spawn_rc == 0) {
       uv_thread_join(&tid);
     }
-    // Whether or not the teardown thread ran, treat this as the last release:
-    // clear global state so the addon is back to an uninitialized, re-initializable
-    // state. If the spawn failed the isolate may not have been torn down (a
-    // best-effort degradation, matching the fast path's existing ignore-return
-    // posture), but we must not join an uninitialized tid (UB).
-    g_thread = NULL;
-    g_isolate = NULL;
-    g_initialized = 0;
-    g_ref_count = 0;
+    // Only clear global state if the isolate was actually torn down (or there
+    // was nothing to tear down). If spawn failed, the thread never ran and
+    // torn_down stays 0 -- leave the globals set rather than orphaning a live
+    // isolate (unreachable via these globals, could never be torn down), which
+    // is a strict improvement over unconditionally clearing them here. Same
+    // reasoning for cleanup_thread_fn's internal attach-failure path: the
+    // isolate is still alive, g_initialized stays 1, and g_ref_count was
+    // already decremented to 0 above without being reset here, so a later
+    // initialize() correctly ref-counts the surviving isolate instead of
+    // building a second one (identical semantics to teardown_waiter_thread_fn's
+    // attach-failure path).
+    if (torn_down) {
+      g_thread = NULL;
+      g_isolate = NULL;
+      g_initialized = 0;
+      g_ref_count = 0;
+    }
     uv_mutex_unlock(&g_mutex);
     return already_resolved_promise(env);
   }
