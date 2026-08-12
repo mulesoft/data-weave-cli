@@ -114,12 +114,15 @@ export class DataWeave {
    */
   async cleanup(): Promise<void> {
     if (!this.initialized) return;
-    if (this.engineHandle !== null) {
-      ffi.destroyEngine(this.engineHandle);
-      this.engineHandle = null;
+    try {
+      if (this.engineHandle !== null) {
+        ffi.destroyEngine(this.engineHandle);
+        this.engineHandle = null;
+      }
+      await ffi.cleanup();
+    } finally {
+      this.initialized = false;
     }
-    await ffi.cleanup();
-    this.initialized = false;
   }
 
   /**

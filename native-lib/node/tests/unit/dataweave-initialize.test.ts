@@ -99,4 +99,29 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     expect(ffi.destroyEngine).toHaveBeenCalledWith(7);
     expect(ffi.cleanup).toHaveBeenCalledTimes(1);
   });
+
+  it("still clears `initialized` when ffi.cleanup() rejects, so the instance is re-initializable", async () => {
+    vi.mocked(ffi.initialize).mockImplementation(() => {});
+    vi.mocked(ffi.createEngine).mockImplementation(() => 7);
+    vi.mocked(ffi.cleanup).mockRejectedValueOnce(new Error("native cleanup boom"));
+
+    const dw = new DataWeave({ libPath: "mock-lib-path" });
+    dw.initialize();
+
+    await expect(dw.cleanup()).rejects.toThrow("native cleanup boom");
+
+    // Even though ffi.cleanup() rejected, the engine handle was already
+    // destroyed and nulled -- `initialized` must not stay stuck `true`, or a
+    // later initialize() call becomes a permanent no-op (the early-return
+    // guard `if (this.initialized) return;`) and the instance is stranded
+    // with a null engineHandle.
+    vi.mocked(ffi.initialize).mockClear();
+    vi.mocked(ffi.createEngine).mockClear();
+    vi.mocked(ffi.createEngine).mockImplementation(() => 9);
+
+    dw.initialize();
+
+    expect(ffi.initialize).toHaveBeenCalledTimes(1);
+    expect(ffi.createEngine).toHaveBeenCalledTimes(1);
+  });
 });
