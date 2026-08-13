@@ -1370,6 +1370,30 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
     int64_t handle64; napi_get_value_int64(env, argv[0], &handle64);
     long long handle = (long long)handle64;
 
+    // F2: a resolver-backed engine's bridge owns thread-affine N-API state --
+    // a napi_ref and an env cleanup hook, both created on the engine's owning
+    // JS thread. Deleting that ref (bridge_finalize) or removing that hook
+    // (napi_remove_env_cleanup_hook) from another Worker's thread is undefined
+    // behavior. Reject cross-thread destruction, mirroring the fail-closed
+    // owner check in resolve_module_callback; the owner env's cleanup hook
+    // disposes the bridge when that Worker tears down. Resolver-less engines
+    // have no bridge and no napi state, so they need no guard (bridge_find ==
+    // NULL -> fall through). We are on the owner thread past this point, so the
+    // env cannot be concurrently tearing down and the bridge stays stable
+    // between this check and the unlink below.
+    uv_mutex_lock(&g_mutex);
+    engine_bridge_t* owned = bridge_find(handle);
+    if (owned != NULL) {
+        uv_thread_t self = uv_thread_self();
+        if (!uv_thread_equal(&self, &owned->owner)) {
+            uv_mutex_unlock(&g_mutex);
+            napi_throw_error(env, NULL,
+                "destroyEngine must be called from the thread that created the engine");
+            return NULL;
+        }
+    }
+    uv_mutex_unlock(&g_mutex);
+
     if (fn_destroy_engine) {
         void* thread = NULL;
         if (fn_attach_thread(g_isolate, &thread) == 0) { fn_destroy_engine(thread, handle); fn_detach_thread(thread); }
