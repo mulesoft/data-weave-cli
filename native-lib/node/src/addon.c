@@ -1609,13 +1609,26 @@ static teardown_waiter_t* teardown_waiter_create(napi_env env, napi_value* out_p
   }
   waiter->env = env;
 
-  napi_create_promise(env, &waiter->deferred, out_promise);
+  if (napi_create_promise(env, &waiter->deferred, out_promise) != napi_ok) {
+    free(waiter);
+    napi_throw_error(env, NULL, "Failed to create teardown promise");
+    return NULL;
+  }
 
   napi_value resource_name;
-  napi_create_string_utf8(env, "dwTeardown", NAPI_AUTO_LENGTH, &resource_name);
-  napi_create_threadsafe_function(
-    env, NULL, NULL, resource_name, 0, 1, NULL, NULL, waiter, call_js_teardown_done, &waiter->tsfn
-  );
+  if (napi_create_string_utf8(env, "dwTeardown", NAPI_AUTO_LENGTH, &resource_name) != napi_ok) {
+    free(waiter);
+    napi_throw_error(env, NULL, "Failed to create teardown resource name");
+    return NULL;
+  }
+
+  if (napi_create_threadsafe_function(
+        env, NULL, NULL, resource_name, 0, 1, NULL, NULL, waiter, call_js_teardown_done, &waiter->tsfn
+      ) != napi_ok) {
+    free(waiter);
+    napi_throw_error(env, NULL, "Failed to create teardown threadsafe function");
+    return NULL;
+  }
 
   return waiter;
 }
