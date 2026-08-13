@@ -124,4 +124,28 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     expect(ffi.initialize).toHaveBeenCalledTimes(1);
     expect(ffi.createEngine).toHaveBeenCalledTimes(1);
   });
+
+  it("coalesces concurrent cleanup() calls into a single native teardown", async () => {
+    vi.mocked(ffi.createEngine).mockReturnValue(1);
+    let resolveNative!: () => void;
+    vi.mocked(ffi.cleanup).mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveNative = resolve;
+      })
+    );
+
+    const dw = new DataWeave("/fake/lib");
+    dw.initialize();
+
+    // Two overlapping cleanup() calls while ffi.cleanup() is still pending.
+    const p1 = dw.cleanup();
+    const p2 = dw.cleanup();
+    resolveNative();
+    await Promise.all([p1, p2]);
+
+    // The native ref-count decrement (ffi.cleanup) and destroyEngine each run
+    // exactly once, not once per caller -- this is the double-decrement fix.
+    expect(ffi.cleanup).toHaveBeenCalledTimes(1);
+    expect(ffi.destroyEngine).toHaveBeenCalledTimes(1);
+  });
 });

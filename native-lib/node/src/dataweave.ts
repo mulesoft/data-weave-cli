@@ -52,6 +52,7 @@ export class DataWeave {
   private readonly resolveModule?: ModuleResolver;
   private initialized = false;
   private engineHandle: number | null = null;
+  private cleanupPromise: Promise<void> | null = null;
 
   /**
    * @param options - Configuration options or a legacy libPath string.
@@ -114,6 +115,25 @@ export class DataWeave {
    */
   async cleanup(): Promise<void> {
     if (!this.initialized) return;
+    // Coalesce concurrent cleanup() calls: `initialized` does not flip to
+    // false until doCleanup()'s finally runs (after the await below), so
+    // without this a second overlapping call would pass the guard above and
+    // invoke ffi.cleanup() again -- a second decrement of the process-shared
+    // native ref-count that can tear the isolate down under another live
+    // instance. Store the in-progress promise before the first await and hand
+    // it to every concurrent caller so the native teardown happens once.
+    if (this.cleanupPromise) return this.cleanupPromise;
+    this.cleanupPromise = this.doCleanup();
+    try {
+      await this.cleanupPromise;
+    } finally {
+      // Clear on both fulfilment and rejection so a later cleanup() (after a
+      // re-initialize, or a retry of a rejected cleanup) can run again.
+      this.cleanupPromise = null;
+    }
+  }
+
+  private async doCleanup(): Promise<void> {
     try {
       if (this.engineHandle !== null) {
         ffi.destroyEngine(this.engineHandle);
