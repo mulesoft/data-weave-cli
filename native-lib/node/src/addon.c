@@ -630,21 +630,33 @@ static void streaming_thread_fn(void* arg) {
   if (enq != napi_ok) {
     // The env is tearing down (napi_closing): the sentinel was dropped and
     // call_js_write will never run, so finalize here instead -- the exact same
-    // native cleanup as call_js_write's sentinel branch, minus the two things
-    // that are illegal or impossible on this worker thread:
+    // native cleanup as call_js_write's sentinel branch, minus the things
+    // that are illegal, impossible, or already done on this worker thread:
     //   - no napi value / deferred call (env is dead; those are env-affine)
     //   - no uv_thread_join(&w->tid): we ARE w->tid; a thread cannot join
     //     itself. The handle goes unreaped -- an unavoidable, negligible leak
     //     during a Worker teardown that is already discarding this env.
-    // Release the tsfn from this (producer) thread -- napi_release_threadsafe_function
-    // is documented as callable from any thread that uses the tsfn -- and end the
-    // bridge op with env_still_alive=false so bridge_finalize skips the thread-affine
-    // napi_delete_reference (Node auto-reclaims the ref when the dead env is destroyed).
+    //   - no napi_release_threadsafe_function(w->tsfn, ...): this tsfn was
+    //     created with initial_thread_count = 1 and this worker is its sole
+    //     producer, so Node's internal thread_count for it is exactly 1 on
+    //     entry to this Push call. Node's ThreadSafeFunction::Push (the
+    //     implementation behind napi_call_threadsafe_function) decrements
+    //     thread_count for the calling thread BEFORE returning napi_closing,
+    //     and -- if that decrement brings thread_count to 0 while the
+    //     internal state is already kClosed -- Push runs `delete this` on
+    //     the tsfn right there. So receiving napi_closing here already IS
+    //     this thread's discharge of the tsfn (matches the doc's "destroyed
+    //     when every thread ... has called napi_release_threadsafe_function()
+    //     or has received a return status of napi_closing"); calling release
+    //     again afterward would be a double-discharge and, whenever Push
+    //     already deleted the object, a use-after-free. Omit it.
+    // End the bridge op with env_still_alive=false so bridge_finalize skips
+    // the thread-affine napi_delete_reference (Node auto-reclaims the ref
+    // when the dead env is destroyed).
     free(sentinel->buf);
     free(sentinel);
     free(w->script);
     free(w->inputs_json);
-    napi_release_threadsafe_function(w->tsfn, napi_tsfn_release);
     bridge_end_op(w->bridge, /*env_still_alive=*/false);
     free(w);
   }
@@ -993,9 +1005,29 @@ static void transform_thread_fn(void* arg) {
   sentinel->len = -1;
   napi_status enq = napi_call_threadsafe_function(w->write_tsfn, sentinel, napi_tsfn_blocking);
   if (enq != napi_ok) {
-    // See streaming_thread_fn: env tearing down, sentinel dropped, finalize here.
-    // No self-join, no env-affine napi call; release BOTH tsfns; end bridge op
-    // with env_still_alive=false.
+    // See streaming_thread_fn: env tearing down, sentinel dropped, finalize
+    // here. No self-join, no env-affine napi call.
+    //
+    // Do NOT release write_tsfn: this worker is its sole producer
+    // (initial_thread_count = 1), so receiving napi_closing from this same
+    // Push call already decremented Node's internal thread_count for it to 0
+    // and, if the tsfn's internal state was already kClosed, already ran
+    // `delete this` on it inside Push -- see streaming_thread_fn's comment
+    // for the full citation. Releasing it again here would be a
+    // double-discharge and potentially a use-after-free.
+    //
+    // Do NOT release read_tsfn either, even though this same worker is also
+    // its sole producer: whether *it* has already received napi_closing (and
+    // so already discharged/deleted itself the same way) depends on whether
+    // the script issued reads during teardown, which this code path has no
+    // way to know. We cannot prove read_tsfn's discharge state here, so --
+    // consistent with the env == NULL dead-env handling elsewhere in this
+    // file -- we accept the small leak of an already-tearing-down tsfn
+    // rather than risk a use-after-free on an object whose state is unknown.
+    //
+    // End the bridge op with env_still_alive=false so bridge_finalize skips
+    // the thread-affine napi_delete_reference (Node auto-reclaims the ref
+    // when the dead env is destroyed).
     free(sentinel->buf);
     free(sentinel);
     free(w->script);
@@ -1003,8 +1035,6 @@ static void transform_thread_fn(void* arg) {
     free(w->input_name);
     free(w->input_mime_type);
     free(w->input_charset);
-    napi_release_threadsafe_function(w->read_tsfn, napi_tsfn_release);
-    napi_release_threadsafe_function(w->write_tsfn, napi_tsfn_release);
     bridge_end_op(w->bridge, /*env_still_alive=*/false);
     free(w);
   }
