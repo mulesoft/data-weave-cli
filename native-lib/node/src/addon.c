@@ -626,7 +626,28 @@ static void streaming_thread_fn(void* arg) {
   struct chunk_data* sentinel = malloc(sizeof(struct chunk_data));
   sentinel->buf = meta_result;
   sentinel->len = -1;
-  napi_call_threadsafe_function(w->tsfn, sentinel, napi_tsfn_blocking);
+  napi_status enq = napi_call_threadsafe_function(w->tsfn, sentinel, napi_tsfn_blocking);
+  if (enq != napi_ok) {
+    // The env is tearing down (napi_closing): the sentinel was dropped and
+    // call_js_write will never run, so finalize here instead -- the exact same
+    // native cleanup as call_js_write's sentinel branch, minus the two things
+    // that are illegal or impossible on this worker thread:
+    //   - no napi value / deferred call (env is dead; those are env-affine)
+    //   - no uv_thread_join(&w->tid): we ARE w->tid; a thread cannot join
+    //     itself. The handle goes unreaped -- an unavoidable, negligible leak
+    //     during a Worker teardown that is already discarding this env.
+    // Release the tsfn from this (producer) thread -- napi_release_threadsafe_function
+    // is documented as callable from any thread that uses the tsfn -- and end the
+    // bridge op with env_still_alive=false so bridge_finalize skips the thread-affine
+    // napi_delete_reference (Node auto-reclaims the ref when the dead env is destroyed).
+    free(sentinel->buf);
+    free(sentinel);
+    free(w->script);
+    free(w->inputs_json);
+    napi_release_threadsafe_function(w->tsfn, napi_tsfn_release);
+    bridge_end_op(w->bridge, /*env_still_alive=*/false);
+    free(w);
+  }
 }
 
 static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_info info) {
@@ -970,7 +991,23 @@ static void transform_thread_fn(void* arg) {
   struct chunk_data* sentinel = malloc(sizeof(struct chunk_data));
   sentinel->buf = meta_result;
   sentinel->len = -1;
-  napi_call_threadsafe_function(w->write_tsfn, sentinel, napi_tsfn_blocking);
+  napi_status enq = napi_call_threadsafe_function(w->write_tsfn, sentinel, napi_tsfn_blocking);
+  if (enq != napi_ok) {
+    // See streaming_thread_fn: env tearing down, sentinel dropped, finalize here.
+    // No self-join, no env-affine napi call; release BOTH tsfns; end bridge op
+    // with env_still_alive=false.
+    free(sentinel->buf);
+    free(sentinel);
+    free(w->script);
+    free(w->inputs_json);
+    free(w->input_name);
+    free(w->input_mime_type);
+    free(w->input_charset);
+    napi_release_threadsafe_function(w->read_tsfn, napi_tsfn_release);
+    napi_release_threadsafe_function(w->write_tsfn, napi_tsfn_release);
+    bridge_end_op(w->bridge, /*env_still_alive=*/false);
+    free(w);
+  }
 }
 
 static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_info info) {
