@@ -1590,7 +1590,20 @@ static void teardown_waiter_thread_fn(void* arg) {
   // enqueued callback later dereferences it).
   while (waiters != NULL) {
     teardown_waiter_t* next = waiters->next;
-    napi_call_threadsafe_function(waiters->tsfn, waiters, napi_tsfn_blocking);
+    napi_status enq = napi_call_threadsafe_function(waiters->tsfn, waiters, napi_tsfn_blocking);
+    if (enq != napi_ok) {
+      // The waiter's env is tearing down (napi_closing): call_js_teardown_done
+      // will never run, so it can neither resolve waiter->deferred nor release
+      // the tsfn nor free the node. Free the node here instead of leaking it
+      // (one leak per Worker that terminated while this teardown was pending).
+      // Do NOT napi_release_threadsafe_function(waiters->tsfn, ...): a
+      // napi_closing return already discharges this tsfn's registration (Node
+      // may have destroyed the tsfn object), so a release would be a
+      // double-discharge/UAF -- same reasoning as the sentinel-enqueue-failure
+      // paths in streaming_thread_fn/transform_thread_fn. The unresolved
+      // deferred is env-affine and reclaimed when the dead env is destroyed.
+      free(waiters);
+    }
     waiters = next;
   }
 }
