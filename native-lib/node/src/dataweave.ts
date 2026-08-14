@@ -50,7 +50,7 @@ export class DataWeave {
   private readonly addonPath: string;
   private readonly libPath: string;
   private readonly resolveModule?: ModuleResolver;
-  private initialized = false;
+  private state: "uninitialized" | "ready" | "cleaning-up" = "uninitialized";
   private engineHandle: number | null = null;
   private cleanupPromise: Promise<void> | null = null;
 
@@ -75,9 +75,16 @@ export class DataWeave {
    * initialized.
    *
    * @throws DataWeaveError if the native library fails to load or initialize.
+   * @throws DataWeaveError if called while a `cleanup()` is still in progress
+   *   — await the cleanup first.
    */
   initialize(): void {
-    if (this.initialized) return;
+    if (this.state === "ready") return;
+    if (this.state === "cleaning-up") {
+      throw new DataWeaveError(
+        "Cannot initialize while cleanup is in progress; await cleanup() first."
+      );
+    }
     let libRefAcquired = false;
     try {
       ffi.initialize(this.libPath, this.addonPath);
@@ -88,8 +95,8 @@ export class DataWeave {
     } catch (e: unknown) {
       // If ffi.initialize() already succeeded but engine creation then threw,
       // we already hold an increment of the native library's ref-counted
-      // handle. this.initialized stays false below (we're about to throw),
-      // so cleanup()'s early-return guard (`if (!this.initialized) return;`)
+      // handle. this.state stays "uninitialized" below (we're about to throw),
+      // so cleanup()'s early-return guard (`if (this.state !== "ready") return;`)
       // means nothing else will ever call ffi.cleanup() for this instance --
       // release the ref-count ourselves here or it leaks for the process
       // lifetime.
@@ -99,7 +106,7 @@ export class DataWeave {
       this.engineHandle = null;
       throw new DataWeaveError(`Failed to initialize: ${e instanceof Error ? e.message : e}`);
     }
-    this.initialized = true;
+    this.state = "ready";
   }
 
   /**
@@ -114,14 +121,16 @@ export class DataWeave {
    * an isolate that is still tearing down.
    */
   async cleanup(): Promise<void> {
-    if (!this.initialized) return;
-    // Coalesce concurrent cleanup() calls: `initialized` does not flip to
-    // false until doCleanup()'s finally runs (after the await below), so
-    // without this a second overlapping call would pass the guard above and
+    if (this.state !== "ready") return;
+    // Coalesce concurrent cleanup() calls: `state` flips to "cleaning-up"
+    // synchronously below, but a second overlapping call arriving before that
+    // flip (both observing "ready") would otherwise pass the guard above and
     // invoke ffi.cleanup() again -- a second decrement of the process-shared
     // native ref-count that can tear the isolate down under another live
     // instance. Store the in-progress promise before the first await and hand
-    // it to every concurrent caller so the native teardown happens once.
+    // it to every concurrent caller so the native teardown happens once. Once
+    // state is "cleaning-up", later cleanup() calls return early via the guard
+    // above -- the first call already owns the teardown and its promise.
     if (this.cleanupPromise) return this.cleanupPromise;
     this.cleanupPromise = this.doCleanup();
     try {
@@ -134,6 +143,10 @@ export class DataWeave {
   }
 
   private async doCleanup(): Promise<void> {
+    // Transition BEFORE releasing the engine so run()/initialize() called
+    // during the async teardown window are rejected deterministically rather
+    // than seeing a stale "ready" state with a null engineHandle (round-6 #1/#3).
+    this.state = "cleaning-up";
     try {
       if (this.engineHandle !== null) {
         ffi.destroyEngine(this.engineHandle);
@@ -141,7 +154,7 @@ export class DataWeave {
       }
       await ffi.cleanup();
     } finally {
-      this.initialized = false;
+      this.state = "uninitialized";
     }
   }
 
@@ -157,7 +170,7 @@ export class DataWeave {
    * @throws DataWeaveScriptError if the script fails and `opts.raiseOnError` is set.
    */
   run(script: string, inputs?: Inputs, opts?: { raiseOnError?: boolean }): ExecutionResult {
-    this.ensureInitialized();
+    this.ensureReady();
     const inputsJson = buildInputsJson(inputs ?? {});
 
     const raw = ffi.runScriptEngine(this.engineHandle!, script, inputsJson);
@@ -182,7 +195,7 @@ export class DataWeave {
    * @throws DataWeaveError if the runtime is not initialized.
    */
   async *runStreaming(script: string, inputs?: Inputs): AsyncGenerator<Buffer, StreamingResult, undefined> {
-    this.ensureInitialized();
+    this.ensureReady();
     const inputsJson = buildInputsJson(inputs ?? {});
     return yield* streamFromNative((chunkCb) =>
       ffi.runScriptStreamingEngine(this.engineHandle!, script, inputsJson, chunkCb)
@@ -210,7 +223,7 @@ export class DataWeave {
     input: AsyncIterable<Buffer | Uint8Array> | Iterable<Buffer | Uint8Array>,
     opts?: TransformOptions
   ): AsyncGenerator<Buffer, StreamingResult, undefined> {
-    this.ensureInitialized();
+    this.ensureReady();
 
     const inputName = opts?.inputName ?? "payload";
     const inputMimeType = opts?.mimeType ?? "application/json";
@@ -234,10 +247,14 @@ export class DataWeave {
     );
   }
 
-  private ensureInitialized(): void {
-    if (!this.initialized) {
-      throw new DataWeaveError("DataWeave runtime not initialized. Call initialize() first.");
+  private ensureReady(): void {
+    if (this.state === "ready") return;
+    if (this.state === "cleaning-up") {
+      throw new DataWeaveError(
+        "DataWeave runtime is cleaning up; await cleanup() before running again."
+      );
     }
+    throw new DataWeaveError("DataWeave runtime not initialized. Call initialize() first.");
   }
 }
 
