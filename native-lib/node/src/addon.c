@@ -721,6 +721,16 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
     return NULL;
   }
 
+  // Validate the handle before admission (round-6 #1, defense-in-depth): a
+  // non-integer handle must be rejected before g_active_ops is ever reserved,
+  // so there is nothing to unwind here -- simpler than reserving first and
+  // unwinding on failure.
+  int64_t handle64;
+  if (napi_get_value_int64(env, argv[0], &handle64) != napi_ok) {
+    napi_throw_error(env, NULL, "runScriptStreamingEngine: handle must be an integer");
+    return NULL;
+  }
+
   // Atomic admission: check lifecycle state and reserve the op in ONE critical
   // section, before allocating any work/tsfn/promise/bridge. Reading
   // g_initialized outside the lock and reserving g_active_ops later (the old
@@ -736,9 +746,6 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
   }
   g_active_ops++;
   uv_mutex_unlock(&g_mutex);
-
-  int64_t handle64;
-  napi_get_value_int64(env, argv[0], &handle64);
 
   size_t script_len, inputs_len;
   napi_get_value_string_utf8(env, argv[1], NULL, 0, &script_len);
@@ -1109,6 +1116,17 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
     return NULL;
   }
 
+  // Validate the handle before admission (round-6 #1, defense-in-depth): a
+  // non-integer handle must be rejected before g_active_ops is ever reserved,
+  // so there is nothing to unwind here -- simpler than reserving first and
+  // unwinding on failure. Keep this consistent with
+  // napi_run_script_streaming_engine's ordering.
+  int64_t handle64;
+  if (napi_get_value_int64(env, argv[0], &handle64) != napi_ok) {
+    napi_throw_error(env, NULL, "runScriptTransformEngine: handle must be an integer");
+    return NULL;
+  }
+
   // Atomic admission (see napi_run_script_streaming_engine for the full
   // rationale, round-6 #2): check lifecycle + reserve g_active_ops in one
   // critical section, before any work/tsfn/promise/bridge is committed.
@@ -1123,9 +1141,6 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
 
   struct transform_work* w = calloc(1, sizeof(struct transform_work));
   size_t len;
-
-  int64_t handle64;
-  napi_get_value_int64(env, argv[0], &handle64);
   w->handle = (long long)handle64;
 
   napi_get_value_string_utf8(env, argv[1], NULL, 0, &len);
@@ -1487,7 +1502,11 @@ static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) 
     size_t argc = 3; napi_value argv[3];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     if (argc < 3) { napi_throw_error(env, NULL, "runScriptEngine requires (handle, script, inputsJson)"); return NULL; }
-    int64_t handle64; napi_get_value_int64(env, argv[0], &handle64);
+    int64_t handle64;
+    if (napi_get_value_int64(env, argv[0], &handle64) != napi_ok) {
+        napi_throw_error(env, NULL, "runScriptEngine: handle must be an integer");
+        return NULL;
+    }
     long long handle = (long long)handle64;
 
     size_t script_len, inputs_len;
