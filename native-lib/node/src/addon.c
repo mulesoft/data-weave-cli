@@ -721,6 +721,22 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
     return NULL;
   }
 
+  // Atomic admission: check lifecycle state and reserve the op in ONE critical
+  // section, before allocating any work/tsfn/promise/bridge. Reading
+  // g_initialized outside the lock and reserving g_active_ops later (the old
+  // shape) let a second Worker's napi_cleanup Case-4 tear the isolate down in
+  // the gap, so a freshly spawned worker attached to a dead isolate (round-6
+  // #2). Rejecting on g_teardown_state != TEARDOWN_NONE also refuses new ops
+  // once a teardown is queued/underway.
+  uv_mutex_lock(&g_mutex);
+  if (!g_initialized || g_teardown_state != TEARDOWN_NONE) {
+    uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
+    return NULL;
+  }
+  g_active_ops++;
+  uv_mutex_unlock(&g_mutex);
+
   int64_t handle64;
   napi_get_value_int64(env, argv[0], &handle64);
 
@@ -747,15 +763,9 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
   // resolve_module_callback (F1). NULL for resolver-less engines. Must happen
   // before spawning the thread; the completion sentinel releases it via
   // bridge_end_op. No early return exists between here and the spawn.
+  // g_active_ops was already reserved above, in the same critical section as
+  // the admission check (round-6 #2) -- no separate reservation here.
   w->bridge = bridge_begin_op(w->handle);
-
-  // Count this op globally so a concurrent cleanup() knows to wait for it
-  // before tearing down the isolate (see g_active_ops comment above). Same
-  // timing/invariant as bridge_begin_op: before spawning the worker thread,
-  // no early return in between.
-  uv_mutex_lock(&g_mutex);
-  g_active_ops++;
-  uv_mutex_unlock(&g_mutex);
 
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
@@ -1099,6 +1109,18 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
     return NULL;
   }
 
+  // Atomic admission (see napi_run_script_streaming_engine for the full
+  // rationale, round-6 #2): check lifecycle + reserve g_active_ops in one
+  // critical section, before any work/tsfn/promise/bridge is committed.
+  uv_mutex_lock(&g_mutex);
+  if (!g_initialized || g_teardown_state != TEARDOWN_NONE) {
+    uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
+    return NULL;
+  }
+  g_active_ops++;
+  uv_mutex_unlock(&g_mutex);
+
   struct transform_work* w = calloc(1, sizeof(struct transform_work));
   size_t len;
 
@@ -1146,15 +1168,9 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
   // resolve_module_callback (F1). NULL for resolver-less engines. Must happen
   // before spawning the thread; the completion sentinel releases it via
   // bridge_end_op. No early return exists between here and the spawn.
+  // g_active_ops was already reserved above, in the same critical section as
+  // the admission check (round-6 #2) -- no separate reservation here.
   w->bridge = bridge_begin_op(w->handle);
-
-  // Count this op globally so a concurrent cleanup() knows to wait for it
-  // before tearing down the isolate (see g_active_ops comment above). Same
-  // timing/invariant as bridge_begin_op: before spawning the worker thread,
-  // no early return in between.
-  uv_mutex_lock(&g_mutex);
-  g_active_ops++;
-  uv_mutex_unlock(&g_mutex);
 
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
