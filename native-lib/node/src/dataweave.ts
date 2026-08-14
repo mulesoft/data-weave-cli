@@ -121,17 +121,20 @@ export class DataWeave {
    * an isolate that is still tearing down.
    */
   async cleanup(): Promise<void> {
-    if (this.state !== "ready") return;
-    // Coalesce concurrent cleanup() calls: `state` flips to "cleaning-up"
-    // synchronously below, but a second overlapping call arriving before that
-    // flip (both observing "ready") would otherwise pass the guard above and
-    // invoke ffi.cleanup() again -- a second decrement of the process-shared
-    // native ref-count that can tear the isolate down under another live
-    // instance. Store the in-progress promise before the first await and hand
-    // it to every concurrent caller so the native teardown happens once. Once
-    // state is "cleaning-up", later cleanup() calls return early via the guard
-    // above -- the first call already owns the teardown and its promise.
+    // Coalesce first: doCleanup() flips `state` to "cleaning-up" synchronously
+    // as its first statement, so by the time a second overlapping call runs,
+    // `state` has already left "ready". If the not-ready guard below ran
+    // first, that second caller would resolve immediately instead of
+    // awaiting the first caller's in-flight native teardown -- contradicting
+    // this method's contract of resolving only once the isolate has actually
+    // finished tearing down (round-6 review, task-1 fix round 1). Checking
+    // `cleanupPromise` first ensures every concurrent caller that overlaps
+    // with an in-flight doCleanup() awaits that SAME promise, so the native
+    // teardown (ffi.destroyEngine/ffi.cleanup) still happens exactly once.
     if (this.cleanupPromise) return this.cleanupPromise;
+    // Not coalescing with an in-flight cleanup: nothing to do unless we're
+    // "ready" (covers both never-initialized and already-settled cleanup).
+    if (this.state !== "ready") return;
     this.cleanupPromise = this.doCleanup();
     try {
       await this.cleanupPromise;

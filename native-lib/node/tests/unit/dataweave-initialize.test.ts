@@ -148,4 +148,51 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     expect(ffi.cleanup).toHaveBeenCalledTimes(1);
     expect(ffi.destroyEngine).toHaveBeenCalledTimes(1);
   });
+
+  it("second overlapping cleanup() call awaits the SAME in-flight native teardown, not an early resolution", async () => {
+    // Regression test for task-1 fix round 1: doCleanup() flips `state` to
+    // "cleaning-up" synchronously as its first statement (an async function
+    // body runs synchronously up to its first await). If cleanup()'s
+    // not-ready guard (`if (this.state !== "ready") return;`) ran BEFORE the
+    // `cleanupPromise` coalescing check, a second overlapping call would see
+    // state already left "ready" and resolve immediately -- never actually
+    // awaiting the first call's in-flight native teardown. That would
+    // contradict cleanup()'s documented contract ("resolves once the
+    // underlying native isolate has actually finished tearing down") and
+    // silently regress round-4's coalescing timing. This test asserts the
+    // second call's promise has NOT settled while ffi.cleanup() is still
+    // pending, by racing it against a marker that only resolves after
+    // ffi.cleanup() is allowed to settle.
+    vi.mocked(ffi.createEngine).mockReturnValue(1);
+    let resolveNative!: () => void;
+    vi.mocked(ffi.cleanup).mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveNative = resolve;
+      })
+    );
+
+    const dw = new DataWeave("/fake/lib");
+    dw.initialize();
+
+    const p1 = dw.cleanup();
+    const p2 = dw.cleanup(); // overlaps while doCleanup() is in flight
+
+    const SETTLED = Symbol("settled");
+    const PENDING = Symbol("pending");
+    // A same-tick race: if p2 resolved early (the regression), it wins;
+    // Promise.resolve() flushes on the same microtask queue, so this
+    // reliably distinguishes "already settled" from "still pending" without
+    // relying on real timers.
+    const raceResult = await Promise.race([
+      p2.then(() => SETTLED),
+      Promise.resolve().then(() => PENDING),
+    ]);
+    expect(raceResult).toBe(PENDING);
+
+    resolveNative();
+    await Promise.all([p1, p2]);
+
+    expect(ffi.cleanup).toHaveBeenCalledTimes(1);
+    expect(ffi.destroyEngine).toHaveBeenCalledTimes(1);
+  });
 });
