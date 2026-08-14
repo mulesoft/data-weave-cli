@@ -118,7 +118,26 @@ static engine_bridge_t* g_bridges = NULL;  // linked list, guarded by g_mutex
 // blocks on ANY attached worker) so napi_cleanup can wait for them to drain
 // on a dedicated thread instead of blocking the calling JS thread.
 static int g_active_ops = 0;
-static bool g_teardown_pending = false;
+// Teardown lifecycle, all transitions under g_mutex:
+//   NONE         -> no teardown queued or in progress.
+//   PENDING_WAIT -> napi_cleanup Case 5 queued a teardown; the waiter thread is
+//                   blocked waiting for g_active_ops to drain. The isolate is
+//                   STILL LIVE and un-torn-down here, so a fresh initialize()
+//                   may ADOPT it (cancel the teardown) instead of blocking the
+//                   JS thread -- this is the round-5 deadlock fix.
+//   TEARING_DOWN -> the waiter has passed the point of no return and is calling
+//                   graal_tear_down_isolate(). Adoption is unsafe; initialize()
+//                   must block here, which is deadlock-free because g_active_ops
+//                   is already 0 (nothing depends on the JS event loop).
+typedef enum {
+  TEARDOWN_NONE = 0,
+  TEARDOWN_PENDING_WAIT,
+  TEARDOWN_TEARING_DOWN,
+} teardown_state_t;
+static teardown_state_t g_teardown_state = TEARDOWN_NONE;
+// Set by an adopting initialize() to tell the waiter thread to abort its
+// queued teardown and leave the live isolate intact. Read/reset by the waiter.
+static bool g_teardown_cancelled = false;
 static uv_cond_t g_teardown_cond;
 
 // One node per cleanup() call that arrived while a teardown was already
@@ -363,11 +382,32 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   // If a teardown from a prior cleanup() is still draining (the isolate is
   // being torn down on the waiter thread from Task 2), do not race a fresh
   // graal_create_isolate against it -- wait until the isolate is fully gone
-  // (g_teardown_pending false AND g_isolate NULL) before proceeding. This is
-  // a narrow, rare path (re-initializing mid-drain), not a fast path, so a
-  // blocking wait here is acceptable and matches this function's existing
-  // fully-synchronous contract.
-  while (g_teardown_pending || (g_isolate != NULL && !g_initialized)) {
+  // before proceeding. This is a narrow, rare path (re-initializing mid-drain),
+  // not a fast path, so a blocking wait here is acceptable and matches this
+  // function's existing fully-synchronous contract -- except in
+  // TEARDOWN_PENDING_WAIT (see below), where blocking would deadlock.
+  while (g_teardown_state != TEARDOWN_NONE || (g_isolate != NULL && !g_initialized)) {
+    if (g_teardown_state == TEARDOWN_PENDING_WAIT) {
+      // A teardown is queued but the waiter has NOT begun physical teardown
+      // (that transition to TEARING_DOWN happens under this same g_mutex), so
+      // g_isolate/g_initialized are still valid. Blocking here would freeze the
+      // JS event loop that an active streaming/transform worker needs in order
+      // to drain g_active_ops -- the waiter would then wait forever and this
+      // wait would never end (the P1 deadlock). Instead, ADOPT the live isolate:
+      // cancel the queued teardown, take a fresh ref, and wake the waiter so it
+      // aborts without tearing down. g_initialized is already 1, so fall through
+      // to the ref-count path below is unnecessary -- return directly.
+      g_teardown_cancelled = true;
+      g_ref_count++;
+      uv_cond_broadcast(&g_teardown_cond);
+      uv_mutex_unlock(&g_mutex);
+      return NULL;
+    }
+    // TEARDOWN_TEARING_DOWN (or a transient g_isolate!=NULL && !g_initialized):
+    // g_active_ops has already reached 0, so nothing depends on the JS event
+    // loop -- this blocking wait is deadlock-free and preserves the original
+    // "don't race graal_create_isolate against graal_tear_down_isolate"
+    // guarantee that round 3's Task 3 added.
     uv_cond_wait(&g_teardown_cond, &g_mutex);
   }
 
@@ -1536,17 +1576,26 @@ static void teardown_waiter_thread_fn(void* arg) {
   (void)arg;
 
   uv_mutex_lock(&g_mutex);
-  while (g_active_ops > 0) {
+  while (g_active_ops > 0 && !g_teardown_cancelled) {
     uv_cond_wait(&g_teardown_cond, &g_mutex);
+  }
+  bool cancelled = g_teardown_cancelled;
+  if (!cancelled) {
+    // Point of no return: from here an adopting initialize() must NOT reuse the
+    // isolate, so publish TEARING_DOWN under the lock before we drop it to call
+    // graal_tear_down_isolate().
+    g_teardown_state = TEARDOWN_TEARING_DOWN;
   }
   uv_mutex_unlock(&g_mutex);
 
   // Perform teardown exactly as the unchanged fast path does: attach a local
   // thread to the isolate (g_thread from graal_create_isolate's bootstrap
   // thread is invalid here -- see cleanup_thread_fn's comment), then tear
-  // down. Ignore the return code, matching today's behavior.
+  // down. Ignore the return code, matching today's behavior. Skipped entirely
+  // when an initialize() call adopted the live isolate instead (see
+  // napi_initialize's TEARDOWN_PENDING_WAIT branch).
   bool torn_down = false;
-  if (fn_tear_down_isolate && fn_attach_thread && g_isolate) {
+  if (!cancelled && fn_tear_down_isolate && fn_attach_thread && g_isolate) {
     void* local_thread = NULL;
     if (fn_attach_thread(g_isolate, &local_thread) == 0 && local_thread != NULL) {
       fn_tear_down_isolate(local_thread);
@@ -1554,25 +1603,26 @@ static void teardown_waiter_thread_fn(void* arg) {
     }
     // else: attach failed -- the isolate is still alive. Do NOT clear g_isolate,
     // or it becomes unreachable and can never be torn down.
-  } else {
+  } else if (!cancelled) {
     // Nothing to tear down (no isolate / FFI unavailable) -- safe to clear.
     torn_down = true;
   }
+  // if (cancelled): leave torn_down = false -- the isolate stays live for the
+  // adopter; we tear nothing down.
 
   uv_mutex_lock(&g_mutex);
-  if (torn_down) {
+  if (!cancelled && torn_down) {
     g_thread = NULL;
     g_isolate = NULL;
     g_initialized = 0;
     g_ref_count = 0;
   }
-  // g_teardown_pending must clear regardless: this waiter thread is done, and
-  // leaving it set would permanently wedge future initialize()/cleanup(). On the
-  // attach-failure path the isolate stays live and g_initialized stays 1, so a
-  // later initialize() will correctly ref-count the existing isolate rather than
-  // build a second one, and this failed teardown is simply retried on the next
-  // last-release cleanup().
-  g_teardown_pending = false;
+  // If cancelled: g_isolate/g_initialized/g_ref_count are left exactly as the
+  // adopting initialize() set them (it already did g_ref_count++ on the live
+  // isolate). On the attach-failure path (!cancelled && !torn_down) the isolate
+  // also stays live and g_initialized stays 1, retried on the next last release.
+  g_teardown_state = TEARDOWN_NONE;
+  g_teardown_cancelled = false;
   // Release any initialize() call blocked waiting for teardown to finish
   // (see Task 3).
   uv_cond_broadcast(&g_teardown_cond);
@@ -1679,7 +1729,7 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
   // Case 3: a teardown from an earlier cleanup() call is already pending
   // (possibly triggered from a different Worker/env). Join its waiter list
   // instead of spawning a second waiter thread.
-  if (g_teardown_pending) {
+  if (g_teardown_state != TEARDOWN_NONE) {
     napi_value promise;
     teardown_waiter_t* waiter = teardown_waiter_create(env, &promise);
     if (waiter == NULL) {
@@ -1736,11 +1786,12 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
   // set until the waiter thread finishes, matching today's behavior of
   // treating "still tearing down" as "still initialized" for concurrent
   // initialize() calls (see Task 3).
-  g_teardown_pending = true;
+  g_teardown_state = TEARDOWN_PENDING_WAIT;
+  g_teardown_cancelled = false;
   napi_value promise;
   teardown_waiter_t* waiter = teardown_waiter_create(env, &promise);
   if (waiter == NULL) {
-    g_teardown_pending = false;
+    g_teardown_state = TEARDOWN_NONE;
     uv_mutex_unlock(&g_mutex);
     return NULL;  // teardown_waiter_create already threw
   }
@@ -1758,11 +1809,11 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
 
   if (spawn_rc != 0) {
     // Best-effort degradation: if the waiter thread never starts, nothing
-    // will ever clear g_teardown_pending, which would otherwise permanently
+    // will ever clear g_teardown_state, which would otherwise permanently
     // wedge every future initialize()/cleanup() call. Roll back to "teardown
     // did not start" -- the isolate stays up and the caller's promise still
     // resolves, mirroring the fast path's ignore-teardown-return-code posture.
-    g_teardown_pending = false;
+    g_teardown_state = TEARDOWN_NONE;
     g_teardown_waiters = NULL;
 
     napi_value undefined;
