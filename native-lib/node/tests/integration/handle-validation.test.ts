@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import * as ffi from "../../src/ffi";
 import { findLibrary } from "../../src/utils";
 
@@ -21,7 +21,19 @@ import { findLibrary } from "../../src/utils";
 // the suite's test count increasing by exactly one for this task.
 //
 // Real addon, no mocking.
+//
+// The native addon globals (g_ref_count, g_initialized, etc.) are
+// process-wide C statics -- vitest's per-file module isolation does NOT
+// reset them. Every ffi.initialize() here must be balanced by a matching
+// ffi.cleanup() so this file doesn't leak a ref-count bump into sibling
+// integration test files sharing the same vitest worker process (mirrors
+// admission-during-teardown.test.ts's care to drain/settle before the file
+// ends, and instance-lifecycle.test.ts's afterEach cleanup pattern).
 describe("native handle validation (round 6 #1)", () => {
+  afterEach(async () => {
+    await ffi.cleanup();
+  });
+
   it("runScriptEngine/runScriptStreamingEngine/runScriptTransformEngine all throw on a non-integer handle rather than using garbage", () => {
     ffi.initialize(findLibrary());
 
