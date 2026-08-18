@@ -102,6 +102,11 @@ typedef struct engine_bridge {
     // freeing was deferred to the last op draining on the owner thread.
     int in_flight;
     bool destroy_pending;
+    // round-9 (#1): true only when destroyEngine deferred (in_flight > 0); gates
+    // the deferred fn_destroy_engine registry removal in bridge_end_op. The
+    // bridge_env_cleanup defer path leaves this false so it never makes a
+    // registry call during env teardown.
+    bool destroy_via_destroy_engine;
     struct engine_bridge* next;
 } engine_bridge_t;
 static engine_bridge_t* g_bridges = NULL;  // linked list, guarded by g_mutex
@@ -202,8 +207,19 @@ static engine_bridge_t* bridge_find(long long handle) {
 // env cleanup hook via napi_remove_env_cleanup_hook so Node never invokes it
 // on freed memory; the hook path itself (bridge_env_cleanup) must not remove
 // itself and calls this directly.
-static void bridge_finalize(engine_bridge_t* b, bool env_still_alive) {
+// `do_registry_remove` is true only when destroyEngine deferred the registry
+// removal (fn_destroy_engine) because an op was in flight -- the last op to
+// drain performs it here, exactly once, before freeing the record. It runs on
+// whichever thread finalizes (the owner JS thread from the completion
+// sentinel, or destroyEngine's thread); fn_destroy_engine attaches its own
+// isolate thread, so it is not JS-thread-affine. Must be called WITHOUT
+// g_mutex held (it enters GraalVM and, for env_still_alive, calls N-API).
+static void bridge_finalize(engine_bridge_t* b, bool env_still_alive, bool do_registry_remove) {
     if (b == NULL) return;
+    if (do_registry_remove && fn_destroy_engine) {
+        void* thread = NULL;
+        if (fn_attach_thread(g_isolate, &thread) == 0) { fn_destroy_engine(thread, b->handle); fn_detach_thread(thread); }
+    }
     if (env_still_alive && b->resolver_js != NULL && b->env != NULL) {
         napi_delete_reference(b->env, b->resolver_js);
     }
@@ -246,7 +262,7 @@ static void bridge_env_cleanup(void* arg) {
     // call napi_remove_env_cleanup_hook for ourselves here. The env is still
     // alive here -- that is the whole point of this hook's design (see above) --
     // so the napi_ref deletion in bridge_finalize is legal.
-    bridge_finalize(b, /*env_still_alive=*/true);
+    bridge_finalize(b, /*env_still_alive=*/true, /*do_registry_remove=*/false);
 }
 
 // Begin a streaming/transform op on a resolver-backed engine: look up the bridge
@@ -276,8 +292,12 @@ static void bridge_end_op(engine_bridge_t* b, bool env_still_alive) {
     uv_mutex_lock(&g_mutex);
     b->in_flight--;
     bool finalize = (b->destroy_pending && b->in_flight == 0);
+    bool remove_registry = finalize && b->destroy_via_destroy_engine;
     uv_mutex_unlock(&g_mutex);
-    if (finalize) bridge_finalize(b, env_still_alive);
+    // remove_registry is true only when destroyEngine deferred the registry
+    // removal while this op was in flight (round-9 #1); the env-cleanup-hook
+    // defer path leaves it false so no registry call is made during env teardown.
+    if (finalize) bridge_finalize(b, env_still_alive, /*do_registry_remove=*/remove_registry);
 }
 
 // --- Initialization ---
@@ -1564,6 +1584,29 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
     // any handle <= 0 means construction failed; never hand that back to JS as
     // if it were usable.
     if (handle <= 0) { napi_throw_error(env, NULL, "create_engine returned an invalid handle"); return NULL; }
+
+    // Round-9 (#1): every engine -- resolver-backed or not -- gets a per-engine
+    // record so destroyEngine can defer the registry removal (fn_destroy_engine)
+    // until this engine's in-flight streaming/transform ops drain. A resolver-less
+    // record leaves resolver_js/env/results NULL and registers NO env cleanup
+    // hook (there is no napi_ref to dispose). owner is recorded for symmetry but
+    // is NOT used to restrict destruction of resolver-less engines (see the
+    // owner guard in napi_destroy_engine, which checks resolver_js != NULL).
+    engine_bridge_t* rec = (engine_bridge_t*)calloc(1, sizeof(engine_bridge_t));
+    if (rec == NULL) {
+        // Roll back the engine we just created so we don't leak a registered but
+        // unrecorded handle. fn_destroy_engine attaches its own thread.
+        if (fn_destroy_engine) {
+            void* t2 = NULL;
+            if (fn_attach_thread(g_isolate, &t2) == 0) { fn_destroy_engine(t2, handle); fn_detach_thread(t2); }
+        }
+        napi_throw_error(env, NULL, "Failed to allocate engine record");
+        return NULL;
+    }
+    rec->handle = handle;
+    rec->owner = uv_thread_self();
+    uv_mutex_lock(&g_mutex); rec->next = g_bridges; g_bridges = rec; uv_mutex_unlock(&g_mutex);
+
     napi_value out; napi_create_int64(env, (int64_t)handle, &out); return out;
 }
 
@@ -1602,7 +1645,7 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
     // tracked buffers too, so nothing is dropped on the floor.
     if (handle <= 0) {
         // Synchronous call on the JS thread -- env is live here.
-        bridge_finalize(bridge, /*env_still_alive=*/true);
+        bridge_finalize(bridge, /*env_still_alive=*/true, /*do_registry_remove=*/false);
         napi_throw_error(env, NULL, "create_engine_with_resolver returned an invalid handle");
         return NULL;
     }
@@ -1641,9 +1684,16 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
     // NULL -> fall through). We are on the owner thread past this point, so the
     // env cannot be concurrently tearing down and the bridge stays stable
     // between this check and the unlink below.
+    // Owner-thread guard: only resolver-backed engines carry thread-affine
+    // N-API state (a napi_ref + an env cleanup hook) that is illegal to touch
+    // from another Worker's thread. Round-9 gave resolver-LESS engines a record
+    // too, so the guard must key on resolver state (resolver_js != NULL), NOT
+    // on "a record exists" -- otherwise resolver-less engines would wrongly
+    // become non-destroyable off their creating thread. A resolver-less engine
+    // has no napi state and stays destroyable from any thread.
     uv_mutex_lock(&g_mutex);
     engine_bridge_t* owned = bridge_find(handle);
-    if (owned != NULL) {
+    if (owned != NULL && owned->resolver_js != NULL) {
         uv_thread_t self = uv_thread_self();
         if (!uv_thread_equal(&self, &owned->owner)) {
             uv_mutex_unlock(&g_mutex);
@@ -1652,34 +1702,51 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
             return NULL;
         }
     }
-    uv_mutex_unlock(&g_mutex);
 
-    if (fn_destroy_engine) {
-        void* thread = NULL;
-        if (fn_attach_thread(g_isolate, &thread) == 0) { fn_destroy_engine(thread, handle); fn_detach_thread(thread); }
-    }
-    // Unlink the bridge from g_bridges, but only free it now if no streaming/
-    // transform op is still in flight. A background op can still call back into
-    // resolve_module_callback with this bridge as ctx (F1), so if in_flight > 0
-    // we mark destroy_pending and defer the free to the completion sentinel,
-    // which drains on this same owner thread. Deleting the napi_ref is only legal
-    // on the owner thread, and destroyEngine is called from it, so we finalize
-    // here in the common (not-in-flight) case.
-    uv_mutex_lock(&g_mutex);
+    // Round-9 (#1): unlink the record and decide, under the lock, whether the
+    // registry removal (fn_destroy_engine) and the record free must be DEFERRED.
+    // If an op is in flight, its worker may not yet have called
+    // ScriptRuntime.get(handle) (the first statement of the Java entrypoint) --
+    // removing the registry entry now would make that lookup fail with
+    // "Unknown engine handle". So defer BOTH the registry removal and the free
+    // to the last op draining (bridge_end_op -> bridge_finalize with
+    // do_registry_remove=true), which runs on this same owner thread. When no op
+    // is in flight, remove the registry entry and finalize immediately, as
+    // before. Every engine now has a record, so `found` is non-NULL for both
+    // resolver-backed and resolver-less engines.
     engine_bridge_t** pp = &g_bridges; engine_bridge_t* found = NULL;
     while (*pp != NULL) { if ((*pp)->handle == handle) { found = *pp; *pp = found->next; break; } pp = &(*pp)->next; }
     bool defer = false;
-    if (found != NULL) {
-        if (found->in_flight > 0) { found->destroy_pending = true; defer = true; }
-    }
+    // destroy_via_destroy_engine gates the deferred registry removal in
+    // bridge_end_op (see Step 5); set it together with destroy_pending here.
+    if (found != NULL && found->in_flight > 0) { found->destroy_pending = true; found->destroy_via_destroy_engine = true; defer = true; }
     uv_mutex_unlock(&g_mutex);
+
     if (found != NULL) {
-        // Drop the env cleanup hook: whether we finalize now or defer to the
-        // draining op, the free happens explicitly, so Node must never invoke
-        // the hook on this (soon-to-be or already) freed bridge.
-        napi_remove_env_cleanup_hook(env, bridge_env_cleanup, found);
-        // Synchronous call on the JS thread -- env is live here.
-        if (!defer) bridge_finalize(found, /*env_still_alive=*/true);
+        // Drop the env cleanup hook (resolver-backed engines only ever registered
+        // one; napi_remove_env_cleanup_hook is a safe no-op if none was added).
+        // Whether we finalize now or defer, the free happens explicitly, so Node
+        // must never invoke the hook on this (soon-to-be or already) freed record.
+        if (found->resolver_js != NULL) {
+            napi_remove_env_cleanup_hook(env, bridge_env_cleanup, found);
+        }
+        if (!defer) {
+            // Not in flight: remove the registry entry AND finalize now, on this
+            // owner thread (env live). do_registry_remove=true folds the
+            // fn_destroy_engine call into bridge_finalize so it happens exactly
+            // once regardless of path.
+            bridge_finalize(found, /*env_still_alive=*/true, /*do_registry_remove=*/true);
+        }
+        // else: the draining op's bridge_end_op -> bridge_finalize performs both
+        // the registry removal and the free (see Step 5).
+    } else {
+        // No record found (should not happen now that every engine has one, but
+        // stay robust to a double-destroy or an unknown handle): fall back to the
+        // pre-round-9 behavior of removing the registry entry directly.
+        if (fn_destroy_engine) {
+            void* thread = NULL;
+            if (fn_attach_thread(g_isolate, &thread) == 0) { fn_destroy_engine(thread, handle); fn_detach_thread(thread); }
+        }
     }
     return NULL;
 }
