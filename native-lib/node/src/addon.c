@@ -265,13 +265,16 @@ static void bridge_env_cleanup(void* arg) {
     bridge_finalize(b, /*env_still_alive=*/true, /*do_registry_remove=*/false);
 }
 
-// Begin a streaming/transform op on a resolver-backed engine: look up the bridge
-// and mark one op in flight so it (and its napi_ref) cannot be freed while the
-// background uv_thread can still call resolve_module_callback with it (F1).
-// Returns the bridge pointer (stable for the op's lifetime, since in_flight > 0
-// blocks both destroyEngine and the env cleanup hook from freeing it) or NULL for
-// a resolver-less engine / unknown handle, in which case there is nothing to
-// protect and completion must not call bridge_end_op.
+// Begin a streaming/transform op: look up the engine's record and mark one op in
+// flight so the record (and, for resolver-backed engines, its napi_ref) cannot be
+// freed while the background uv_thread runs -- and, since round-9 (#1), so that
+// destroyEngine defers the Java registry removal until this op drains. Every
+// engine (resolver-backed or resolver-less) now has a record, so this returns a
+// non-NULL pointer for any known handle; the completion sentinel MUST call
+// bridge_end_op on it to balance in_flight and run any deferred destroy. Returns
+// NULL only for an unknown handle (nothing to protect, no bridge_end_op needed).
+// The returned pointer is stable for the op's lifetime because in_flight > 0
+// blocks both destroyEngine and the env cleanup hook from freeing the record.
 static engine_bridge_t* bridge_begin_op(long long handle) {
     uv_mutex_lock(&g_mutex);
     engine_bridge_t* b = bridge_find(handle);
@@ -574,8 +577,10 @@ struct streaming_work {
   long long handle;
   char* script;
   char* inputs_json;
-  // Non-NULL only for resolver-backed engines: the bridge whose in_flight count
-  // this op holds. The completion sentinel calls bridge_end_op on it (F1).
+  // The engine's record whose in_flight count this op holds. Since round-9 (#1)
+  // every engine has a record, so this is non-NULL for any known handle (NULL only
+  // for an unknown handle). The completion sentinel calls bridge_end_op on it to
+  // balance in_flight and run any deferred destroy (F1).
   engine_bridge_t* bridge;
 };
 
@@ -934,8 +939,10 @@ struct transform_work {
   char* input_name;
   char* input_mime_type;
   char* input_charset;
-  // Non-NULL only for resolver-backed engines: the bridge whose in_flight count
-  // this op holds. The completion sentinel calls bridge_end_op on it (F1).
+  // The engine's record whose in_flight count this op holds. Since round-9 (#1)
+  // every engine has a record, so this is non-NULL for any known handle (NULL only
+  // for an unknown handle). The completion sentinel calls bridge_end_op on it to
+  // balance in_flight and run any deferred destroy (F1).
   engine_bridge_t* bridge;
 };
 
