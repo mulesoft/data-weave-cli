@@ -767,10 +767,26 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
     return NULL;
   }
 
+  // OOM safety (round-8): every allocation is NULL-checked before it is
+  // dereferenced, and every failure path releases the g_active_ops reservation
+  // taken above (mirroring napi_run_script_engine's "OOM" throw). Without this
+  // an allocation failure segfaults the host process AND strands g_active_ops.
   struct streaming_work* w = calloc(1, sizeof(struct streaming_work));
+  if (w == NULL) {
+    // w is NULL -- do not touch w->script/w->inputs_json here.
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "OOM");
+    return NULL;
+  }
   w->handle = (long long)handle64;
   w->script = malloc(script_len + 1);
   w->inputs_json = malloc(inputs_len + 1);
+  if (w->script == NULL || w->inputs_json == NULL) {
+    free(w->script); free(w->inputs_json); free(w);
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "OOM");
+    return NULL;
+  }
   if (napi_get_value_string_utf8(env, argv[1], w->script, script_len + 1, NULL) != napi_ok ||
       napi_get_value_string_utf8(env, argv[2], w->inputs_json, inputs_len + 1, NULL) != napi_ok) {
     free(w->script); free(w->inputs_json); free(w);
@@ -1171,7 +1187,16 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
   // before returning (round-7 #2). calloc zeroed w, so free() on an unset
   // field pointer is a safe free(NULL). TRANSFORM_FAIL centralizes the
   // unwind.
+  // OOM safety (round-8): NULL-check the work struct before dereferencing it,
+  // releasing the g_active_ops reservation taken above. The per-field malloc
+  // checks below reuse TRANSFORM_FAIL (which frees all fields + w and unwinds);
+  // this standalone branch cannot use it (the macro dereferences w).
   struct transform_work* w = calloc(1, sizeof(struct transform_work));
+  if (w == NULL) {
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "OOM");
+    return NULL;
+  }
   size_t len;
   w->handle = (long long)handle64;
 
@@ -1185,18 +1210,22 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
 
   if (napi_get_value_string_utf8(env, argv[1], NULL, 0, &len) != napi_ok) TRANSFORM_FAIL("runScriptTransformEngine: script must be a string");
   w->script = malloc(len + 1);
+  if (w->script == NULL) TRANSFORM_FAIL("OOM");
   if (napi_get_value_string_utf8(env, argv[1], w->script, len + 1, NULL) != napi_ok) TRANSFORM_FAIL("runScriptTransformEngine: failed to read script");
 
   if (napi_get_value_string_utf8(env, argv[2], NULL, 0, &len) != napi_ok) TRANSFORM_FAIL("runScriptTransformEngine: inputsJson must be a string");
   w->inputs_json = malloc(len + 1);
+  if (w->inputs_json == NULL) TRANSFORM_FAIL("OOM");
   if (napi_get_value_string_utf8(env, argv[2], w->inputs_json, len + 1, NULL) != napi_ok) TRANSFORM_FAIL("runScriptTransformEngine: failed to read inputsJson");
 
   if (napi_get_value_string_utf8(env, argv[3], NULL, 0, &len) != napi_ok) TRANSFORM_FAIL("runScriptTransformEngine: inputName must be a string");
   w->input_name = malloc(len + 1);
+  if (w->input_name == NULL) TRANSFORM_FAIL("OOM");
   if (napi_get_value_string_utf8(env, argv[3], w->input_name, len + 1, NULL) != napi_ok) TRANSFORM_FAIL("runScriptTransformEngine: failed to read inputName");
 
   if (napi_get_value_string_utf8(env, argv[4], NULL, 0, &len) != napi_ok) TRANSFORM_FAIL("runScriptTransformEngine: inputMimeType must be a string");
   w->input_mime_type = malloc(len + 1);
+  if (w->input_mime_type == NULL) TRANSFORM_FAIL("OOM");
   if (napi_get_value_string_utf8(env, argv[4], w->input_mime_type, len + 1, NULL) != napi_ok) TRANSFORM_FAIL("runScriptTransformEngine: failed to read inputMimeType");
 
   napi_valuetype type;
@@ -1204,6 +1233,7 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
   if (type == napi_string) {
     if (napi_get_value_string_utf8(env, argv[5], NULL, 0, &len) != napi_ok) TRANSFORM_FAIL("runScriptTransformEngine: inputCharset must be a string");
     w->input_charset = malloc(len + 1);
+    if (w->input_charset == NULL) TRANSFORM_FAIL("OOM");
     if (napi_get_value_string_utf8(env, argv[5], w->input_charset, len + 1, NULL) != napi_ok) TRANSFORM_FAIL("runScriptTransformEngine: failed to read inputCharset");
   } else {
     w->input_charset = NULL;
