@@ -76,14 +76,17 @@ Because these creates sit **after** `g_active_ops++` but the exact position rela
 
 ### 4. Testing
 
-The OOM and N-API-create-failure paths are **not deterministically forceable** from JS/vitest (no allocator / N-API fault injection at the addon boundary) — the same documented limitation as rounds 6–8. So #2 and #3 add **no new runtime test**; coverage is C-level code reasoning (every allocation/create checked before use; every failure path unwinds `g_active_ops`, `in_flight`, and frees partials; no double-free; no hung promise).
+**No new runtime test — all three findings are covered by C-level code reasoning.** This is the same documented limitation as rounds 6–8: the failure paths are not deterministically forceable from JS/vitest.
 
-Finding **#1 is testable** and gets a deterministic regression test: drive a streaming or transform op through the raw `ffi`, and — from inside the read/first-chunk callback, while the op is admitted and in flight — call `ffi.destroyEngine(handle)` on that engine, then let the op complete. Assert the op still produces its real terminal result (not `"Unknown engine handle"`) and that a subsequent `cleanup()` settles without wedging. Mirrors the harness of `tests/integration/run-admission.test.ts` / `teardown-deadlock.test.ts` (real addon, balances init/cleanup). Document that, like round 5's deadlock test, the reliability comes from the deterministic synchronous prefix of the admission→destroy interleave, not from timers.
+- **#2 / #3** — the OOM and N-API-create-failure paths need allocator / N-API fault injection at the addon boundary, which does not exist. Coverage is code reasoning: every allocation/create is checked before use; every failure path unwinds `g_active_ops`, `in_flight`, and frees partials; no double-free; no hung promise.
+- **#1** — despite the spec's earlier draft, this is **not** deterministically forceable either. `ScriptRuntime.get(handle)` (`NativeLib.java:457`, `:492`) is the **first statement** of the worker's Java entrypoint — it runs *before* any read/write callback fires. So the observable "Unknown engine handle" window is the gap between op **admission** (worker spawned, promise returned) and the worker's Java **lookup**, which is entirely *before* the first chunk. A test that fires `destroyEngine` from inside a callback cannot reproduce it (the lookup already succeeded; the worker holds its `runtime` locally and completes fine even on unfixed code). The review itself calls the symptom "nondeterministic." A synchronous-fire-after-admission race-window loop would be green-on-fixed but only *probabilistically* red-on-unfixed — not the deterministic guard rounds 5's test provides — so per the round-9 decision #1 gets **no new runtime test**; its correctness is established by code reasoning against the ordering invariants below.
+
+Baseline is therefore unchanged at **878 passed / 59 skipped / 0 failed** — no new test, no regression.
 
 ## Verification
 
 - `cd native-lib/node && npm run build:addon` clean (no new warnings in the touched regions); `npm run build` (tsc) clean.
-- `npm test` green: current baseline **878 passed / 59 skipped / 0 failed**, plus the one new #1 regression test → **879 passed / 59 skipped / 0 failed**.
+- `npm test` green: baseline **878 passed / 59 skipped / 0 failed**, unchanged (no new test — see §4).
 - `git diff --check`.
 
 ## Global Constraints
@@ -108,5 +111,6 @@ Finding **#1 is testable** and gets a deterministic regression test: drive a str
 - **#2 abort-op-without-result on worker OOM.** Rejected (user decision): leaving the op's promise unresolved is a worse failure than a terminal error result; the static-OOM-JSON terminal result keeps the op's contract (always resolves) intact.
 - **#2/#3 fixing only the cited lines.** Rejected: the per-site habit that produced the round-N-finds-the-sibling recurrence. Round 9 sweeps the whole worker/callback allocation + resource-creation class.
 - **Merging `g_active_ops` and per-engine `in_flight` into one counter.** Rejected: they gate different resources (global isolate teardown vs. per-handle registry removal) with different lifetimes; conflating them would reintroduce the class of bug rounds 5–7 fixed.
-- **Adding an allocator/N-API fault-injection hook to test #2/#3.** Rejected as test-only production surface (YAGNI), consistent with rounds 6–8. #1, which is forceable, does get a regression test.
+- **Adding an allocator/N-API fault-injection hook to test #2/#3.** Rejected as test-only production surface (YAGNI), consistent with rounds 6–8.
+- **A race-window loop test for #1** (synchronous `destroyEngine` right after admission, looped N times). Rejected: green-on-fixed but only *probabilistically* red-on-unfixed, so it is not the deterministic guard round 5's deadlock test is — it would pass on the unfixed code whenever the worker's Java lookup happens to win the race. Not worth a permanently-running probabilistic test; #1's correctness rests on the ordering invariants in §Design.1 verified by code reasoning.
 - **Modifying the Java `ScriptRuntime` registry to tolerate late lookups.** Rejected as out of scope and the wrong layer — the C addon must not remove the entry early in the first place; changing Java semantics would mask the ordering bug rather than fix it.
