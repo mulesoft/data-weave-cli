@@ -829,12 +829,37 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
     return NULL;
   }
 
+  // Round-9 (#3): the resource creations below run AFTER g_active_ops was
+  // reserved (and after w + its buffers were allocated), but bridge_begin_op
+  // has NOT run yet (it is below), so there is no in-flight hold to unwind
+  // here. A failed create must release g_active_ops (verbatim pattern), free
+  // any tsfn already created, free w + buffers, and throw -- otherwise the
+  // worker sees a zeroed w->tsfn/w->deferred (crash) or g_active_ops is
+  // stranded (teardown wedge).
   napi_value resource_name;
-  napi_create_string_utf8(env, "dwStreaming", NAPI_AUTO_LENGTH, &resource_name);
-  napi_create_threadsafe_function(env, argv[3], NULL, resource_name, 0, 1, NULL, NULL, w, call_js_write, &w->tsfn);
+  if (napi_create_string_utf8(env, "dwStreaming", NAPI_AUTO_LENGTH, &resource_name) != napi_ok) {
+    free(w->script); free(w->inputs_json); free(w);
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "runScriptStreamingEngine: failed to create resource name");
+    return NULL;
+  }
+  if (napi_create_threadsafe_function(env, argv[3], NULL, resource_name, 0, 1, NULL, NULL, w, call_js_write, &w->tsfn) != napi_ok) {
+    free(w->script); free(w->inputs_json); free(w);
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "runScriptStreamingEngine: failed to create threadsafe function");
+    return NULL;
+  }
 
   napi_value promise;
-  napi_create_promise(env, &w->deferred, &promise);
+  if (napi_create_promise(env, &w->deferred, &promise) != napi_ok) {
+    // The tsfn was created above; release it before freeing w (it holds w as
+    // its context). No worker exists yet, so this release is the sole discharge.
+    napi_release_threadsafe_function(w->tsfn, napi_tsfn_release);
+    free(w->script); free(w->inputs_json); free(w);
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "runScriptStreamingEngine: failed to create promise");
+    return NULL;
+  }
 
   // Pin the resolver bridge (if any) for the whole op so it outlives a concurrent
   // destroyEngine/cleanup and the background thread can safely call back into
@@ -1301,14 +1326,42 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
   }
   #undef TRANSFORM_FAIL
 
+  // Round-9 (#3): check each resource creation; on failure release g_active_ops
+  // (verbatim), release any tsfn already created, free w + all five string
+  // buffers, and throw. bridge_begin_op is below, so no in-flight hold exists
+  // here. read_tsfn has no context (NULL); write_tsfn holds w as context, so
+  // release write_tsfn before freeing w if it was created.
   napi_value resource_name;
-  napi_create_string_utf8(env, "dwTransform", NAPI_AUTO_LENGTH, &resource_name);
+  if (napi_create_string_utf8(env, "dwTransform", NAPI_AUTO_LENGTH, &resource_name) != napi_ok) {
+    free(w->script); free(w->inputs_json); free(w->input_name); free(w->input_mime_type); free(w->input_charset); free(w);
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "runScriptTransformEngine: failed to create resource name");
+    return NULL;
+  }
 
-  napi_create_threadsafe_function(env, argv[6], NULL, resource_name, 0, 1, NULL, NULL, NULL, call_js_read, &w->read_tsfn);
-  napi_create_threadsafe_function(env, argv[7], NULL, resource_name, 0, 1, NULL, NULL, w, call_js_transform_write, &w->write_tsfn);
+  if (napi_create_threadsafe_function(env, argv[6], NULL, resource_name, 0, 1, NULL, NULL, NULL, call_js_read, &w->read_tsfn) != napi_ok) {
+    free(w->script); free(w->inputs_json); free(w->input_name); free(w->input_mime_type); free(w->input_charset); free(w);
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "runScriptTransformEngine: failed to create read threadsafe function");
+    return NULL;
+  }
+  if (napi_create_threadsafe_function(env, argv[7], NULL, resource_name, 0, 1, NULL, NULL, w, call_js_transform_write, &w->write_tsfn) != napi_ok) {
+    napi_release_threadsafe_function(w->read_tsfn, napi_tsfn_release);
+    free(w->script); free(w->inputs_json); free(w->input_name); free(w->input_mime_type); free(w->input_charset); free(w);
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "runScriptTransformEngine: failed to create write threadsafe function");
+    return NULL;
+  }
 
   napi_value promise;
-  napi_create_promise(env, &w->deferred, &promise);
+  if (napi_create_promise(env, &w->deferred, &promise) != napi_ok) {
+    napi_release_threadsafe_function(w->read_tsfn, napi_tsfn_release);
+    napi_release_threadsafe_function(w->write_tsfn, napi_tsfn_release);
+    free(w->script); free(w->inputs_json); free(w->input_name); free(w->input_mime_type); free(w->input_charset); free(w);
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "runScriptTransformEngine: failed to create promise");
+    return NULL;
+  }
 
   // Pin the resolver bridge (if any) for the whole op so it outlives a concurrent
   // destroyEngine/cleanup and the background thread can safely call back into
