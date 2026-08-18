@@ -534,6 +534,13 @@ static napi_value dw_napi_run_script(napi_env env, napi_callback_info info) {
 
 // --- Streaming output ---
 
+// Round-9 (#2): static terminal-error JSON used when a worker thread cannot
+// even strdup its result string (OOM). It is a file-scope constant, never
+// heap-allocated, so any code path that would free a sentinel/chunk buffer
+// must first check `buf != OOM_JSON` -- freeing a static pointer is UB. The
+// wording matches the existing terse worker error style ("Empty response").
+static const char OOM_JSON[] = "{\"success\":false,\"error\":\"Out of memory\"}";
+
 // chunk_data with len == -1 is a sentinel indicating completion (buf holds meta JSON)
 struct chunk_data {
   char* buf;
@@ -573,7 +580,7 @@ static void call_js_write(napi_env env, napi_value js_callback, void* context, v
       napi_resolve_deferred(env, w->deferred, result);
     }
 
-    free(chunk->buf);
+    if (chunk->buf != OOM_JSON) free(chunk->buf);
     free(chunk);
     free(w->script);
     free(w->inputs_json);
@@ -613,8 +620,14 @@ static void call_js_write(napi_env env, napi_value js_callback, void* context, v
 
 static int streaming_write_cb(void* ctx, const char* buf, int len) {
   napi_threadsafe_function tsfn = (napi_threadsafe_function)ctx;
+  // Round-9 (#2): OOM here must not deref NULL / memcpy into NULL. Returning -1
+  // aborts the native run cleanly (write-callback contract: non-zero stops the
+  // DataWeave run); the worker then still produces a terminal meta_result and
+  // sentinel, so the op resolves.
   struct chunk_data* chunk = malloc(sizeof(struct chunk_data));
+  if (chunk == NULL) return -1;
   chunk->buf = malloc(len);
+  if (chunk->buf == NULL) { free(chunk); return -1; }
   memcpy(chunk->buf, buf, len);
   chunk->len = len;
 
@@ -633,20 +646,27 @@ static void streaming_thread_fn(void* arg) {
   void* worker_thread = NULL;
   int rc = fn_attach_thread(g_isolate, &worker_thread);
 
+  // Round-9 (#2): strdup can fail under OOM. meta_result must still be a valid
+  // C string so the sentinel path below can deliver a terminal result -- fall
+  // back to the OOM_JSON static (which must never be freed; see the guarded
+  // frees below and in call_js_write).
   char* meta_result = NULL;
   if (rc != 0) {
     char err[256];
     snprintf(err, sizeof(err), "{\"success\":false,\"error\":\"Failed to attach thread (code %d)\"}", rc);
     meta_result = strdup(err);
+    if (meta_result == NULL) meta_result = (char*)OOM_JSON;
   } else {
     void* result_ptr = fn_run_script_callback_engine(
       worker_thread, w->handle, w->script, w->inputs_json, streaming_write_cb, (void*)w->tsfn
     );
     if (result_ptr) {
       meta_result = strdup((const char*)result_ptr);
+      if (meta_result == NULL) meta_result = (char*)OOM_JSON;
       fn_free_cstring(worker_thread, result_ptr);
     } else {
       meta_result = strdup("{\"success\":false,\"error\":\"Empty response\"}");
+      if (meta_result == NULL) meta_result = (char*)OOM_JSON;
     }
     fn_detach_thread(worker_thread);
   }
@@ -663,7 +683,21 @@ static void streaming_thread_fn(void* arg) {
   uv_cond_broadcast(&g_teardown_cond);
   uv_mutex_unlock(&g_mutex);
 
+  // Round-9 (#2): if even the sentinel struct cannot be allocated, we cannot
+  // enqueue a completion -- run the SAME native finalize the env-dead
+  // (napi_closing) branch below runs, so g_active_ops (already decremented
+  // above) plus the bridge in-flight hold and w are released and nothing is
+  // stranded. This is the "sentinel malloc NULL -> skip enqueue + unwind like
+  // the env-dead sentinel branch" path.
   struct chunk_data* sentinel = malloc(sizeof(struct chunk_data));
+  if (sentinel == NULL) {
+    if (meta_result != OOM_JSON) free(meta_result);
+    free(w->script);
+    free(w->inputs_json);
+    bridge_end_op(w->bridge, /*env_still_alive=*/false);
+    free(w);
+    return;
+  }
   sentinel->buf = meta_result;
   sentinel->len = -1;
   napi_status enq = napi_call_threadsafe_function(w->tsfn, sentinel, napi_tsfn_blocking);
@@ -693,7 +727,7 @@ static void streaming_thread_fn(void* arg) {
     // End the bridge op with env_still_alive=false so bridge_finalize skips
     // the thread-affine napi_delete_reference (Node auto-reclaims the ref
     // when the dead env is destroyed).
-    free(sentinel->buf);
+    if (sentinel->buf != OOM_JSON) free(sentinel->buf);
     free(sentinel);
     free(w->script);
     free(w->inputs_json);
@@ -982,8 +1016,12 @@ static int transform_read_cb(void* ctx, char* buf, int buf_size) {
 
 static int transform_write_cb(void* ctx, const char* buf, int len) {
   struct transform_work* w = (struct transform_work*)ctx;
+  // Round-9 (#2): OOM-safe, mirrors streaming_write_cb. Return -1 to abort the
+  // native run cleanly; the worker still delivers a terminal sentinel.
   struct chunk_data* chunk = malloc(sizeof(struct chunk_data));
+  if (chunk == NULL) return -1;
   chunk->buf = malloc(len);
+  if (chunk->buf == NULL) { free(chunk); return -1; }
   memcpy(chunk->buf, buf, len);
   chunk->len = len;
 
@@ -1017,7 +1055,7 @@ static void call_js_transform_write(napi_env env, napi_value js_callback, void* 
       napi_resolve_deferred(env, w->deferred, result);
     }
 
-    free(chunk->buf);
+    if (chunk->buf != OOM_JSON) free(chunk->buf);
     free(chunk);
     free(w->script);
     free(w->inputs_json);
@@ -1065,11 +1103,15 @@ static void transform_thread_fn(void* arg) {
   void* worker_thread = NULL;
   int rc = fn_attach_thread(g_isolate, &worker_thread);
 
+  // Round-9 (#2): strdup can fail under OOM; fall back to the OOM_JSON static
+  // so the sentinel below still delivers a terminal result. Mirrors
+  // streaming_thread_fn.
   char* meta_result = NULL;
   if (rc != 0) {
     char err[256];
     snprintf(err, sizeof(err), "{\"success\":false,\"error\":\"Failed to attach thread (code %d)\"}", rc);
     meta_result = strdup(err);
+    if (meta_result == NULL) meta_result = (char*)OOM_JSON;
   } else {
     void* result_ptr = fn_run_script_input_output_callback_engine(
       worker_thread, w->handle, w->script, w->inputs_json,
@@ -1079,9 +1121,11 @@ static void transform_thread_fn(void* arg) {
 
     if (result_ptr) {
       meta_result = strdup((const char*)result_ptr);
+      if (meta_result == NULL) meta_result = (char*)OOM_JSON;
       fn_free_cstring(worker_thread, result_ptr);
     } else {
       meta_result = strdup("{\"success\":false,\"error\":\"Empty response\"}");
+      if (meta_result == NULL) meta_result = (char*)OOM_JSON;
     }
     fn_detach_thread(worker_thread);
   }
@@ -1094,7 +1138,24 @@ static void transform_thread_fn(void* arg) {
   uv_cond_broadcast(&g_teardown_cond);
   uv_mutex_unlock(&g_mutex);
 
+  // Round-9 (#2): sentinel malloc NULL -> skip enqueue and run the same native
+  // finalize as the env-dead branch below (release the bridge hold + free w and
+  // all fields), so g_active_ops (already decremented above) and the in-flight
+  // hold are released. No self-join, no env-affine napi call, no tsfn release
+  // (see the env-dead branch's citation for why releasing the tsfns here is
+  // unsafe).
   struct chunk_data* sentinel = malloc(sizeof(struct chunk_data));
+  if (sentinel == NULL) {
+    if (meta_result != OOM_JSON) free(meta_result);
+    free(w->script);
+    free(w->inputs_json);
+    free(w->input_name);
+    free(w->input_mime_type);
+    free(w->input_charset);
+    bridge_end_op(w->bridge, /*env_still_alive=*/false);
+    free(w);
+    return;
+  }
   sentinel->buf = meta_result;
   sentinel->len = -1;
   napi_status enq = napi_call_threadsafe_function(w->write_tsfn, sentinel, napi_tsfn_blocking);
@@ -1122,7 +1183,7 @@ static void transform_thread_fn(void* arg) {
     // End the bridge op with env_still_alive=false so bridge_finalize skips
     // the thread-affine napi_delete_reference (Node auto-reclaims the ref
     // when the dead env is destroyed).
-    free(sentinel->buf);
+    if (sentinel->buf != OOM_JSON) free(sentinel->buf);
     free(sentinel);
     free(w->script);
     free(w->inputs_json);
