@@ -181,21 +181,25 @@ same process — each one only ever resolves its own modules, with no
 cross-talk between instances:
 
 ```typescript
-const dw1 = new DataWeave({
-  resolveModule: modulesFromMap({ 'a.dwl': '...' }),
-});
-dw1.initialize();
+async function example() {
+  const dw1 = new DataWeave({
+    resolveModule: modulesFromMap({ 'a.dwl': '...' }),
+  });
+  dw1.initialize();
 
-const dw2 = new DataWeave({
-  resolveModule: modulesFromMap({ 'b.dwl': '...' }),
-});
-dw2.initialize();
+  const dw2 = new DataWeave({
+    resolveModule: modulesFromMap({ 'b.dwl': '...' }),
+  });
+  dw2.initialize();
 
-dw1.run('...');  // Only 'a.dwl' is available to dw1
-dw2.run('...');  // Only 'b.dwl' is available to dw2 — dw1's modules are not visible here
-
-dw1.cleanup();
-dw2.cleanup();
+  try {
+    dw1.run('...');  // Only 'a.dwl' is available to dw1
+    dw2.run('...');  // Only 'b.dwl' is available to dw2 — dw1's modules are not visible here
+  } finally {
+    await dw1.cleanup();
+    await dw2.cleanup();
+  }
+}
 ```
 
 **`cleanup()` is required for every instance.** Each `DataWeave` instance's
@@ -307,7 +311,7 @@ async function main() {
       console.error('Error:', result.error);
     }
   } finally {
-    dw.cleanup();
+    await dw.cleanup();
   }
 }
 
