@@ -737,9 +737,15 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
   // shape) let a second Worker's napi_cleanup Case-4 tear the isolate down in
   // the gap, so a freshly spawned worker attached to a dead isolate (round-6
   // #2). Rejecting on g_teardown_state != TEARDOWN_NONE also refuses new ops
-  // once a teardown is queued/underway.
+  // once a teardown is queued/underway. Admit an ADOPTED isolate:
+  // napi_initialize's adoption branch sets g_teardown_cancelled = true on a
+  // still-live PENDING_WAIT isolate but does not reset g_teardown_state (only
+  // the async waiter does), so a merely-cancelled teardown must not reject
+  // here -- otherwise a valid post-adoption op throws "Not initialized". A
+  // genuine (non-cancelled) PENDING_WAIT or a committed TEARING_DOWN still
+  // rejects.
   uv_mutex_lock(&g_mutex);
-  if (!g_initialized || g_teardown_state != TEARDOWN_NONE) {
+  if (!g_initialized || (g_teardown_state != TEARDOWN_NONE && !g_teardown_cancelled)) {
     uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
     return NULL;
@@ -1130,8 +1136,14 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
   // Atomic admission (see napi_run_script_streaming_engine for the full
   // rationale, round-6 #2): check lifecycle + reserve g_active_ops in one
   // critical section, before any work/tsfn/promise/bridge is committed.
+  // Admit an ADOPTED isolate: napi_initialize's adoption branch sets
+  // g_teardown_cancelled = true on a still-live PENDING_WAIT isolate but does
+  // not reset g_teardown_state (only the async waiter does), so a
+  // merely-cancelled teardown must not reject here -- otherwise a valid
+  // post-adoption op throws "Not initialized". A genuine (non-cancelled)
+  // PENDING_WAIT or a committed TEARING_DOWN still rejects.
   uv_mutex_lock(&g_mutex);
-  if (!g_initialized || g_teardown_state != TEARDOWN_NONE) {
+  if (!g_initialized || (g_teardown_state != TEARDOWN_NONE && !g_teardown_cancelled)) {
     uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
     return NULL;
@@ -1528,9 +1540,15 @@ static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) 
     // completion) instead of also unwinding the OOM path. Rejecting on
     // g_teardown_state != TEARDOWN_NONE also refuses to start once a teardown
     // is queued/underway. run() is fully synchronous on the JS thread, so the
-    // reserve and release both happen inline (no worker thread).
+    // reserve and release both happen inline (no worker thread). Admit an
+    // ADOPTED isolate: napi_initialize's adoption branch sets
+    // g_teardown_cancelled = true on a still-live PENDING_WAIT isolate but
+    // does not reset g_teardown_state (only the async waiter does), so a
+    // merely-cancelled teardown must not reject here -- otherwise a valid
+    // post-adoption op throws "Not initialized". A genuine (non-cancelled)
+    // PENDING_WAIT or a committed TEARING_DOWN still rejects.
     uv_mutex_lock(&g_mutex);
-    if (!g_initialized || g_teardown_state != TEARDOWN_NONE) {
+    if (!g_initialized || (g_teardown_state != TEARDOWN_NONE && !g_teardown_cancelled)) {
       uv_mutex_unlock(&g_mutex);
       free(script); free(inputs);
       napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
