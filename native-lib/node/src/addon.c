@@ -1518,8 +1518,34 @@ static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) 
     napi_get_value_string_utf8(env, argv[1], script, script_len + 1, NULL);
     napi_get_value_string_utf8(env, argv[2], inputs, inputs_len + 1, NULL);
 
+    // Round-7 #1: reserve an active op across the isolate-touching window
+    // (attach -> run -> detach) so a concurrent Worker's last cleanup()
+    // (napi_cleanup Case 4) cannot observe g_active_ops == 0 and tear down
+    // g_isolate while this synchronous op is attaching to or executing in it.
+    // Reserve LATE (here, not at the top): the malloc/arg-extraction above do
+    // not touch the isolate, so the reservation only needs to span attach..
+    // detach -- giving exactly two unwind sites (attach-failure and normal
+    // completion) instead of also unwinding the OOM path. Rejecting on
+    // g_teardown_state != TEARDOWN_NONE also refuses to start once a teardown
+    // is queued/underway. run() is fully synchronous on the JS thread, so the
+    // reserve and release both happen inline (no worker thread).
+    uv_mutex_lock(&g_mutex);
+    if (!g_initialized || g_teardown_state != TEARDOWN_NONE) {
+      uv_mutex_unlock(&g_mutex);
+      free(script); free(inputs);
+      napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
+      return NULL;
+    }
+    g_active_ops++;
+    uv_mutex_unlock(&g_mutex);
+
     void* thread = NULL;
-    if (fn_attach_thread(g_isolate, &thread) != 0) { free(script); free(inputs); napi_throw_error(env, NULL, "Failed to attach thread"); return NULL; }
+    if (fn_attach_thread(g_isolate, &thread) != 0) {
+      uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+      free(script); free(inputs);
+      napi_throw_error(env, NULL, "Failed to attach thread");
+      return NULL;
+    }
 
     char* result = (char*)fn_run_script_engine(thread, handle, script, inputs);
 
@@ -1532,6 +1558,11 @@ static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) 
     if (result != NULL) fn_free_cstring(thread, result);
     fn_detach_thread(thread);
     free(script); free(inputs);
+
+    // Release the op reservation now that no GraalVM-attached thread remains
+    // for this call. Broadcast so a teardown_waiter_thread_fn blocked on
+    // g_active_ops > 0 re-checks and can proceed.
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
 
     napi_value out;
     if (result_copy) { napi_create_string_utf8(env, result_copy, NAPI_AUTO_LENGTH, &out); free(result_copy); }
