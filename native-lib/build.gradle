@@ -155,6 +155,9 @@ tasks.register('pythonTest', Exec) {
 
   dependsOn tasks.named('stagePythonNativeLib')
   workingDir("${projectDir}/python")
+  inputs.dir("${projectDir}/python/tests")
+  inputs.file("${projectDir}/python/pytest.ini")
+  inputs.file("${projectDir}/python/pyproject.toml")
   def testReportsDir = layout.buildDirectory.dir('test-results/python')
   def coverageReportsDir = layout.buildDirectory.dir('reports/coverage/python')
   outputs.file(testReportsDir.map { it.file('junit.xml') })

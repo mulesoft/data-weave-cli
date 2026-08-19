@@ -32,6 +32,15 @@ python3 -m pip install native-lib/python/dist/dataweave_native-0.0.1-*.whl
 python3 -m pip install -e native-lib/python
 ```
 
+### Test dependencies
+
+Install the pytest test extra before running the Python test lanes locally:
+
+```bash
+cd native-lib/python
+python3 -m pip install '.[test]'
+```
+
 ### Option C: Use externally-built library via environment variable
 
 ```bash
@@ -249,7 +258,7 @@ print(b"".join(chunks))  # b'[1,4,9,16,25]'
 
 ```bash
 cd native-lib/python
-python3 tests/test_dataweave_module.py
+python3 -m pytest tests/integration -m integration -v
 ```
 
 Or via Gradle:
@@ -257,6 +266,10 @@ Or via Gradle:
 ```bash
 ./gradlew :native-lib:pythonTest
 ```
+
+`pytest.ini` registers `unit`, `integration`, and `tck` markers. Normal pytest
+runs exclude `tck`; use `-m "unit or integration"` to run the lanes used by
+`pythonTest`.
 
 ## Running Examples
 

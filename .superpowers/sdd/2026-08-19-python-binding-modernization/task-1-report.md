@@ -40,3 +40,30 @@
 
 - The system Python does not have pytest and cannot write its global site-packages. Verification used an isolated temporary virtual environment supplied through Gradle's existing `-PpythonExe` override.
 - Native-image and Gradle emit existing Java/native-image deprecation warnings during the native build; the task itself completed successfully.
+
+## Review Fixes
+
+### Files Changed
+
+- `.github/actions/build-foundation/action.yml`: installs `native-lib/python`'s `test` optional dependency group before the foundation build invokes `pythonTest`.
+- `native-lib/build.gradle`: declares Python tests and pytest configuration as `pythonTest` inputs so test additions invalidate Gradle's up-to-date state.
+- `native-lib/python/tests/integration/test_callbacks.py`: adds three integration scenarios covering exceptions in output-only write callbacks and input/output read and write callbacks.
+- `native-lib/python/README.md`: documents installing `.[test]`, direct pytest integration execution, and lane marker behavior.
+
+### Design Choices
+
+- Callback implementations already catch Python exceptions and return `-1`, which the native APIs translate into unsuccessful `StreamingResult` metadata. The new tests characterize that established public behavior without changing runtime code or the native ABI.
+- The CI dependency installation belongs in `build-foundation` because its `build` command can trigger `native-lib:pythonTest`; per the review ruling, no caller-level provisioning is required.
+- The Gradle input declaration was added after observing that `pythonTest` remained up-to-date after a test-only edit. This prevents future test changes from being silently skipped.
+
+### Tests Run
+
+1. `/var/folders/n2/069kfxz14k3dg0dctt0gblm80000gn/T/opencode/dataweave-python-test/bin/python -m pytest tests/integration/test_callbacks.py -m integration -v`
+   - Passed: `7 passed in 1.16s`, including callback exception containment cases.
+2. `./gradlew native-lib:pythonTest -PpythonExe=/var/folders/n2/069kfxz14k3dg0dctt0gblm80000gn/T/opencode/dataweave-python-test/bin/python`
+   - Passed: native library compiled and staged; pytest reported `21 passed in 2.08s`; JUnit and coverage XML were regenerated beneath `native-lib/build`.
+
+### Concerns
+
+- The CI action change was reviewed structurally but not executed in GitHub Actions from this local worktree.
+- Native-image emits existing Java/native-image deprecation warnings during local Gradle execution.
