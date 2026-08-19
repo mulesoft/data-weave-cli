@@ -64,27 +64,60 @@ The two correctness fixes (#2, #3) share the teardown-coordination trio `g_ref_c
 
 This makes the round-11 comment at `addon.c:1686` accurate. Update that comment to state the hook now also releases the init reference.
 
-### 2. Perform the isolate-touching finalize under the held admission reservation (#3)
+### 2. Guard the isolate-touching finalize with a transient admission reservation (#3)
 
-`g_active_ops > 0` is the exact invariant that keeps the isolate alive (the waiter blocks on `while (g_active_ops > 0)`). The fix makes the deferred registry-removal attach happen **while the op's own reservation still holds**, so the isolate provably cannot begin teardown during the attach.
+`g_active_ops > 0` is the exact invariant that keeps the isolate alive (the waiter blocks on `while (g_active_ops > 0)`; the Case-4 synchronous fast path holds `g_mutex` throughout its `g_active_ops == 0` check + teardown). The fix moves the lock-free `g_isolate` read + registry-removal attach into a **short, self-contained `g_active_ops` reservation taken under `g_mutex`**, gated on teardown state — so the isolate provably cannot begin teardown across the attach, and the record-lifecycle machinery (`in_flight`, the worker-thread `g_active_ops--`, `bridge_end_op`) is **not** restructured.
+
+> **Mechanism decision:** the approved approach is the **transient reservation** below, not the more invasive "move `in_flight--`/`g_active_ops--` onto the worker thread and split the completion path across threads." In the live code the op's own `g_active_ops--` happens on the worker thread (`streaming_thread_fn:746` / `transform_thread_fn:1241`) while the finalize decision runs later on the JS thread (`call_js_write` → `bridge_end_op` → `bridge_finalize`); threading the reservation through that split would re-open the round-5/9/10/11 completion coordination the "bounded" constraint keeps closed. The transient reservation closes the identical race by taking a *fresh* reservation only around the attach, wherever finalize happens.
 
 **Split `bridge_finalize` into two phases:**
 
-- `bridge_finalize_registry(b)` — the isolate-touching phase: `fn_attach_thread(g_isolate, …)` + `fn_destroy_engine(thread, b->handle)` + `fn_detach_thread`. Precondition: **called only while the caller holds a live `g_active_ops` reservation** (or otherwise guarantees the isolate is alive — e.g. the JS-thread destroyEngine paths where `g_isolate` is stable). Retains the `g_isolate != NULL` guard for the documented main-env-after-isolate-teardown corner, but that read is now inside the reservation window, so it is no longer racing a concurrent teardown.
-- `bridge_finalize_free(b, env_still_alive)` — the non-isolate phase: napi_ref deletion (owner JS thread, env alive; stays resolver-gated) + `resolver_results_free_all` + `free(b)`. Touches no GraalVM isolate state.
+- `bridge_finalize_registry(b)` — the isolate-touching phase. It takes its **own** transient `g_active_ops` reservation, checking teardown state in the *same critical section* as the increment:
 
-**Reorder the streaming/transform completion sentinels** so the sequence on the worker/owner completion path is:
+  ```c
+  static void bridge_finalize_registry(engine_bridge_t* b) {
+      if (b == NULL || !fn_destroy_engine) return;
+      uv_mutex_lock(&g_mutex);
+      // If the isolate is already being physically torn down, or is gone, the
+      // Java registry died (or is dying) with it -- nothing to remove, and an
+      // attach would race graal_tear_down_isolate. Skip. The check and the
+      // g_active_ops++ are ONE critical section, so no teardown path (Case-4
+      // sync, which holds g_mutex throughout; the waiter's TEARING_DOWN publish,
+      // also under g_mutex) can interleave between them.
+      if (g_teardown_state == TEARDOWN_TEARING_DOWN || g_isolate == NULL) {
+          uv_mutex_unlock(&g_mutex);
+          return;
+      }
+      g_active_ops++;              // pins the live isolate against teardown
+      uv_mutex_unlock(&g_mutex);
 
-1. `bridge_end_op` decides finalize/registry-removal under `g_mutex` (unchanged decision logic),
-2. if registry removal is due: `bridge_finalize_registry(b)` **while `g_active_ops` for this op is still held**,
-3. release `g_active_ops` (the exact verbatim pattern),
-4. `bridge_finalize_free(b, env_still_alive)`.
+      void* thread = NULL;
+      if (fn_attach_thread(g_isolate, &thread) == 0) {
+          fn_destroy_engine(thread, b->handle);
+          fn_detach_thread(thread);
+      }
 
-i.e. move the `g_active_ops--` release to sit **between** the registry-removal attach and the record-free, instead of before both. The napi_ref deletion and record-free never touch the isolate, so doing them after the release is safe; the attach never happens outside the reservation window, so `g_isolate` is never read while a teardown could be destroying it.
+      uv_mutex_lock(&g_mutex);
+      g_active_ops--;
+      uv_cond_broadcast(&g_teardown_cond);   // verbatim release pattern
+      uv_mutex_unlock(&g_mutex);
+  }
+  ```
 
-**Deadlock-safety (the load-bearing review gate):** holding `g_active_ops` across `bridge_finalize_registry` must not re-introduce the round-5 deadlock. The round-5 deadlock was: a *blocking wait on the JS event loop* while an op needed that loop. `bridge_finalize_registry` attaches its **own** Graal thread and makes **no** env-affine N-API call and **no** wait on the JS loop — it cannot depend on the event loop turning, so holding the reservation across it cannot wedge the waiter. This must be explicitly confirmed in review.
+- `bridge_finalize_free(b, env_still_alive)` — the non-isolate phase: napi_ref deletion (owner JS thread, env alive; stays resolver-gated `resolver_js != NULL && env != NULL`) + `resolver_results_free_all` + `free(b)`. Touches no GraalVM isolate state.
 
-**Preserves round-5's decrement-on-worker-thread reasoning:** the `g_active_ops--` stays on the worker/completion thread (not moved back to a JS callback); we only move *where within that completion path* it sits relative to the registry-removal attach.
+`bridge_finalize(b, env_still_alive, do_registry_remove)` becomes a thin wrapper preserving its exact current signature and every call site: `if (do_registry_remove) bridge_finalize_registry(b); bridge_finalize_free(b, env_still_alive);`. All existing callers (the two creators' rollback, `bridge_env_cleanup` direct path, `bridge_end_op`, `napi_destroy_engine` immediate path) keep calling `bridge_finalize` unchanged — the reservation-guarded registry removal is now automatic for all of them.
+
+**No completion-path restructuring.** `streaming_thread_fn` / `transform_thread_fn` keep their existing worker-thread `g_active_ops--` (verbatim) and `bridge_end_op` calls exactly as-is; `bridge_end_op` keeps its `in_flight--` + finalize-decision logic exactly as-is. Only the *body* of the registry-removal step (now inside `bridge_finalize_registry`) changes.
+
+**Why this closes the race, against all three teardown paths:**
+- **Waiter (Case 5 → `TEARING_DOWN`):** the waiter publishes `TEARDOWN_TEARING_DOWN` under `g_mutex` *before* dropping the lock to call `graal_tear_down_isolate`. `bridge_finalize_registry`'s check+increment is one critical section: either it runs first (increments `g_active_ops`, so the waiter's `while (g_active_ops > 0 ...)` blocks until the attach completes and releases), or the waiter wins and publishes `TEARING_DOWN`/clears `g_isolate` first (so the check skips). No attach ever overlaps `graal_tear_down_isolate`.
+- **Sync fast path (Case 4):** holds `g_mutex` across its `g_active_ops == 0` check *and* the spawn/join of `cleanup_thread_fn`. `bridge_finalize_registry` cannot acquire the lock mid-teardown; it either increments before Case 4 reads `g_active_ops` (Case 4 then sees > 0 and defers to a waiter) or runs after Case 4 cleared `g_isolate`/`g_initialized` (check skips).
+- **Adoption:** never tears down (`g_teardown_cancelled`), so `g_isolate` stays valid; a stray attach is harmless.
+
+**Deadlock-safety (the load-bearing review gate):** the transient reservation must not re-introduce the round-5 deadlock. Round-5's deadlock was a *blocking wait on the JS event loop* while an op needed that loop. `bridge_finalize_registry` attaches its **own** Graal thread, makes **no** env-affine N-API call and **no** wait on the JS loop, and its reservation is released in the same function after a bounded `fn_destroy_engine` — it cannot depend on the event loop turning, and its reservation is never held across a JS callback. This must be explicitly confirmed in review.
+
+**Preserves round-5's decrement-on-worker-thread reasoning:** the op's own `g_active_ops--` stays on the worker thread, untouched. `bridge_finalize_registry`'s reservation is an additional, independent, short-lived one.
 
 ### 3. `runTransform` readiness re-check after pre-buffering (#4)
 
@@ -146,12 +179,12 @@ Create `native-lib/node/tests/integration/worker-lifecycle.test.ts` using real `
 - Handle width stays C `long long` everywhere.
 - Errors for run/streaming/transform APIs surface as **resolved** JSON string values (async) or a synchronous `napi_throw_error` (admission/arg/alloc/resource failures) — never `napi_reject_deferred`.
 - `napi_env`/`napi_ref`/`napi_deferred`/`napi_threadsafe_function` are thread-affine to the env's JS thread. No env-affine napi call may be made off the owning thread. `bridge_finalize_free`'s napi_ref deletion stays resolver-gated (`resolver_js != NULL && env != NULL`) and on the owner thread.
-- All shared C state (`g_initialized`, `g_active_ops`, `g_teardown_state`, `g_teardown_cancelled`, `g_ref_count`, every engine record's `in_flight`/`destroy_pending`/`deferred_registry_remove`/the new `deferred_ref_release`) is read/written only under `g_mutex`, **except** the `g_isolate` read inside `bridge_finalize_registry`, which is now only reached while a live `g_active_ops` reservation (or the creating JS thread's stable-isolate guarantee) holds the isolate alive — closing the round-12 #3 race.
+- All shared C state (`g_initialized`, `g_active_ops`, `g_teardown_state`, `g_teardown_cancelled`, `g_ref_count`, every engine record's `in_flight`/`destroy_pending`/`deferred_registry_remove`/the new `deferred_ref_release`) is read/written only under `g_mutex`. In `bridge_finalize_registry` the `g_teardown_state`/`g_isolate` check and the transient `g_active_ops++` are one critical section under `g_mutex`; the subsequent `g_isolate` read for the attach happens only after that increment pinned the isolate alive (the check having ruled out `TEARING_DOWN`/NULL) — closing the round-12 #3 race.
 - The `g_active_ops` release pattern is EXACTLY, verbatim: `uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);`
 - **Exactly one `g_ref_count` release per `initialize()`** (the #2 invariant): `napi_cleanup` for explicitly-cleaned instances; the env-cleanup path for abandoned envs; `destroyEngine` never releases. Mutually exclusive per engine.
 - `fn_destroy_engine` is called **exactly once** per handle.
 - Per-engine `in_flight` and global `g_active_ops` stay **distinct** counters — not merged.
-- The round-5 deadlock fix must be preserved: `g_active_ops--` stays on the worker/completion thread, never moved to a JS-thread callback; and no blocking wait on the JS event loop is introduced. Holding `g_active_ops` across `bridge_finalize_registry` is safe only because that phase makes no env-affine/JS-loop-dependent call — confirm in review.
+- The round-5 deadlock fix must be preserved: the op's own `g_active_ops--` stays on the worker/completion thread, never moved to a JS-thread callback; and no blocking wait on the JS event loop is introduced. `bridge_finalize_registry`'s transient reservation is taken and released within that one function, never held across a JS callback, and its guarded step makes no env-affine/JS-loop-dependent call — confirm in review.
 - Preserve every round-1..11 fix: coalesced instance `cleanup()`, the JS three-state lifecycle machine, the `TEARDOWN_*` state machine + `napi_initialize` adoption path (incl. round-7's `g_teardown_cancelled` carve-out), the worker-thread `g_active_ops` decrement, the atomic admission blocks + round-11 admission-time engine pin (`bridge_begin_op_locked`) in all three run paths, the round-6 handle-read validations, round-7 conversion-status checks, round-8 setup-allocation NULL checks, round-9 worker/callback OOM + N-API-create checks + deferred registry removal, round-10 env-cleanup registry removal + `g_isolate`-guarded finalize, round-11 env cleanup hook for every engine + owner-thread destroy guard for every record + register-once exit hooks.
 - Node vitest baseline currently **885 passed / 59 skipped / 0 failed**; this round raises it (new tests) and must stay green.
 
@@ -159,8 +192,9 @@ Create `native-lib/node/tests/integration/worker-lifecycle.test.ts` using real `
 
 - **#2 by decrementing `g_ref_count` inline in `bridge_finalize` without the shared helper.** Rejected: the "reached zero → immediate teardown vs. queue the waiter" decision already lives in `napi_cleanup` Case 5; duplicating it invites divergence. A single `release_isolate_ref_locked()` keeps both paths identical.
 - **#2 by having `destroyEngine` also release the ref.** Rejected: `destroyEngine`'s JS caller (`doCleanup`) always follows with `ffi.cleanup()`, which releases the ref; adding a release in `destroyEngine` would double-release and tear the isolate down under live instances.
-- **#3 by taking `g_mutex` around the `g_isolate` read + attach in `bridge_finalize`.** Rejected: `fn_attach_thread`/`fn_destroy_engine` enter GraalVM and can block; holding `g_mutex` across them would serialize all teardown coordination behind a GraalVM call and risk lock-ordering issues with the waiter. Gating on the already-held `g_active_ops` reservation is the correct, lock-free-read-safe closure.
-- **#3 with a dedicated `g_finalizing` counter separate from `g_active_ops`.** Rejected as re-opening the coordination substructure the approved approach keeps bounded: it adds a second teardown-gating counter that the waiter must also wait on, duplicating what `g_active_ops` already expresses. Reusing the op's existing reservation window is simpler and provably correct.
+- **#3 by taking `g_mutex` around the `g_isolate` read + attach in `bridge_finalize`.** Rejected: `fn_attach_thread`/`fn_destroy_engine` enter GraalVM and can block; holding `g_mutex` across them would serialize all teardown coordination behind a GraalVM call and risk lock-ordering issues with the waiter. The transient reservation holds `g_mutex` only for the check+increment, then releases it before the GraalVM attach.
+- **#3 by moving `in_flight--`/`g_active_ops--` onto the worker thread and reusing the op's own reservation across the finalize (spec's earlier literal wording).** Rejected as re-opening the round-5/9/10/11 completion coordination the approved approach keeps bounded: in the live code the op's `g_active_ops--` is on the worker thread while the finalize decision runs later on the JS thread via `bridge_end_op`; threading one reservation across that split would restructure `bridge_end_op` and both completion sentinels across thread boundaries. The transient reservation closes the identical race by taking a *fresh* short-lived reservation only around the attach, wherever finalize runs — no completion-path restructuring.
+- **#3 with a dedicated `g_finalizing` counter separate from `g_active_ops`.** Rejected as re-opening the coordination substructure the approved approach keeps bounded: it adds a second teardown-gating counter that the waiter must also wait on, duplicating what `g_active_ops` already expresses. A transient `g_active_ops` reservation reuses the counter the waiter already blocks on and is provably correct.
 - **#4 via a JS-side operation lease that blocks `cleanup()` until the transform completes.** Rejected (same as rounds 9/11): no per-engine "await my ops" primitive exists at the JS layer, and the authoritative pin already lives in C. The re-check is the minimal ergonomic close; the lease would duplicate the C pin's guarantee at a layer that cannot enforce it.
 - **#5 by not nulling `globalInstance` until the drain settles.** Rejected: a concurrent convenience-API call would then revive/return the instance mid-teardown. Nulling synchronously (so new work builds a fresh instance) plus a module `cleanupPromise` (so overlapping `cleanup()`s coalesce) matches the instance-level design and is correct.
 - **#6 by leaving the handle valid and logging on hook-registration failure.** Rejected: a handle with no env cleanup hook silently reintroduces exactly the #2 leak the round is closing. Creation must be all-or-nothing.
