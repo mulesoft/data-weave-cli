@@ -293,6 +293,19 @@ static void bridge_env_cleanup(void* arg) {
     bridge_finalize(b, /*env_still_alive=*/true, /*do_registry_remove=*/true);
 }
 
+// Increment this engine's in_flight while g_mutex is ALREADY held. Used by the
+// run/streaming/transform admission paths so the per-engine pin is taken in the
+// SAME critical section as the g_active_ops reservation and the lifecycle check
+// -- closing the round-11 window where a concurrent destroyEngine could observe
+// in_flight == 0 and free the bridge under an already-admitted op. Returns the
+// record, or NULL for an unknown handle (nothing to pin; the worker/native call
+// surfaces "Unknown engine handle"). Caller MUST hold g_mutex.
+static engine_bridge_t* bridge_begin_op_locked(long long handle) {
+    engine_bridge_t* b = bridge_find(handle);
+    if (b != NULL) b->in_flight++;
+    return b;
+}
+
 // Begin a streaming/transform op: look up the engine's record and mark one op in
 // flight so the record (and, for resolver-backed engines, its napi_ref) cannot be
 // freed while the background uv_thread runs -- and, since round-9 (#1), so that
@@ -303,10 +316,13 @@ static void bridge_env_cleanup(void* arg) {
 // NULL only for an unknown handle (nothing to protect, no bridge_end_op needed).
 // The returned pointer is stable for the op's lifetime because in_flight > 0
 // blocks both destroyEngine and the env cleanup hook from freeing the record.
+// Self-locking form of bridge_begin_op_locked: acquires g_mutex itself. Callers
+// that need the pin taken atomically with another g_mutex-guarded check (e.g.
+// the round-11 admission path) should call bridge_begin_op_locked directly
+// instead. The completion sentinel MUST call bridge_end_op to balance in_flight.
 static engine_bridge_t* bridge_begin_op(long long handle) {
     uv_mutex_lock(&g_mutex);
-    engine_bridge_t* b = bridge_find(handle);
-    if (b != NULL) b->in_flight++;
+    engine_bridge_t* b = bridge_begin_op_locked(handle);
     uv_mutex_unlock(&g_mutex);
     return b;
 }
