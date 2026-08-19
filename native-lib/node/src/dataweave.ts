@@ -266,10 +266,22 @@ let globalInstance: DataWeave | null = null;
 // Guards against beforeExit and exit both driving cleanup for the same
 // shutdown. Belt-and-suspenders on top of cleanup()'s own idempotency.
 let cleanupStarted = false;
+// Process exit hooks are registered exactly once for the lifetime of the
+// module, NOT per singleton. Re-creating the singleton after cleanup() must
+// not attach a second pair of listeners (that accumulates until Node emits
+// MaxListenersExceededWarning). The listeners tolerate a null globalInstance:
+// cleanup() no-ops when there is nothing to release, and cleanupStarted
+// coalesces beforeExit/exit for a given shutdown. Unlike cleanupStarted, this
+// guard is never reset — that is the whole point.
+let exitHooksRegistered = false;
 
 /**
- * Returns the process-wide {@link DataWeave} singleton, creating and
- * initializing it (and registering exit-cleanup hooks) on first use.
+ * Registers the process-wide exit-cleanup hooks exactly once for this
+ * module. Subsequent calls (e.g. from a revived singleton after cleanup())
+ * are no-ops: the hooks registered on first use are reused for the rest of
+ * the process's lifetime, which is safe because they tolerate a null
+ * `globalInstance` and `cleanupStarted` coalesces beforeExit/exit for a
+ * given shutdown.
  *
  * Two hooks are registered, covering complementary cases:
  * - `beforeExit` fires when the event loop is about to drain naturally and
@@ -289,19 +301,37 @@ let cleanupStarted = false;
  * The `cleanupStarted` guard ensures only one of the two hooks actually
  * runs cleanup for a given shutdown.
  */
+function registerExitHooksOnce(): void {
+  if (exitHooksRegistered) return;
+  exitHooksRegistered = true;
+  process.on("beforeExit", async () => {
+    if (cleanupStarted) return;
+    cleanupStarted = true;
+    await cleanup(); // beforeExit can await: drains in-flight ops
+  });
+  process.on("exit", () => {
+    if (cleanupStarted) return; // beforeExit already handled it
+    cleanup(); // fallback: best-effort sync fast path
+  });
+}
+
+/**
+ * Returns the process-wide {@link DataWeave} singleton, creating and
+ * initializing it on first use (or after a prior {@link cleanup}).
+ *
+ * The exit-cleanup hooks are registered exactly once for the process via
+ * {@link registerExitHooksOnce}, not once per singleton: a singleton revived
+ * after cleanup() reuses the same pair of listeners rather than adding new
+ * ones, which would otherwise accumulate a pair per init/cleanup cycle until
+ * Node emits `MaxListenersExceededWarning`. Reuse is safe because the
+ * listeners tolerate a null `globalInstance` and `cleanupStarted` coalesces
+ * beforeExit/exit for a given shutdown.
+ */
 function getGlobalInstance(): DataWeave {
   if (!globalInstance) {
     globalInstance = new DataWeave();
     globalInstance.initialize();
-    process.on("beforeExit", async () => {
-      if (cleanupStarted) return;
-      cleanupStarted = true;
-      await cleanup(); // beforeExit can await: drains in-flight ops
-    });
-    process.on("exit", () => {
-      if (cleanupStarted) return; // beforeExit already handled it
-      cleanup(); // fallback: best-effort sync fast path
-    });
+    registerExitHooksOnce();
   }
   return globalInstance;
 }

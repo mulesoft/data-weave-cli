@@ -18,7 +18,7 @@ vi.mock("../../src/ffi", () => ({
 }));
 
 import * as ffi from "../../src/ffi";
-import { DataWeave } from "../../src/dataweave";
+import { DataWeave, run, cleanup } from "../../src/dataweave";
 import { DataWeaveError } from "../../src/errors";
 
 describe("DataWeave.initialize() native ref-count safety", () => {
@@ -194,5 +194,34 @@ describe("DataWeave.initialize() native ref-count safety", () => {
 
     expect(ffi.cleanup).toHaveBeenCalledTimes(1);
     expect(ffi.destroyEngine).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not accumulate process exit listeners across init/cleanup cycles", async () => {
+    // The module-level `run`/`cleanup` convenience API drives the lazily
+    // created singleton through `getGlobalInstance()`, which is what
+    // registers the process-wide beforeExit/exit hooks (registerExitHooksOnce
+    // in src/dataweave.ts). Unlike the other tests in this file, this doesn't
+    // construct DataWeave directly, so it hits DataWeave's default
+    // `findLibrary()` lookup. Point DATAWEAVE_NATIVE_LIB at this test file
+    // (guaranteed to exist) so that lookup succeeds without depending on a
+    // real built dwlib -- ffi.initialize() is mocked, so the path's contents
+    // are never touched.
+    const prevEnvLib = process.env.DATAWEAVE_NATIVE_LIB;
+    process.env.DATAWEAVE_NATIVE_LIB = __filename;
+    try {
+      const before = process.listenerCount("exit") + process.listenerCount("beforeExit");
+      // Drive several singleton create -> cleanup cycles via the module API.
+      for (let i = 0; i < 5; i++) {
+        run("%dw 2.0\noutput application/json\n---\n1 + 1"); // creates the singleton (+ hooks on first)
+        await cleanup(); // releases the singleton
+      }
+      const after = process.listenerCount("exit") + process.listenerCount("beforeExit");
+      // Register-once: at most the single pair added on the very first create,
+      // never one pair per cycle.
+      expect(after - before).toBeLessThanOrEqual(2);
+    } finally {
+      if (prevEnvLib === undefined) delete process.env.DATAWEAVE_NATIVE_LIB;
+      else process.env.DATAWEAVE_NATIVE_LIB = prevEnvLib;
+    }
   });
 });
