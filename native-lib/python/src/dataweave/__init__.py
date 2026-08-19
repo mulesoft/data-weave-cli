@@ -49,7 +49,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from queue import Queue
+from queue import Full, Queue
 from threading import Event, Thread
 from typing import Any, Callable, Dict, Generator, Iterable, Optional, Union
 
@@ -585,6 +585,14 @@ class DataWeave:
         _SENTINEL = object()
         q: Queue = Queue(maxsize=_OUTPUT_QUEUE_MAXSIZE)
 
+        def _publish_terminal(item: Any) -> None:
+            while cancelled is None or not cancelled.is_set():
+                try:
+                    q.put(item, timeout=0.1)
+                    return
+                except Full:
+                    pass
+
         @WRITE_CALLBACK
         def _write_cb(_ctx, buf, length):
             try:
@@ -603,8 +611,8 @@ class DataWeave:
             worker_thread = self._graal_isolatethread_t_ptr()
             rc = self._lib.graal_attach_thread(self._isolate, ctypes.byref(worker_thread))
             if rc != 0:
-                q.put({"success": False, "error": f"Failed to attach worker thread to isolate (code {rc})"})
-                q.put(_SENTINEL)
+                _publish_terminal({"success": False, "error": f"Failed to attach worker thread to isolate (code {rc})"})
+                _publish_terminal(_SENTINEL)
                 return
             try:
                 result_ptr = self._lib.run_script_callback(
@@ -621,12 +629,12 @@ class DataWeave:
                 else:
                     raw = ""
                 meta = json.loads(raw) if raw else {"success": False, "error": "Empty response"}
-                q.put(meta)
+                _publish_terminal(meta)
             except Exception as e:
-                q.put({"success": False, "error": str(e)})
+                _publish_terminal({"success": False, "error": str(e)})
             finally:
                 self._lib.graal_detach_thread(worker_thread)
-                q.put(_SENTINEL)
+                _publish_terminal(_SENTINEL)
 
         worker = Thread(target=_run_native, name="dw-streaming-worker", daemon=False)
         worker.start()

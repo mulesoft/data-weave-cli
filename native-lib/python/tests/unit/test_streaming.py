@@ -1,5 +1,5 @@
 import ctypes
-from queue import Queue
+from queue import Full, Queue
 from threading import Event
 
 import pytest
@@ -165,3 +165,50 @@ def test_stream_private_close_aborts_worker_and_detaches_after_consumer_abandons
 
     assert native.detached_event.wait(1)
     assert native.write_status == -1
+
+
+@pytest.mark.unit
+def test_stream_early_close_does_not_block_terminal_publication_on_full_queue(monkeypatch):
+    cancelled = []
+    terminal_blocked = Event()
+
+    class CancellationAwareQueue(Queue):
+        def put(self, item, block=True, timeout=None):
+            if not isinstance(item, bytes) and cancelled[0].is_set():
+                if timeout is None:
+                    terminal_blocked.set()
+                raise Full
+            return super().put(item, block, timeout)
+
+    class FullQueueFakeNative(FakeNative):
+        def __init__(self):
+            super().__init__('{"success": false, "error": "aborted"}')
+            self.queue_full = Event()
+            self.cancelled = None
+
+        def run_script_callback(self, _thread, _script, _inputs, write_callback, _context):
+            first = ctypes.create_string_buffer(b"first")
+            assert write_callback(None, ctypes.addressof(first), 5) == 0
+            second = ctypes.create_string_buffer(b"second")
+            assert write_callback(None, ctypes.addressof(second), 6) == 0
+            self.queue_full.set()
+            assert self.cancelled.wait(1)
+            third = ctypes.create_string_buffer(b"third")
+            self.write_status = write_callback(None, ctypes.addressof(third), 5)
+            return self._response_pointer()
+
+    monkeypatch.setattr(dataweave, "Queue", CancellationAwareQueue)
+    monkeypatch.setattr(dataweave, "_OUTPUT_QUEUE_MAXSIZE", 1)
+    native = FullQueueFakeNative()
+    runtime = configured_runtime(native)
+    stream = runtime.run_streaming("script")
+    cancelled.append(stream._cancelled)
+    native.cancelled = stream._cancelled
+
+    assert next(stream) == b"first"
+    assert native.queue_full.wait(1)
+    stream._close()
+
+    assert native.write_status == -1
+    assert native.detached_event.wait(1)
+    assert terminal_blocked.is_set() is False
