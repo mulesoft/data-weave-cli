@@ -29,7 +29,7 @@ runs:
         github-token: ${{ inputs.github-token }}
 
     - name: Install Python test dependencies
-      run: python3 -m pip install '.[test]'
+      run: python3 -m pip install ${{ runner.environment == 'github-hosted' && '--break-system-packages' || '' }} '.[test]'
       shell: bash
       working-directory: native-lib/python
 

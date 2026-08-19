@@ -67,3 +67,26 @@
 
 - The CI action change was reviewed structurally but not executed in GitHub Actions from this local worktree.
 - Native-image emits existing Java/native-image deprecation warnings during local Gradle execution.
+
+## Review Fix Round 2
+
+### Files Changed
+
+- `.github/actions/build-foundation/action.yml`: conditionally adds `--break-system-packages` when `runner.environment` is `github-hosted`, while retaining the unmodified pip invocation for self-hosted runners.
+
+### Design Choice
+
+- Matched the existing Python artifact action's conditional flag pattern. This addresses PEP 668 on GitHub-hosted macOS without imposing `--break-system-packages` on self-hosted MuleSoft runners.
+
+### Checks Run
+
+1. `ruby -e "require 'yaml'; YAML.load_file('.github/actions/build-foundation/action.yml'); puts 'YAML valid'"`
+   - Passed: YAML parsed successfully.
+2. `git diff --check`
+   - Passed: no whitespace errors.
+3. Compared the condition against `.github/actions/python/action.yml`.
+   - Confirmed the existing action uses the same GitHub Actions expression form for conditional pip flags.
+
+### Concerns
+
+- The GitHub-hosted runner expression cannot be executed locally; validation is structural and follows the repository's established Python action convention.
