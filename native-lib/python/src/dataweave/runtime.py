@@ -29,48 +29,6 @@ class DataWeave:
     def __init__(self, lib_path: Optional[str] = None):
         self._native = NativeRuntime(lib_path)
 
-    def __getattr__(self, name):
-        # Preserve the private attributes used by existing embedders and tests.
-        aliases = {
-            "_lib": "lib", "_isolate": "isolate", "_thread": "thread",
-            "_initialized": "initialized", "_has_callback_streaming": "has_callback_streaming",
-            "_has_callback_input_output": "has_callback_input_output",
-        }
-        if name in aliases:
-            return getattr(self._native, aliases[name])
-        raise AttributeError(name)
-
-    def __setattr__(self, name, value):
-        aliases = {
-            "_lib": "lib", "_isolate": "isolate", "_thread": "thread",
-            "_initialized": "initialized", "_has_callback_streaming": "has_callback_streaming",
-            "_has_callback_input_output": "has_callback_input_output",
-        }
-        if name != "_native" and name in aliases and "_native" in self.__dict__:
-            setattr(self._native, aliases[name], value)
-        else:
-            super().__setattr__(name, value)
-
-    def _setup_graal_structures(self):
-        # Compatibility shim for the private characterization tests from Tasks 1-3.
-        from .native import GraalIsolatePointer, GraalIsolateThreadPointer
-        if "_native" not in self.__dict__:
-            native = NativeRuntime.__new__(NativeRuntime)
-            native.lib = self.__dict__.pop("_lib", None)
-            native.isolate = self.__dict__.pop("_isolate", None)
-            native.thread = self.__dict__.pop("_thread", None)
-            native.initialized = self.__dict__.pop("_initialized", False)
-            native.has_callback_streaming = self.__dict__.pop("_has_callback_streaming", False)
-            native.has_callback_input_output = self.__dict__.pop("_has_callback_input_output", False)
-            self._native = native
-        self._graal_isolate_t_ptr = GraalIsolatePointer
-        self._graal_isolatethread_t_ptr = GraalIsolateThreadPointer
-
-    def _decode_and_free(self, ptr):
-        if "_native" not in self.__dict__:
-            self._setup_graal_structures()
-        return self._native.decode_and_free(ptr)
-
     def initialize(self):
         self._native.initialize()
 
@@ -117,6 +75,10 @@ class DataWeave:
         sentinel = object()
         queue: Queue = Queue(maxsize=_OUTPUT_QUEUE_MAXSIZE)
 
+        class CleanupFailure:
+            def __init__(self, error: Exception):
+                self.error = error
+
         def publish(item) -> None:
             while not cancelled.is_set():
                 try:
@@ -137,18 +99,21 @@ class DataWeave:
 
         def worker_main():
             worker_thread = None
+            primary_error = None
             try:
                 worker_thread = self._native.attach_thread()
                 raw = self._native.decode_and_free(invoke(worker_thread, write_cb), worker_thread)
                 publish(json.loads(raw) if raw else {"success": False, "error": "Empty response"})
             except Exception as error:
+                primary_error = error
                 publish({"success": False, "error": str(error)})
             finally:
                 if worker_thread is not None:
                     try:
                         self._native.detach_thread(worker_thread)
-                    except Exception:
-                        pass
+                    except Exception as error:
+                        if primary_error is None:
+                            publish(CleanupFailure(error))
                 publish(sentinel)
 
         worker = Thread(target=worker_main, name="dw-streaming-worker", daemon=False)
@@ -164,6 +129,8 @@ class DataWeave:
                     raise DataWeaveError(f"Worker thread timeout after {_WORKER_TIMEOUT_SECONDS} seconds")
                 if item is sentinel:
                     break
+                if isinstance(item, CleanupFailure):
+                    raise item.error
                 if isinstance(item, dict):
                     metadata = item
                 else:

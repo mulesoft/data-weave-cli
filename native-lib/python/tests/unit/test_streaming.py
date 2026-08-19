@@ -67,13 +67,14 @@ class FakeNative:
 
 def configured_runtime(native):
     runtime = dataweave.DataWeave.__new__(dataweave.DataWeave)
-    runtime._setup_graal_structures()
-    runtime._initialized = True
-    runtime._has_callback_streaming = True
-    runtime._has_callback_input_output = True
-    runtime._lib = native
-    runtime._isolate = object()
-    runtime._thread = object()
+    native_runtime = runtime_module.NativeRuntime.__new__(runtime_module.NativeRuntime)
+    native_runtime.initialized = True
+    native_runtime.has_callback_streaming = True
+    native_runtime.has_callback_input_output = True
+    native_runtime.lib = native
+    native_runtime.isolate = object()
+    native_runtime.thread = object()
+    runtime._native = native_runtime
     return runtime
 
 
@@ -232,4 +233,17 @@ def test_run_streaming_reports_worker_timeout_when_native_call_produces_no_outpu
     runtime = configured_runtime(BlockingFakeNative('{"success": true}'))
 
     with pytest.raises(dataweave.DataWeaveError, match="Worker thread timeout after 0.01 seconds"):
+        list(runtime.run_streaming("script"))
+
+
+@pytest.mark.unit
+def test_run_streaming_surfaces_detach_failure_without_primary_execution_failure():
+    class DetachFailingNative(FakeNative):
+        def graal_detach_thread(self, thread):
+            super().graal_detach_thread(thread)
+            return 7
+
+    runtime = configured_runtime(DetachFailingNative('{"success": true}'))
+
+    with pytest.raises(dataweave.DataWeaveError, match="Failed to detach worker thread from isolate. Error code: 7"):
         list(runtime.run_streaming("script"))

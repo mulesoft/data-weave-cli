@@ -22,3 +22,16 @@ Complete. The Python binding now separates native ctypes/isolate ownership from 
 
 - The Gradle native-image invocation emits existing Graal/Gradle deprecation and restricted-native-access warnings; it still completed successfully.
 - No Task 5, documentation, or CI work was included.
+
+## Fix Round 1
+
+- Made initialization transactional: failed isolate creation or ABI validation now resets all native state; after isolate creation, validation failure attempts isolate teardown before reset and reraises the primary failure.
+- Required `run_script`, `free_cstring`, and isolate teardown exports at initialization. Streaming callback exports additionally require attach/detach exports before the runtime is considered initialized.
+- Validated isolate teardown and worker detach return codes. Cleanup failures now surface as `DataWeaveError`; worker detach failures surface only when there was no preceding execution failure.
+- Removed obsolete `DataWeave` private-state forwarding and test-only Graal setup compatibility machinery. Tests now configure `NativeRuntime` directly.
+- Added focused coverage for failed isolate creation, partial-initialization cleanup, missing required exports, teardown return codes, and detach return codes.
+
+### Fix Round 1 Verification
+
+- Final focused and full Python verification passed: 25 focused lifecycle/streaming tests and 61 unit/integration tests.
+- `./gradlew native-lib:pythonTest` passed: native image build and all 61 Python tests.

@@ -44,15 +44,26 @@ def test_candidate_paths_prioritize_environment_override(monkeypatch, tmp_path):
 @pytest.mark.unit
 def test_decode_and_free_releases_native_string_when_decoding_fails(monkeypatch):
     freed = []
-    runtime = dataweave.DataWeave.__new__(dataweave.DataWeave)
-    runtime._thread = "thread"
-    runtime._lib = type("Native", (), {"free_cstring": lambda _self, thread, ptr: freed.append((thread, ptr))})()
-    monkeypatch.setattr(dataweave.ctypes, "string_at", lambda _ptr: b"\xff")
+    runtime = native.NativeRuntime.__new__(native.NativeRuntime)
+    runtime.thread = "thread"
+    runtime.lib = type("Native", (), {"free_cstring": lambda _self, thread, ptr: freed.append((thread, ptr))})()
+    monkeypatch.setattr(native.ctypes, "string_at", lambda _ptr: b"\xff")
 
     with pytest.raises(UnicodeDecodeError):
-        runtime._decode_and_free(123)
+        runtime.decode_and_free(123)
 
     assert freed == [("thread", 123)]
+
+
+@pytest.mark.unit
+def test_decode_and_free_preserves_decode_failure_when_free_also_fails(monkeypatch):
+    runtime = native.NativeRuntime.__new__(native.NativeRuntime)
+    runtime.thread = "thread"
+    runtime.lib = type("Native", (), {"free_cstring": lambda _self, _thread, _ptr: (_ for _ in ()).throw(RuntimeError("free failed"))})()
+    monkeypatch.setattr(native.ctypes, "string_at", lambda _ptr: b"\xff")
+
+    with pytest.raises(UnicodeDecodeError):
+        runtime.decode_and_free(123)
 
 
 @pytest.mark.unit
@@ -102,3 +113,108 @@ def test_native_runtime_wraps_library_load_errors(monkeypatch):
 
     with pytest.raises(dataweave.DataWeaveError, match="Failed to load library from /tmp/dwlib: bad image"):
         native.NativeRuntime("/tmp/dwlib").initialize()
+
+
+@pytest.mark.unit
+def test_initialize_resets_state_when_isolate_creation_fails(monkeypatch):
+    class Function:
+        def __call__(self, *_args):
+            return 9
+
+    library = type("Native", (), {"graal_create_isolate": Function()})()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+
+    with pytest.raises(dataweave.DataWeaveError, match="Failed to create GraalVM isolate. Error code: 9"):
+        runtime.initialize()
+
+    assert runtime.lib is None
+    assert runtime.isolate is None
+    assert runtime.thread is None
+    assert runtime.initialized is False
+
+
+@pytest.mark.unit
+def test_initialize_tears_down_isolate_when_required_export_is_missing(monkeypatch):
+    class Function:
+        def __init__(self, callback):
+            self.callback = callback
+
+        def __call__(self, *args):
+            return self.callback(*args)
+
+    torn_down = []
+    library = type("Native", (), {})()
+    library.graal_create_isolate = Function(lambda _params, _isolate, _thread: 0)
+    library.graal_tear_down_isolate = Function(lambda thread: torn_down.append(thread) or 0)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+
+    with pytest.raises(dataweave.DataWeaveError, match="Native library does not export run_script"):
+        runtime.initialize()
+
+    assert len(torn_down) == 1
+    assert runtime.lib is None
+    assert runtime.isolate is None
+    assert runtime.thread is None
+
+
+@pytest.mark.unit
+def test_initialize_rejects_streaming_export_without_required_lifecycle_symbols(monkeypatch):
+    class Function:
+        def __init__(self, callback=lambda *_args: 0):
+            self.callback = callback
+
+        def __call__(self, *args):
+            return self.callback(*args)
+
+    torn_down = []
+    library = type("Native", (), {})()
+    library.graal_create_isolate = Function()
+    library.graal_tear_down_isolate = Function(lambda thread: torn_down.append(thread) or 0)
+    library.run_script = Function()
+    library.run_script_callback = Function()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    with pytest.raises(dataweave.DataWeaveError, match="Native library does not export free_cstring"):
+        native.NativeRuntime("/tmp/dwlib").initialize()
+
+    assert len(torn_down) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("missing_symbol", ["graal_attach_thread", "graal_detach_thread"])
+def test_initialize_rejects_streaming_export_without_thread_lifecycle_symbols(monkeypatch, missing_symbol):
+    class Function:
+        def __call__(self, *_args):
+            return 0
+
+    library = type("Native", (), {})()
+    library.graal_create_isolate = Function()
+    library.graal_tear_down_isolate = Function()
+    library.run_script = Function()
+    library.free_cstring = Function()
+    library.run_script_callback = Function()
+    for symbol in ("graal_attach_thread", "graal_detach_thread"):
+        if symbol != missing_symbol:
+            setattr(library, symbol, Function())
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    with pytest.raises(dataweave.DataWeaveError, match=f"run_script_callback requires native export {missing_symbol}"):
+        native.NativeRuntime("/tmp/dwlib").initialize()
+
+
+@pytest.mark.unit
+def test_cleanup_surfaces_native_teardown_error_code(monkeypatch):
+    runtime = native.NativeRuntime.__new__(native.NativeRuntime)
+    runtime.initialized = True
+    runtime.thread = object()
+    runtime.isolate = object()
+    runtime.lib = type("Native", (), {"graal_tear_down_isolate": lambda _self, _thread: 7})()
+
+    with pytest.raises(dataweave.DataWeaveError, match="Failed to tear down GraalVM isolate. Error code: 7"):
+        runtime.cleanup()
+
+    assert runtime.lib is None
+    assert runtime.thread is None
+    assert runtime.isolate is None
