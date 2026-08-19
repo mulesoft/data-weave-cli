@@ -82,7 +82,7 @@
 ## Commit
 
 - `2f6a788 test: add Python binding unit characterization coverage`
-- Pending at report update: `test: harden Python streaming unit coverage`
+- `2f169ee test: harden Python streaming unit coverage`
 
 ## Concerns
 
