@@ -1658,10 +1658,13 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
     // Round-9 (#1): every engine -- resolver-backed or not -- gets a per-engine
     // record so destroyEngine can defer the registry removal (fn_destroy_engine)
     // until this engine's in-flight streaming/transform ops drain. A resolver-less
-    // record leaves resolver_js/env/results NULL and registers NO env cleanup
-    // hook (there is no napi_ref to dispose). owner is recorded for symmetry but
-    // is NOT used to restrict destruction of resolver-less engines (see the
-    // owner guard in napi_destroy_engine, which checks resolver_js != NULL).
+    // record leaves resolver_js/results NULL. Round-11 (#1): it now ALSO registers
+    // an env cleanup hook (mirroring napi_create_engine_with_resolver), because
+    // without one a Worker that creates a resolver-less engine and exits without
+    // destroyEngine() strands this record, the Java registry entry, and the
+    // native-lib reference. owner is recorded for symmetry but is NOT used to
+    // restrict destruction based on resolver state (see the owner guard in
+    // napi_destroy_engine, which now fires for any record).
     engine_bridge_t* rec = (engine_bridge_t*)calloc(1, sizeof(engine_bridge_t));
     if (rec == NULL) {
         // Roll back the engine we just created so we don't leak a registered but
@@ -1675,7 +1678,18 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
     }
     rec->handle = handle;
     rec->owner = uv_thread_self();
+    rec->env = env;
     uv_mutex_lock(&g_mutex); rec->next = g_bridges; g_bridges = rec; uv_mutex_unlock(&g_mutex);
+    // Round-11 (#1): register an env cleanup hook for EVERY engine, not just
+    // resolver-backed ones. Without it, a Worker that creates a resolver-less
+    // engine and exits without destroyEngine() strands this record, the Java
+    // ScriptRuntime registry entry, and the native-lib reference -- leaking
+    // engines and blocking isolate teardown across Worker churn. bridge_env_cleanup
+    // + bridge_finalize already handle a resolver-less record (resolver_js == NULL):
+    // skip the napi_ref delete, still unlink, remove the registry entry (round-10
+    // do_registry_remove=true), and free. destroyEngine removes this hook before
+    // an early free so Node never invokes it on freed memory.
+    napi_add_env_cleanup_hook(env, bridge_env_cleanup, rec);
 
     napi_value out; napi_create_int64(env, (int64_t)handle, &out); return out;
 }
@@ -1749,21 +1763,19 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
     // (napi_remove_env_cleanup_hook) from another Worker's thread is undefined
     // behavior. Reject cross-thread destruction, mirroring the fail-closed
     // owner check in resolve_module_callback; the owner env's cleanup hook
-    // disposes the bridge when that Worker tears down. Resolver-less engines
-    // have no bridge and no napi state, so they need no guard (bridge_find ==
-    // NULL -> fall through). We are on the owner thread past this point, so the
-    // env cannot be concurrently tearing down and the bridge stays stable
-    // between this check and the unlink below.
-    // Owner-thread guard: only resolver-backed engines carry thread-affine
-    // N-API state (a napi_ref + an env cleanup hook) that is illegal to touch
-    // from another Worker's thread. Round-9 gave resolver-LESS engines a record
-    // too, so the guard must key on resolver state (resolver_js != NULL), NOT
-    // on "a record exists" -- otherwise resolver-less engines would wrongly
-    // become non-destroyable off their creating thread. A resolver-less engine
-    // has no napi state and stays destroyable from any thread.
+    // disposes the bridge when that Worker tears down. We are on the owner
+    // thread past this point, so the env cannot be concurrently tearing down
+    // and the bridge stays stable between this check and the unlink below.
+    // Owner-thread guard: round-11 (#1) registers an env cleanup hook for EVERY
+    // engine (resolver-backed or not), so every record now carries env-affine
+    // N-API state -- napi_remove_env_cleanup_hook (called below before an early
+    // free) can only be invoked legally on the owner thread. The guard
+    // therefore fires for any record (owned != NULL), not just resolver-backed
+    // ones. bridge_finalize's napi_ref deletion stays resolver-gated
+    // (resolver_js != NULL && env != NULL) -- that part is unchanged.
     uv_mutex_lock(&g_mutex);
     engine_bridge_t* owned = bridge_find(handle);
-    if (owned != NULL && owned->resolver_js != NULL) {
+    if (owned != NULL) {
         uv_thread_t self = uv_thread_self();
         if (!uv_thread_equal(&self, &owned->owner)) {
             uv_mutex_unlock(&g_mutex);
@@ -1793,13 +1805,13 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
     uv_mutex_unlock(&g_mutex);
 
     if (found != NULL) {
-        // Drop the env cleanup hook (resolver-backed engines only ever registered
-        // one; napi_remove_env_cleanup_hook is a safe no-op if none was added).
-        // Whether we finalize now or defer, the free happens explicitly, so Node
-        // must never invoke the hook on this (soon-to-be or already) freed record.
-        if (found->resolver_js != NULL) {
-            napi_remove_env_cleanup_hook(env, bridge_env_cleanup, found);
-        }
+        // Drop the env cleanup hook. Round-11 (#1): every engine now registers
+        // one at creation (napi_create_engine / napi_create_engine_with_resolver),
+        // so this removal must run unconditionally, not just for resolver-backed
+        // engines. Whether we finalize now or defer, the free happens explicitly,
+        // so Node must never invoke the hook on this (soon-to-be or already)
+        // freed record.
+        napi_remove_env_cleanup_hook(env, bridge_env_cleanup, found);
         if (!defer) {
             // Not in flight: remove the registry entry AND finalize now, on this
             // owner thread (env live). do_registry_remove=true folds the
