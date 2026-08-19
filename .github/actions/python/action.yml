@@ -32,7 +32,11 @@ runs:
   using: composite
   steps:
     - name: Install Python build dependencies
-      run: python3 -m pip install ${{ inputs.break-system-packages == 'true' && '--break-system-packages' || '' }} --upgrade setuptools wheel
+      # --ignore-installed: on macOS runners, Homebrew's own setuptools/wheel have no
+      # pip RECORD file, so a plain --upgrade fails trying to uninstall them first
+      # (pip error "uninstall-no-record-file"). --ignore-installed installs pip's
+      # copy on top without needing to remove the untracked brew one.
+      run: python3 -m pip install ${{ inputs.break-system-packages == 'true' && '--break-system-packages' || '' }} --upgrade --ignore-installed setuptools wheel
       shell: bash
 
     - name: Create Native Lib Python Wheel

@@ -41,6 +41,7 @@ test("DW_BENCH_NODE_PACKAGE set to valid package dir loads", async () => {
   const packageDir = makeTempDir();
   const distDir = join(packageDir, "dist");
   mkdirSync(distDir, { recursive: true });
+  writeFileSync(join(packageDir, "package.json"), '{"type":"module"}');
   writeFileSync(join(distDir, "index.js"), "export function run() { return null; }");
 
   process.env.DW_BENCH_NODE_PACKAGE = packageDir;
