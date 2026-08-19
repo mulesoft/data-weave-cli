@@ -3,7 +3,7 @@
 ## Changed Files
 
 - `native-lib/python/src/dataweave/__init__.py`
-  - Replaced dynamic `__import__("os")` environment access with a normal private module import. Public API and native ABI are unchanged.
+  - Replaced dynamic `__import__("os")` environment access with a normal private module import. Added private streaming cancellation plumbing so abandoned streaming consumers cause future native write callbacks to abort and the worker is joined/detached. Public API and native ABI are unchanged.
 - `native-lib/python/tests/unit/test_models.py`
   - Characterizes `InputValue` encoding and `ExecutionResult` decoding/error behavior.
 - `native-lib/python/tests/unit/test_encoding.py`
@@ -11,7 +11,7 @@
 - `native-lib/python/tests/unit/test_native.py`
   - Characterizes native response decoding, malformed input handling, candidate library path priority, and native-string cleanup on decoding failure.
 - `native-lib/python/tests/unit/test_streaming.py`
-  - Characterizes callback exception-to-abort conversion, large input chunk remainders, empty native metadata, attach failure, worker detachment behavior, and early stream closure with a fake native collaborator.
+  - Characterizes callback exception-to-abort conversion, including observed read callback abort status; large input chunk remainders; true worker metadata absence; attach failure; and safe early consumer abandonment with prompt worker detachment using fake native collaborators.
 - `native-lib/python/tests/unit/test_facade.py`
   - Characterizes module singleton initialization/recreation and global cleanup.
 
@@ -19,7 +19,7 @@
 
 - Added 24 `@pytest.mark.unit` tests that import the Python package from source and never instantiate a staged `dwlib`.
 - Fake native collaborators exercise ctypes callback boundaries without a native shared library. They verify callback exceptions return the documented nonzero abort status rather than escaping C callbacks.
-- Tests preserve the existing stream contract: early generator closure leaves `Stream.metadata` unset because no terminal metadata was consumed.
+- Streaming generators now use an internal cancellation event. The private `_close()` test seam sets cancellation before closing the generator; cancellation makes subsequent native write callbacks return `-1`, and generator cleanup joins the worker while the worker's `finally` detaches its isolate thread.
 - `DataWeave._decode_and_free` is exercised through a failing UTF-8 decode to verify native strings are freed from its existing `finally` block.
 - The only source adjustment replaces dynamic standard-library import resolution with a normal `os` import; no public names, signatures, or ABI fields changed.
 
@@ -62,9 +62,27 @@
    BUILD SUCCESSFUL
    ```
 
+7. Fix round 1 focused verification:
+
+   ```text
+   python3 -m pytest tests/unit/test_streaming.py -m unit -v
+   6 passed in 0.02s
+   ```
+
+8. Fix round 1 full unit verification:
+
+   ```text
+   python3 -m pytest tests/unit -m unit -v
+   24 passed in 0.03s
+   python3 -m compileall -q src tests/unit
+   git diff --check
+   exit 0
+   ```
+
 ## Commit
 
 - `2f6a788 test: add Python binding unit characterization coverage`
+- Pending at report update: `test: harden Python streaming unit coverage`
 
 ## Concerns
 

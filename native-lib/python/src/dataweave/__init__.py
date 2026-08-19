@@ -50,7 +50,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
-from threading import Thread
+from threading import Event, Thread
 from typing import Any, Callable, Dict, Generator, Iterable, Optional, Union
 
 # Bound for streaming output queues: limits memory under slow/stalled consumers
@@ -169,6 +169,12 @@ class Stream:
     @property
     def metadata(self) -> Optional[StreamingResult]:
         return self._metadata
+
+    def _close(self) -> None:
+        on_close = getattr(self, "_on_close", None)
+        if on_close is not None:
+            on_close()
+        self._gen.close()
 
 
 def _parse_native_encoded_response(raw: str) -> ExecutionResult:
@@ -551,12 +557,17 @@ class DataWeave:
         :raises DataWeaveError: if the runtime is not initialized or the callback API
             is not available
         """
-        return Stream(self._run_streaming_gen(script, inputs))
+        cancelled = Event()
+        stream = Stream(self._run_streaming_gen(script, inputs, cancelled))
+        stream._on_close = cancelled.set
+        stream._cancelled = cancelled
+        return stream
 
     def _run_streaming_gen(
         self,
         script: str,
         inputs: Optional[Dict[str, Any]] = None,
+        cancelled: Optional[Event] = None,
     ) -> Generator[bytes, None, StreamingResult]:
         if not self._initialized:
             raise DataWeaveError("DataWeave runtime not initialized. Call initialize() first.")
@@ -577,6 +588,8 @@ class DataWeave:
         @WRITE_CALLBACK
         def _write_cb(_ctx, buf, length):
             try:
+                if cancelled is not None and cancelled.is_set():
+                    return -1
                 # With maxsize set, put() blocks when the queue is full, exerting
                 # backpressure onto the native producer. Timeout prevents indefinite
                 # blocking if the consumer abandons the generator.
@@ -619,18 +632,21 @@ class DataWeave:
         worker.start()
 
         meta = None
-        while True:
-            item = q.get()
-            if item is _SENTINEL:
-                break
-            if isinstance(item, dict):
-                meta = item
-            else:
-                yield item
-
-        worker.join(timeout=30)
-        if worker.is_alive():
-            raise DataWeaveError("Worker thread timeout after 30 seconds")
+        try:
+            while True:
+                item = q.get()
+                if item is _SENTINEL:
+                    break
+                if isinstance(item, dict):
+                    meta = item
+                else:
+                    yield item
+        finally:
+            if cancelled is not None:
+                cancelled.set()
+            worker.join(timeout=30)
+            if worker.is_alive():
+                raise DataWeaveError("Worker thread timeout after 30 seconds")
 
         if meta is None:
             meta = {"success": False, "error": "No metadata received from native call"}

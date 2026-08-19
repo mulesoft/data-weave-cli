@@ -1,4 +1,6 @@
 import ctypes
+from queue import Queue
+from threading import Event
 
 import pytest
 
@@ -14,12 +16,14 @@ class FakeNative:
         self.detached = []
         self.freed = []
         self._buffers = []
+        self.detached_event = Event()
 
     def graal_attach_thread(self, _isolate, _thread):
         return self.attach_code
 
     def graal_detach_thread(self, thread):
         self.detached.append(thread)
+        self.detached_event.set()
         return 0
 
     def free_cstring(self, thread, ptr):
@@ -46,9 +50,11 @@ class FakeNative:
             read = []
             while True:
                 size = read_callback(None, ctypes.addressof(buffer), len(buffer))
+                self.read_status = size
                 if size == 0:
                     break
-                assert size > 0
+                if size < 0:
+                    return self._response_pointer()
                 read.append(bytes(buffer.raw[:size]))
             self.read_input = b"".join(read)
         if self.emit:
@@ -82,13 +88,15 @@ def test_run_callback_converts_write_callback_exception_to_abort_result():
 
 @pytest.mark.unit
 def test_run_input_output_callback_converts_read_exception_to_abort_result():
-    runtime = configured_runtime(FakeNative('{"success": false, "error": "read aborted"}'))
+    native = FakeNative('{"success": false, "error": "read aborted"}', consume_input=True)
+    runtime = configured_runtime(native)
 
     result = runtime.run_input_output_callback(
         "script", "payload", "application/json", lambda _size: (_ for _ in ()).throw(RuntimeError("stop")), lambda _data: 0,
     )
 
     assert result == dataweave.StreamingResult(False, "read aborted", None, None, False)
+    assert native.read_status == -1
 
 
 @pytest.mark.unit
@@ -103,12 +111,19 @@ def test_run_transform_preserves_remainder_of_large_input_chunk():
 
 
 @pytest.mark.unit
-def test_run_streaming_returns_failure_metadata_when_native_response_is_empty():
-    runtime = configured_runtime(FakeNative())
+def test_run_streaming_returns_failure_metadata_when_worker_produces_no_metadata(monkeypatch):
+    class MetadataDroppingQueue(Queue):
+        def put(self, item, *args, **kwargs):
+            if isinstance(item, dict):
+                return None
+            return super().put(item, *args, **kwargs)
+
+    monkeypatch.setattr(dataweave, "Queue", MetadataDroppingQueue)
+    runtime = configured_runtime(FakeNative('{"success": true}'))
     stream = runtime.run_streaming("script")
 
     assert list(stream) == []
-    assert stream.metadata == dataweave.StreamingResult(False, "Empty response", None, None, False)
+    assert stream.metadata == dataweave.StreamingResult(False, "No metadata received from native call", None, None, False)
 
 
 @pytest.mark.unit
@@ -123,14 +138,30 @@ def test_run_streaming_returns_attach_failure_without_detaching_unattached_threa
 
 
 @pytest.mark.unit
-def test_stream_keeps_metadata_unset_when_consumer_closes_generator_early():
-    def generate():
-        yield b"first"
-        return dataweave.StreamingResult(True, None, "text/plain", "utf-8", False)
+def test_stream_private_close_aborts_worker_and_detaches_after_consumer_abandons_output():
+    class BlockingFakeNative(FakeNative):
+        def __init__(self):
+            super().__init__('{"success": false, "error": "aborted"}')
+            self.first_chunk_written = Event()
+            self.cancelled = None
 
-    stream = dataweave.Stream(generate())
+        def run_script_callback(self, _thread, _script, _inputs, write_callback, _context):
+            first = ctypes.create_string_buffer(b"first")
+            assert write_callback(None, ctypes.addressof(first), 5) == 0
+            self.first_chunk_written.set()
+            assert self.cancelled.wait(1)
+            second = ctypes.create_string_buffer(b"second")
+            self.write_status = write_callback(None, ctypes.addressof(second), 6)
+            return self._response_pointer()
+
+    native = BlockingFakeNative()
+    runtime = configured_runtime(native)
+    stream = runtime.run_streaming("script")
+    native.cancelled = stream._cancelled
 
     assert next(stream) == b"first"
-    stream._gen.close()
+    assert native.first_chunk_written.wait(1)
+    stream._close()
 
-    assert stream.metadata is None
+    assert native.detached_event.wait(1)
+    assert native.write_status == -1
