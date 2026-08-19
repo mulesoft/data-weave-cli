@@ -42,7 +42,7 @@ Output: no whitespace errors.
 
 ## Commit
 
-Pending at report creation.
+`1276d12 refactor: separate Python binding models and encoding`
 
 ## Concerns
 
