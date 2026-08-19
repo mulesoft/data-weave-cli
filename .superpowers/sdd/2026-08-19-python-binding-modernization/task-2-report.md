@@ -64,7 +64,7 @@
 
 ## Commit
 
-- Pending at report creation: `test: add Python binding unit characterization coverage`
+- `2f6a788 test: add Python binding unit characterization coverage`
 
 ## Concerns
 
