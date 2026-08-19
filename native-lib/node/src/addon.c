@@ -306,26 +306,20 @@ static engine_bridge_t* bridge_begin_op_locked(long long handle) {
     return b;
 }
 
-// Begin a streaming/transform op: look up the engine's record and mark one op in
-// flight so the record (and, for resolver-backed engines, its napi_ref) cannot be
-// freed while the background uv_thread runs -- and, since round-9 (#1), so that
+// A streaming/transform/run op marks one op in flight on the engine's record so
+// the record (and, for resolver-backed engines, its napi_ref) cannot be freed
+// while the background uv_thread runs -- and, since round-9 (#1), so that
 // destroyEngine defers the Java registry removal until this op drains. Every
-// engine (resolver-backed or resolver-less) now has a record, so this returns a
-// non-NULL pointer for any known handle; the completion sentinel MUST call
-// bridge_end_op on it to balance in_flight and run any deferred destroy. Returns
-// NULL only for an unknown handle (nothing to protect, no bridge_end_op needed).
-// The returned pointer is stable for the op's lifetime because in_flight > 0
-// blocks both destroyEngine and the env cleanup hook from freeing the record.
-// Self-locking form of bridge_begin_op_locked: acquires g_mutex itself. Callers
-// that need the pin taken atomically with another g_mutex-guarded check (e.g.
-// the round-11 admission path) should call bridge_begin_op_locked directly
-// instead. The completion sentinel MUST call bridge_end_op to balance in_flight.
-static engine_bridge_t* bridge_begin_op(long long handle) {
-    uv_mutex_lock(&g_mutex);
-    engine_bridge_t* b = bridge_begin_op_locked(handle);
-    uv_mutex_unlock(&g_mutex);
-    return b;
-}
+// engine (resolver-backed or resolver-less) now has a record, so
+// bridge_begin_op_locked returns a non-NULL pointer for any known handle; the
+// completion sentinel MUST call bridge_end_op on it to balance in_flight and
+// run any deferred destroy. Returns NULL only for an unknown handle (nothing to
+// protect, no bridge_end_op needed). The returned pointer is stable for the
+// op's lifetime because in_flight > 0 blocks both destroyEngine and the env
+// cleanup hook from freeing the record. Since round-11 (#2), every call site
+// takes the pin atomically with its g_mutex-guarded admission check via
+// bridge_begin_op_locked directly (no self-locking wrapper) -- see
+// napi_run_script_streaming_engine / napi_run_script_transform_engine.
 
 // End a streaming/transform op. Runs on the owner (JS) thread from the completion
 // sentinel. If destroyEngine (or the env cleanup hook) ran while this op was in
@@ -855,17 +849,25 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
     return NULL;
   }
   g_active_ops++;
+  // Round-11 (#2): pin the engine in the SAME critical section as the
+  // g_active_ops reservation, before any window a concurrent destroyEngine
+  // could use. NULL for an unknown handle (the worker surfaces "Unknown engine
+  // handle"). Stashed on w->bridge once w is allocated; every early-return
+  // below releases it via bridge_end_op alongside g_active_ops.
+  engine_bridge_t* pinned = bridge_begin_op_locked((long long)handle64);
   uv_mutex_unlock(&g_mutex);
 
   // Conversions run after the admission reservation above, so any throw here
   // must release g_active_ops before returning (round-7 #2).
   size_t script_len, inputs_len;
   if (napi_get_value_string_utf8(env, argv[1], NULL, 0, &script_len) != napi_ok) {
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "runScriptStreamingEngine: script must be a string");
     return NULL;
   }
   if (napi_get_value_string_utf8(env, argv[2], NULL, 0, &inputs_len) != napi_ok) {
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "runScriptStreamingEngine: inputsJson must be a string");
     return NULL;
@@ -878,6 +880,7 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
   struct streaming_work* w = calloc(1, sizeof(struct streaming_work));
   if (w == NULL) {
     // w is NULL -- do not touch w->script/w->inputs_json here.
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "OOM");
     return NULL;
@@ -887,6 +890,7 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
   w->inputs_json = malloc(inputs_len + 1);
   if (w->script == NULL || w->inputs_json == NULL) {
     free(w->script); free(w->inputs_json); free(w);
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "OOM");
     return NULL;
@@ -894,27 +898,31 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
   if (napi_get_value_string_utf8(env, argv[1], w->script, script_len + 1, NULL) != napi_ok ||
       napi_get_value_string_utf8(env, argv[2], w->inputs_json, inputs_len + 1, NULL) != napi_ok) {
     free(w->script); free(w->inputs_json); free(w);
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "runScriptStreamingEngine: failed to read script/inputsJson");
     return NULL;
   }
 
-  // Round-9 (#3): the resource creations below run AFTER g_active_ops was
-  // reserved (and after w + its buffers were allocated), but bridge_begin_op
-  // has NOT run yet (it is below), so there is no in-flight hold to unwind
-  // here. A failed create must release g_active_ops (verbatim pattern), free
-  // any tsfn already created, free w + buffers, and throw -- otherwise the
-  // worker sees a zeroed w->tsfn/w->deferred (crash) or g_active_ops is
-  // stranded (teardown wedge).
+  // Round-9 (#3, updated round-11 #2): the resource creations below run AFTER
+  // g_active_ops was reserved (and after w + its buffers were allocated), and
+  // the engine pin (`pinned`) was already taken at admission. A failed create
+  // must release both the pin (bridge_end_op) and g_active_ops (verbatim
+  // pattern), free any tsfn already created, free w + buffers, and throw --
+  // otherwise the worker sees a zeroed w->tsfn/w->deferred (crash), the pin is
+  // stranded (blocks destroyEngine forever), or g_active_ops is stranded
+  // (teardown wedge).
   napi_value resource_name;
   if (napi_create_string_utf8(env, "dwStreaming", NAPI_AUTO_LENGTH, &resource_name) != napi_ok) {
     free(w->script); free(w->inputs_json); free(w);
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "runScriptStreamingEngine: failed to create resource name");
     return NULL;
   }
   if (napi_create_threadsafe_function(env, argv[3], NULL, resource_name, 0, 1, NULL, NULL, w, call_js_write, &w->tsfn) != napi_ok) {
     free(w->script); free(w->inputs_json); free(w);
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "runScriptStreamingEngine: failed to create threadsafe function");
     return NULL;
@@ -926,19 +934,18 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
     // its context). No worker exists yet, so this release is the sole discharge.
     napi_release_threadsafe_function(w->tsfn, napi_tsfn_release);
     free(w->script); free(w->inputs_json); free(w);
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "runScriptStreamingEngine: failed to create promise");
     return NULL;
   }
 
-  // Pin the resolver bridge (if any) for the whole op so it outlives a concurrent
-  // destroyEngine/cleanup and the background thread can safely call back into
-  // resolve_module_callback (F1). NULL for resolver-less engines. Must happen
-  // before spawning the thread; the completion sentinel releases it via
-  // bridge_end_op. No early return exists between here and the spawn.
-  // g_active_ops was already reserved above, in the same critical section as
-  // the admission check (round-6 #2) -- no separate reservation here.
-  w->bridge = bridge_begin_op(w->handle);
+  // Round-11 (#2): the pin was taken at admission (bridge_begin_op_locked) in
+  // the same critical section as g_active_ops, so a concurrent destroyEngine
+  // could never free this bridge under the admitted op. Just record it on w;
+  // the completion sentinel releases it via bridge_end_op. NULL for a
+  // resolver-less/unknown engine, handled everywhere as a no-op.
+  w->bridge = pinned;
 
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
@@ -1338,6 +1345,12 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
     return NULL;
   }
   g_active_ops++;
+  // Round-11 (#2): pin the engine in the SAME critical section as the
+  // g_active_ops reservation, before any window a concurrent destroyEngine
+  // could use. NULL for an unknown handle (the worker surfaces "Unknown engine
+  // handle"). Stashed on w->bridge once w is allocated; every early-return
+  // below releases it via bridge_end_op alongside g_active_ops.
+  engine_bridge_t* pinned = bridge_begin_op_locked((long long)handle64);
   uv_mutex_unlock(&g_mutex);
 
   // Conversions run after the admission reservation above, so any throw here
@@ -1351,6 +1364,7 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
   // this standalone branch cannot use it (the macro dereferences w).
   struct transform_work* w = calloc(1, sizeof(struct transform_work));
   if (w == NULL) {
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "OOM");
     return NULL;
@@ -1359,6 +1373,7 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
   w->handle = (long long)handle64;
 
   #define TRANSFORM_FAIL(msg) do { \
+      bridge_end_op(pinned, /*env_still_alive=*/true); \
       free(w->script); free(w->inputs_json); free(w->input_name); \
       free(w->input_mime_type); free(w->input_charset); free(w); \
       uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex); \
@@ -1398,14 +1413,16 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
   }
   #undef TRANSFORM_FAIL
 
-  // Round-9 (#3): check each resource creation; on failure release g_active_ops
-  // (verbatim), release any tsfn already created, free w + all five string
-  // buffers, and throw. bridge_begin_op is below, so no in-flight hold exists
-  // here. read_tsfn has no context (NULL); write_tsfn holds w as context, so
-  // release write_tsfn before freeing w if it was created.
+  // Round-9 (#3, updated round-11 #2): check each resource creation; on
+  // failure release the engine pin (`pinned`, taken at admission) via
+  // bridge_end_op, release g_active_ops (verbatim), release any tsfn already
+  // created, free w + all five string buffers, and throw. read_tsfn has no
+  // context (NULL); write_tsfn holds w as context, so release write_tsfn
+  // before freeing w if it was created.
   napi_value resource_name;
   if (napi_create_string_utf8(env, "dwTransform", NAPI_AUTO_LENGTH, &resource_name) != napi_ok) {
     free(w->script); free(w->inputs_json); free(w->input_name); free(w->input_mime_type); free(w->input_charset); free(w);
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "runScriptTransformEngine: failed to create resource name");
     return NULL;
@@ -1413,6 +1430,7 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
 
   if (napi_create_threadsafe_function(env, argv[6], NULL, resource_name, 0, 1, NULL, NULL, NULL, call_js_read, &w->read_tsfn) != napi_ok) {
     free(w->script); free(w->inputs_json); free(w->input_name); free(w->input_mime_type); free(w->input_charset); free(w);
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "runScriptTransformEngine: failed to create read threadsafe function");
     return NULL;
@@ -1420,6 +1438,7 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
   if (napi_create_threadsafe_function(env, argv[7], NULL, resource_name, 0, 1, NULL, NULL, w, call_js_transform_write, &w->write_tsfn) != napi_ok) {
     napi_release_threadsafe_function(w->read_tsfn, napi_tsfn_release);
     free(w->script); free(w->inputs_json); free(w->input_name); free(w->input_mime_type); free(w->input_charset); free(w);
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "runScriptTransformEngine: failed to create write threadsafe function");
     return NULL;
@@ -1430,19 +1449,18 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
     napi_release_threadsafe_function(w->read_tsfn, napi_tsfn_release);
     napi_release_threadsafe_function(w->write_tsfn, napi_tsfn_release);
     free(w->script); free(w->inputs_json); free(w->input_name); free(w->input_mime_type); free(w->input_charset); free(w);
+    bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "runScriptTransformEngine: failed to create promise");
     return NULL;
   }
 
-  // Pin the resolver bridge (if any) for the whole op so it outlives a concurrent
-  // destroyEngine/cleanup and the background thread can safely call back into
-  // resolve_module_callback (F1). NULL for resolver-less engines. Must happen
-  // before spawning the thread; the completion sentinel releases it via
-  // bridge_end_op. No early return exists between here and the spawn.
-  // g_active_ops was already reserved above, in the same critical section as
-  // the admission check (round-6 #2) -- no separate reservation here.
-  w->bridge = bridge_begin_op(w->handle);
+  // Round-11 (#2): the pin was taken at admission (bridge_begin_op_locked) in
+  // the same critical section as g_active_ops, so a concurrent destroyEngine
+  // could never free this bridge under the admitted op. Just record it on w;
+  // the completion sentinel releases it via bridge_end_op. NULL for a
+  // resolver-less/unknown engine, handled everywhere as a no-op.
+  w->bridge = pinned;
 
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
