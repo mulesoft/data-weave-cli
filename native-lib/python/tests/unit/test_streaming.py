@@ -247,3 +247,17 @@ def test_run_streaming_surfaces_detach_failure_without_primary_execution_failure
 
     with pytest.raises(dataweave.DataWeaveError, match="Failed to detach worker thread from isolate. Error code: 7"):
         list(runtime.run_streaming("script"))
+
+
+@pytest.mark.unit
+def test_run_streaming_preserves_unsuccessful_metadata_when_detach_fails():
+    class DetachFailingNative(FakeNative):
+        def graal_detach_thread(self, thread):
+            super().graal_detach_thread(thread)
+            return 7
+
+    runtime = configured_runtime(DetachFailingNative('{"success": false, "error": "script failed"}'))
+    stream = runtime.run_streaming("script")
+
+    assert list(stream) == []
+    assert stream.metadata == dataweave.StreamingResult(False, "script failed", None, None, False)

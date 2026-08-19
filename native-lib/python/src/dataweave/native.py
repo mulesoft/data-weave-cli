@@ -83,6 +83,7 @@ class NativeRuntime:
             raise
 
     def _create_isolate(self) -> None:
+        self._require_export("graal_create_isolate")
         self.lib.graal_create_isolate.argtypes = [
             ctypes.c_void_p,
             ctypes.POINTER(GraalIsolatePointer),
@@ -91,7 +92,10 @@ class NativeRuntime:
         self.lib.graal_create_isolate.restype = ctypes.c_int
         self.isolate = GraalIsolatePointer()
         self.thread = GraalIsolateThreadPointer()
-        result = self.lib.graal_create_isolate(None, ctypes.byref(self.isolate), ctypes.byref(self.thread))
+        try:
+            result = self.lib.graal_create_isolate(None, ctypes.byref(self.isolate), ctypes.byref(self.thread))
+        except Exception as error:
+            raise DataWeaveError(f"Failed to create GraalVM isolate: {error}") from error
         if result != 0:
             raise DataWeaveError(f"Failed to create GraalVM isolate. Error code: {result}")
 
@@ -131,13 +135,19 @@ class NativeRuntime:
 
     def attach_thread(self):
         worker_thread = GraalIsolateThreadPointer()
-        result = self.lib.graal_attach_thread(self.isolate, ctypes.byref(worker_thread))
+        try:
+            result = self.lib.graal_attach_thread(self.isolate, ctypes.byref(worker_thread))
+        except Exception as error:
+            raise DataWeaveError(f"Failed to attach worker thread to isolate: {error}") from error
         if result != 0:
             raise DataWeaveError(f"Failed to attach worker thread to isolate (code {result})")
         return worker_thread
 
     def detach_thread(self, thread) -> None:
-        result = self.lib.graal_detach_thread(thread)
+        try:
+            result = self.lib.graal_detach_thread(thread)
+        except Exception as error:
+            raise DataWeaveError(f"Failed to detach worker thread from isolate: {error}") from error
         if result != 0:
             raise DataWeaveError(f"Failed to detach worker thread from isolate. Error code: {result}")
 
@@ -184,9 +194,12 @@ class NativeRuntime:
             result = self.lib.graal_tear_down_isolate(self.thread)
             if result != 0:
                 raise DataWeaveError(f"Failed to tear down GraalVM isolate. Error code: {result}")
-        except Exception:
+        except DataWeaveError:
             if not suppress_errors:
                 raise
+        except Exception as error:
+            if not suppress_errors:
+                raise DataWeaveError(f"Failed to tear down GraalVM isolate: {error}") from error
 
     def _reset(self) -> None:
         self.initialized = False

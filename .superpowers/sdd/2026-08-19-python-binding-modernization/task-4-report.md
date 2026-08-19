@@ -35,3 +35,22 @@ Complete. The Python binding now separates native ctypes/isolate ownership from 
 
 - Final focused and full Python verification passed: 25 focused lifecycle/streaming tests and 61 unit/integration tests.
 - `./gradlew native-lib:pythonTest` passed: native image build and all 61 Python tests.
+
+## Fix Round 2
+
+- Treated unsuccessful native streaming metadata as the primary execution outcome, so worker detach failures do not replace a script failure.
+- Preserved an active context-manager body exception when cleanup also fails; cleanup failures still surface when no body exception is active.
+- Cleared the facade singleton in a `finally` block, allowing reinitialization after native cleanup raises.
+- Validated `graal_create_isolate` is exported and wrapped its invocation failure as contextual `DataWeaveError`.
+- Wrapped `graal_attach_thread` and `graal_detach_thread` invocation failures as contextual `DataWeaveError`; the stream worker suppresses detach failures whenever attach, execution, decode, or native failure metadata is primary.
+- Added focused tests for missing/throwing isolate creation, throwing attach/detach lifecycle calls, failed singleton cleanup, context cleanup precedence, and unsuccessful streaming metadata plus detach failure.
+
+### Fix Round 2 Verification
+
+- Focused lifecycle/native/streaming/facade tests passed: 38 tests.
+- Full Python unit and integration suite passed: 70 tests.
+- `./gradlew native-lib:pythonTest` passed: native image build and all 70 Python tests.
+
+### Fix Round 2 Concerns
+
+- The Gradle native-image build continues to emit pre-existing Graal/Gradle deprecation and restricted-native-access warnings, but the build and Python suite completed successfully.

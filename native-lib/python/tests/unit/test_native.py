@@ -135,6 +135,39 @@ def test_initialize_resets_state_when_isolate_creation_fails(monkeypatch):
 
 
 @pytest.mark.unit
+def test_initialize_requires_create_isolate_export(monkeypatch):
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: object())
+
+    with pytest.raises(dataweave.DataWeaveError, match="Native library does not export graal_create_isolate"):
+        native.NativeRuntime("/tmp/dwlib").initialize()
+
+
+@pytest.mark.unit
+def test_initialize_wraps_create_isolate_exception(monkeypatch):
+    class Function:
+        def __call__(self, *_args):
+            raise RuntimeError("native create failure")
+
+    library = type("Native", (), {"graal_create_isolate": Function()})()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    with pytest.raises(dataweave.DataWeaveError, match="Failed to create GraalVM isolate: native create failure"):
+        native.NativeRuntime("/tmp/dwlib").initialize()
+
+
+@pytest.mark.unit
+def test_cleanup_wraps_teardown_exception():
+    runtime = native.NativeRuntime.__new__(native.NativeRuntime)
+    runtime.initialized = True
+    runtime.thread = object()
+    runtime.isolate = object()
+    runtime.lib = type("Native", (), {"graal_tear_down_isolate": lambda _self, _thread: (_ for _ in ()).throw(RuntimeError("native teardown failure"))})()
+
+    with pytest.raises(dataweave.DataWeaveError, match="Failed to tear down GraalVM isolate: native teardown failure"):
+        runtime.cleanup()
+
+
+@pytest.mark.unit
 def test_initialize_tears_down_isolate_when_required_export_is_missing(monkeypatch):
     class Function:
         def __init__(self, callback):
@@ -218,3 +251,30 @@ def test_cleanup_surfaces_native_teardown_error_code(monkeypatch):
     assert runtime.lib is None
     assert runtime.thread is None
     assert runtime.isolate is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("method_name", "error_message"),
+    [
+        ("attach_thread", "Failed to attach worker thread to isolate: native attach failure"),
+        ("detach_thread", "Failed to detach worker thread from isolate: native detach failure"),
+    ],
+)
+def test_thread_lifecycle_wraps_native_invocation_errors(method_name, error_message):
+    class Native:
+        def graal_attach_thread(self, _isolate, _thread):
+            raise RuntimeError("native attach failure")
+
+        def graal_detach_thread(self, _thread):
+            raise RuntimeError("native detach failure")
+
+    runtime = native.NativeRuntime.__new__(native.NativeRuntime)
+    runtime.lib = Native()
+    runtime.isolate = object()
+
+    with pytest.raises(dataweave.DataWeaveError, match=error_message):
+        if method_name == "attach_thread":
+            runtime.attach_thread()
+        else:
+            runtime.detach_thread(object())

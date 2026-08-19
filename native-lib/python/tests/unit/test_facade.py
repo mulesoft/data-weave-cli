@@ -66,3 +66,28 @@ def test_cleanup_is_noop_without_global_runtime():
     dataweave.cleanup()
 
     assert dataweave._global_instance is None
+
+
+@pytest.mark.unit
+def test_global_cleanup_clears_failed_runtime_and_allows_recreation(monkeypatch):
+    created = []
+
+    class FakeRuntime:
+        def __init__(self):
+            created.append(self)
+
+        def initialize(self):
+            pass
+
+        def cleanup(self):
+            raise dataweave.DataWeaveError("teardown failed")
+
+    monkeypatch.setattr(dataweave, "DataWeave", FakeRuntime)
+    first = dataweave._get_global_instance()
+
+    with pytest.raises(dataweave.DataWeaveError, match="teardown failed"):
+        dataweave.cleanup()
+
+    second = dataweave._get_global_instance()
+    assert second is not first
+    dataweave._global_instance = None

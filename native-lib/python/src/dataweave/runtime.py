@@ -100,10 +100,13 @@ class DataWeave:
         def worker_main():
             worker_thread = None
             primary_error = None
+            primary_outcome = False
             try:
                 worker_thread = self._native.attach_thread()
                 raw = self._native.decode_and_free(invoke(worker_thread, write_cb), worker_thread)
-                publish(json.loads(raw) if raw else {"success": False, "error": "Empty response"})
+                metadata = json.loads(raw) if raw else {"success": False, "error": "Empty response"}
+                primary_outcome = not metadata.get("success", False)
+                publish(metadata)
             except Exception as error:
                 primary_error = error
                 publish({"success": False, "error": str(error)})
@@ -112,7 +115,7 @@ class DataWeave:
                     try:
                         self._native.detach_thread(worker_thread)
                     except Exception as error:
-                        if primary_error is None:
+                        if primary_error is None and not primary_outcome:
                             publish(CleanupFailure(error))
                 publish(sentinel)
 
@@ -220,5 +223,9 @@ class DataWeave:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
+        try:
+            self.cleanup()
+        except Exception:
+            if exc_type is None:
+                raise
         return False
