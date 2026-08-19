@@ -1,10 +1,12 @@
 import ctypes
 from queue import Full, Queue
-from threading import Event
+from threading import Event, Thread
+from time import sleep
 
 import pytest
 
 import dataweave
+from dataweave import runtime as runtime_module
 
 
 class FakeNative:
@@ -118,7 +120,7 @@ def test_run_streaming_returns_failure_metadata_when_worker_produces_no_metadata
                 return None
             return super().put(item, *args, **kwargs)
 
-    monkeypatch.setattr(dataweave, "Queue", MetadataDroppingQueue)
+    monkeypatch.setattr(runtime_module, "Queue", MetadataDroppingQueue)
     runtime = configured_runtime(FakeNative('{"success": true}'))
     stream = runtime.run_streaming("script")
 
@@ -197,8 +199,8 @@ def test_stream_early_close_does_not_block_terminal_publication_on_full_queue(mo
             self.write_status = write_callback(None, ctypes.addressof(third), 5)
             return self._response_pointer()
 
-    monkeypatch.setattr(dataweave, "Queue", CancellationAwareQueue)
-    monkeypatch.setattr(dataweave, "_OUTPUT_QUEUE_MAXSIZE", 1)
+    monkeypatch.setattr(runtime_module, "Queue", CancellationAwareQueue)
+    monkeypatch.setattr(runtime_module, "_OUTPUT_QUEUE_MAXSIZE", 1)
     native = FullQueueFakeNative()
     runtime = configured_runtime(native)
     stream = runtime.run_streaming("script")
@@ -212,3 +214,22 @@ def test_stream_early_close_does_not_block_terminal_publication_on_full_queue(mo
     assert native.write_status == -1
     assert native.detached_event.wait(1)
     assert terminal_blocked.is_set() is False
+
+
+@pytest.mark.unit
+def test_runtime_module_owns_dataweave_orchestration():
+    assert dataweave.DataWeave is runtime_module.DataWeave
+
+
+@pytest.mark.unit
+def test_run_streaming_reports_worker_timeout_when_native_call_produces_no_output(monkeypatch):
+    class BlockingFakeNative(FakeNative):
+        def run_script_callback(self, _thread, _script, _inputs, _write_callback, _context):
+            sleep(0.05)
+            return self._response_pointer()
+
+    monkeypatch.setattr(runtime_module, "_WORKER_TIMEOUT_SECONDS", 0.01)
+    runtime = configured_runtime(BlockingFakeNative('{"success": true}'))
+
+    with pytest.raises(dataweave.DataWeaveError, match="Worker thread timeout after 0.01 seconds"):
+        list(runtime.run_streaming("script"))
