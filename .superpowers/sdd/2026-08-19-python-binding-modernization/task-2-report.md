@@ -96,7 +96,7 @@
 
 - `2f6a788 test: add Python binding unit characterization coverage`
 - `2f169ee test: harden Python streaming unit coverage`
-- Pending at report update: `fix: prevent Python streaming worker shutdown stalls`
+- `bcf6ccd fix: prevent Python streaming worker shutdown stalls`
 
 ## Concerns
 
