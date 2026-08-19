@@ -2141,10 +2141,14 @@ static napi_value already_resolved_promise(napi_env env) {
   return promise;
 }
 
-static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
-  (void)info;
-  uv_mutex_lock(&g_mutex);
-
+// Releases ONE initialization reference on the shared isolate. Caller MUST
+// hold g_mutex; this function UNLOCKS g_mutex before returning (the sync and
+// waiter teardown paths both require dropping the lock). Returns the napi
+// promise to hand back to the JS caller. This is napi_cleanup's original
+// Case 1..5 body, extracted verbatim so the abandoned-env path (round-12 #2)
+// can share the exact same "reached zero -> tear down now vs. defer to the
+// waiter" decision without duplicating it.
+static napi_value release_isolate_ref_locked(napi_env env) {
   // Case 1/2: not the last release (or nothing was ever initialized). Decrement
   // only if positive -- a second cleanup() call while g_ref_count is already at
   // 0 (e.g. one already dropped it while teardown is pending) must not go
@@ -2265,6 +2269,12 @@ static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
 
   uv_mutex_unlock(&g_mutex);
   return promise;
+}
+
+static napi_value napi_cleanup(napi_env env, napi_callback_info info) {
+  (void)info;
+  uv_mutex_lock(&g_mutex);
+  return release_isolate_ref_locked(env);  // unlocks g_mutex, returns the promise
 }
 
 // --- Module init ---

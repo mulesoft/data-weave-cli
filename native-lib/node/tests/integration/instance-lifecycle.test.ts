@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { DataWeave } from "../../src/dataweave";
 import { DataWeaveError } from "../../src/errors";
+import * as ffi from "../../src/ffi";
+import { findLibrary, buildInputsJson } from "../../src/utils";
 
 // Same-instance lifecycle regression tests (round 6, W-23692110). Round 5's
 // coverage used a second instance; the same-instance cleanup window is exactly
@@ -74,5 +76,35 @@ describe("instance lifecycle during cleanup (round 6)", () => {
     const a = dw.cleanup();
     const b = dw.cleanup(); // must return the same in-flight settlement, one native teardown
     await Promise.all([a, b]);
+  });
+});
+
+// Round 12, Task 1: napi_cleanup's Case 1..5 decrement-and-teardown body was
+// lifted verbatim into release_isolate_ref_locked() so a later task (round-12
+// #2) can reuse it from the abandoned-env path. This is a behavior-preserving
+// refactor; this test pins the observable contract it must not disturb: the
+// balancing cleanup() call that drops the ref count to zero must actually
+// tear the isolate down synchronously, not leave it silently live.
+//
+// Driven through the raw `ffi` boundary (like handle-validation.test.ts and
+// engine-handle-contract.test.ts), with a balanced initialize()/cleanup()
+// pair, so this file doesn't leak a ref-count bump into sibling integration
+// test files sharing the same vitest worker process.
+describe("napi_cleanup refactor preserves last-release teardown (round 12 Task 1)", () => {
+  it("the balancing cleanup() actually tears the isolate down (subsequent engine call sees not-initialized)", async () => {
+    ffi.initialize(findLibrary());
+    const h = ffi.createEngine();
+    const envelope = JSON.parse(
+      ffi.runScriptEngine(h, "%dw 2.0\noutput application/json\n---\n1 + 1", buildInputsJson({}))
+    );
+    expect(envelope.success).toBe(true);
+    expect(JSON.parse(Buffer.from(envelope.result, "base64").toString("utf-8"))).toBe(2);
+    ffi.destroyEngine(h);
+    await ffi.cleanup();
+    // Ref count reached 0 and the isolate was torn down: a fresh engine call
+    // must observe "not initialized", not silently run on a live isolate.
+    expect(() =>
+      ffi.runScriptEngine(Number.MAX_SAFE_INTEGER, "%dw 2.0\noutput application/json\n---\n1", buildInputsJson({}))
+    ).toThrow(/not initialized/i);
   });
 });
