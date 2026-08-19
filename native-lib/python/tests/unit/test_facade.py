@@ -4,9 +4,31 @@ import dataweave
 
 
 @pytest.mark.unit
-def test_facade_exports_all_declared_public_names():
-    for name in dataweave.__all__:
-        assert hasattr(dataweave, name), name
+def test_facade_preserves_fixed_legacy_public_exports():
+    legacy_exports = [
+        "DataWeave",
+        "DataWeaveError",
+        "DataWeaveLibraryNotFoundError",
+        "DataWeaveScriptError",
+        "ExecutionResult",
+        "InputValue",
+        "ReadCallback",
+        "Stream",
+        "StreamingResult",
+        "WriteCallback",
+        "READ_CALLBACK",
+        "WRITE_CALLBACK",
+        "run",
+        "run_callback",
+        "run_input_output_callback",
+        "run_streaming",
+        "run_transform",
+        "cleanup",
+    ]
+
+    for name in legacy_exports:
+        assert name in dataweave.__all__
+        getattr(dataweave, name)
 
 
 @pytest.mark.unit

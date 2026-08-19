@@ -47,3 +47,10 @@ Output: no whitespace errors.
 ## Concerns
 
 - The test tree has same-basename unit and integration modules (`test_streaming.py`). Pytest’s default prepend import mode causes collection to fail; `--import-mode=importlib` is now configured so the required combined test command runs consistently.
+
+## Fix Round 1
+
+- Replaced the dynamic facade export assertion with a fixed, pre-Task-3 list of all 18 legacy public names.
+- The test now verifies every legacy name is explicitly present in `dataweave.__all__` and resolves through `getattr(dataweave, name)`.
+- Focused verification: `python3 -m pytest tests/unit/test_facade.py -m unit -v` reported `3 passed in 0.01s`.
+- Combined verification and fix-round commit are recorded in the follow-up commit for this round.
