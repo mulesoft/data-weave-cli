@@ -3,6 +3,19 @@ import base64
 import pytest
 
 import dataweave
+from dataweave import models
+
+
+@pytest.mark.unit
+def test_public_models_are_exported_from_models_module():
+    assert models.ExecutionResult is dataweave.ExecutionResult
+    assert models.InputValue is dataweave.InputValue
+    assert models.StreamingResult is dataweave.StreamingResult
+    assert models.DataWeaveError is dataweave.DataWeaveError
+    assert models.DataWeaveScriptError is dataweave.DataWeaveScriptError
+    assert models.DataWeaveLibraryNotFoundError is dataweave.DataWeaveLibraryNotFoundError
+    assert models.READ_CALLBACK is dataweave.READ_CALLBACK
+    assert models.WRITE_CALLBACK is dataweave.WRITE_CALLBACK
 
 
 @pytest.mark.unit

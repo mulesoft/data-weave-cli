@@ -3,6 +3,14 @@ import base64
 import pytest
 
 import dataweave
+from dataweave import encoding
+
+
+@pytest.mark.unit
+def test_public_encoding_functions_are_used_by_compatibility_aliases():
+    assert dataweave._normalize_input_value is encoding.normalize_input_value
+    assert dataweave._parse_native_encoded_response is encoding.parse_native_encoded_response
+    assert dataweave._parse_streaming_result is encoding.parse_streaming_result
 
 
 @pytest.mark.unit

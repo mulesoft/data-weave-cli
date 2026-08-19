@@ -4,6 +4,12 @@ import dataweave
 
 
 @pytest.mark.unit
+def test_facade_exports_all_declared_public_names():
+    for name in dataweave.__all__:
+        assert hasattr(dataweave, name), name
+
+
+@pytest.mark.unit
 def test_global_facade_initializes_once_and_cleanup_allows_recreation(monkeypatch):
     created = []
     registered = []

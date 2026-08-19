@@ -43,186 +43,38 @@ Native resources are released automatically at interpreter exit via atexit.
 Call dataweave.cleanup() to release them earlier if needed.
 """
 
-import base64
 import ctypes
 import json
 import os
-from dataclasses import dataclass
 from pathlib import Path
 from queue import Full, Queue
 from threading import Event, Thread
-from typing import Any, Callable, Dict, Generator, Iterable, Optional, Union
+from typing import Any, Dict, Generator, Iterable, Optional
+
+from .encoding import normalize_input_value, parse_native_encoded_response, parse_streaming_result
+from .models import (
+    READ_CALLBACK,
+    WRITE_CALLBACK,
+    DataWeaveError,
+    DataWeaveLibraryNotFoundError,
+    DataWeaveScriptError,
+    ExecutionResult,
+    InputValue,
+    ReadCallback,
+    Stream,
+    StreamingResult,
+    WriteCallback,
+)
 
 # Bound for streaming output queues: limits memory under slow/stalled consumers
 # by exerting backpressure onto the native producer.
 _OUTPUT_QUEUE_MAXSIZE = 512
 
 
-class DataWeaveError(Exception):
-    pass
-
-
-class DataWeaveScriptError(DataWeaveError):
-    """Raised when a DataWeave script fails (compile or runtime error).
-
-    Carries the full result object so callers can inspect details.
-    """
-
-    def __init__(self, result):
-        self.result = result
-        super().__init__(result.error or "Script execution failed")
-
-
-class DataWeaveLibraryNotFoundError(Exception):
-    pass
-
-
-# ctypes callback signatures matching NativeCallbacks.WriteCallback / ReadCallback.
-# Buffer parameters use c_void_p (not c_char_p) because ctypes gives c_char_p
-# special treatment that prevents writing into the buffer.
-# int (*WriteCallback)(void *ctx, const char *buffer, int length)
-WRITE_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int)
-# int (*ReadCallback)(void *ctx, char *buffer, int bufferSize)
-READ_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int)
-
-
-WriteCallback = Callable[[bytes], int]
-ReadCallback = Callable[[int], bytes]
-
 _ENV_NATIVE_LIB = "DATAWEAVE_NATIVE_LIB"
 
-
-@dataclass
-class InputValue:
-    content: Union[str, bytes]
-    mime_type: Optional[str] = None
-    charset: Optional[str] = None
-    properties: Optional[Dict[str, Union[str, int, bool]]] = None
-
-    def encode_content(self) -> str:
-        if isinstance(self.content, bytes):
-            raw = self.content
-        else:
-            raw = self.content.encode(self.charset or "utf-8")
-        return base64.b64encode(raw).decode("ascii")
-
-
-@dataclass(repr=False)
-class ExecutionResult:
-    success: bool
-    result: Optional[str]
-    error: Optional[str]
-    binary: bool
-    mime_type: Optional[str]
-    charset: Optional[str]
-
-    def __repr__(self):
-        if not self.success:
-            return f"ExecutionResult(success=False, error={self.error!r})"
-        preview = (self.result[:50] + "...") if self.result and len(self.result) > 50 else self.result
-        return f"ExecutionResult(success=True, mime_type={self.mime_type!r}, charset={self.charset!r}, result={preview!r})"
-
-    def get_bytes(self) -> Optional[bytes]:
-        if not self.success or self.result is None:
-            return None
-        return base64.b64decode(self.result)
-
-    def get_string(self) -> Optional[str]:
-        if not self.success or self.result is None:
-            return None
-        if self.binary:
-            return self.result
-        return self.get_bytes().decode(self.charset or "utf-8")
-
-
-@dataclass
-class StreamingResult:
-    """Metadata returned after a streaming execution completes."""
-    success: bool
-    error: Optional[str]
-    mime_type: Optional[str]
-    charset: Optional[str]
-    binary: bool
-
-
-class Stream:
-    """Wrapper around a streaming generator that captures metadata.
-
-    Iterate to consume output chunks. After iteration completes,
-    access ``.metadata`` for the :class:`StreamingResult`.
-    """
-
-    def __init__(self, gen: Generator[bytes, None, StreamingResult]):
-        self._gen = gen
-        self._metadata: Optional[StreamingResult] = None
-
-    def __iter__(self):
-        return self
-
-    def __next__(self) -> bytes:
-        try:
-            return next(self._gen)
-        except StopIteration as e:
-            self._metadata = e.value
-            raise
-
-    @property
-    def metadata(self) -> Optional[StreamingResult]:
-        return self._metadata
-
-    def _close(self) -> None:
-        on_close = getattr(self, "_on_close", None)
-        if on_close is not None:
-            on_close()
-        self._gen.close()
-
-
-def _parse_native_encoded_response(raw: str) -> ExecutionResult:
-    if raw is None:
-        return ExecutionResult(False, None, "Native returned null", False, None, None)
-
-    if raw == "":
-        return ExecutionResult(False, None, "Native returned empty response", False, None, None)
-
-    try:
-        parsed = json.loads(raw)
-    except Exception as e:
-        return ExecutionResult(False, None, f"Failed to parse native JSON response: {e}", False, None, None)
-
-    if not isinstance(parsed, dict):
-        return ExecutionResult(False, None, "Native response JSON is not an object", False, None, None)
-
-    success = bool(parsed.get("success", False))
-    if not success:
-        return ExecutionResult(False, None, parsed.get("error"), False, None, None)
-
-    return ExecutionResult(
-        success=True,
-        result=parsed.get("result"),
-        error=None,
-        binary=bool(parsed.get("binary", False)),
-        mime_type=parsed.get("mimeType"),
-        charset=parsed.get("charset"),
-    )
-
-
-def _parse_streaming_result(meta: dict) -> StreamingResult:
-    success = meta.get("success", False)
-    if not success:
-        return StreamingResult(
-            success=False,
-            error=meta.get("error"),
-            mime_type=None,
-            charset=None,
-            binary=False,
-        )
-    return StreamingResult(
-        success=True,
-        error=None,
-        mime_type=meta.get("mimeType"),
-        charset=meta.get("charset"),
-        binary=meta.get("binary", False),
-    )
+_parse_native_encoded_response = parse_native_encoded_response
+_parse_streaming_result = parse_streaming_result
 
 
 def _candidate_library_paths() -> list[Path]:
@@ -267,74 +119,7 @@ def _find_library() -> str:
     )
 
 
-def _normalize_input_value(value: Any, mime_type: Optional[str] = None) -> Dict[str, Any]:
-    if isinstance(value, dict):
-        allowed_keys = {"content", "mimeType", "charset", "properties"}
-        extra_keys = set(value.keys()) - allowed_keys
-        if extra_keys:
-            raise DataWeaveError(
-                "Explicit input dict contains unsupported keys: " + ", ".join(sorted(extra_keys))
-            )
-
-        if "content" in value or "mimeType" in value:
-            if "content" not in value or "mimeType" not in value:
-                raise DataWeaveError(
-                    "Explicit input dict must include both 'content' and 'mimeType'"
-                )
-
-            raw_content = value.get("content")
-            charset = value.get("charset") or "utf-8"
-            if isinstance(raw_content, bytes):
-                encoded_content = base64.b64encode(raw_content).decode("ascii")
-            else:
-                encoded_content = base64.b64encode(str(raw_content).encode(charset)).decode("ascii")
-
-            normalized: Dict[str, Any] = {
-                "content": encoded_content,
-                "mimeType": value.get("mimeType"),
-            }
-            if "charset" in value:
-                normalized["charset"] = value.get("charset")
-            if "properties" in value:
-                normalized["properties"] = value.get("properties")
-            return normalized
-
-    if isinstance(value, InputValue):
-        out: Dict[str, Any] = {
-            "content": value.encode_content(),
-            "mimeType": value.mime_type or mime_type,
-        }
-        if value.charset is not None:
-            out["charset"] = value.charset
-        if value.properties is not None:
-            out["properties"] = value.properties
-        return out
-
-    if isinstance(value, str):
-        content = value
-        default_mime = "text/plain"
-    elif isinstance(value, (int, float, bool)):
-        content = json.dumps(value)
-        default_mime = "application/json"
-    elif value is None:
-        content = "null"
-        default_mime = "application/json"
-    else:
-        try:
-            content = json.dumps(value)
-            default_mime = "application/json"
-        except (TypeError, ValueError):
-            content = str(value)
-            default_mime = "text/plain"
-
-    charset = "utf-8"
-    encoded_content = base64.b64encode(content.encode(charset)).decode("ascii")
-
-    return {
-        "content": encoded_content,
-        "mimeType": mime_type or default_mime,
-        "charset": charset,
-    }
+_normalize_input_value = normalize_input_value
 
 
 class DataWeave:
@@ -505,7 +290,7 @@ class DataWeave:
         if inputs is None:
             inputs = {}
 
-        normalized_inputs = {key: _normalize_input_value(val) for key, val in inputs.items()}
+        normalized_inputs = {key: normalize_input_value(val) for key, val in inputs.items()}
         inputs_json = json.dumps(normalized_inputs)
 
         @WRITE_CALLBACK
@@ -529,7 +314,7 @@ class DataWeave:
         except Exception as e:
             raise DataWeaveError(f"Failed to execute callback streaming: {e}")
 
-        return _parse_streaming_result(meta)
+        return parse_streaming_result(meta)
 
     def run_streaming(
         self,
@@ -579,7 +364,7 @@ class DataWeave:
         if inputs is None:
             inputs = {}
 
-        normalized_inputs = {key: _normalize_input_value(val) for key, val in inputs.items()}
+        normalized_inputs = {key: normalize_input_value(val) for key, val in inputs.items()}
         inputs_json = json.dumps(normalized_inputs)
 
         _SENTINEL = object()
@@ -659,23 +444,7 @@ class DataWeave:
         if meta is None:
             meta = {"success": False, "error": "No metadata received from native call"}
 
-        success = meta.get("success", False)
-        if not success:
-            return StreamingResult(
-                success=False,
-                error=meta.get("error"),
-                mime_type=None,
-                charset=None,
-                binary=False,
-            )
-
-        return StreamingResult(
-            success=True,
-            error=None,
-            mime_type=meta.get("mimeType"),
-            charset=meta.get("charset"),
-            binary=meta.get("binary", False),
-        )
+        return parse_streaming_result(meta)
 
     def run_transform(
         self,
@@ -739,7 +508,7 @@ class DataWeave:
         if inputs is None:
             inputs = {}
 
-        normalized_inputs = {key: _normalize_input_value(val) for key, val in inputs.items()}
+        normalized_inputs = {key: normalize_input_value(val) for key, val in inputs.items()}
         inputs_json = json.dumps(normalized_inputs)
 
         _SENTINEL = object()
@@ -842,23 +611,7 @@ class DataWeave:
         if meta is None:
             meta = {"success": False, "error": "No metadata received from native call"}
 
-        success = meta.get("success", False)
-        if not success:
-            return StreamingResult(
-                success=False,
-                error=meta.get("error"),
-                mime_type=None,
-                charset=None,
-                binary=False,
-            )
-
-        return StreamingResult(
-            success=True,
-            error=None,
-            mime_type=meta.get("mimeType"),
-            charset=meta.get("charset"),
-            binary=meta.get("binary", False),
-        )
+        return parse_streaming_result(meta)
 
     def run_input_output_callback(
         self,
@@ -899,7 +652,7 @@ class DataWeave:
         if inputs is None:
             inputs = {}
 
-        normalized_inputs = {key: _normalize_input_value(val) for key, val in inputs.items()}
+        normalized_inputs = {key: normalize_input_value(val) for key, val in inputs.items()}
         inputs_json = json.dumps(normalized_inputs)
 
         @READ_CALLBACK
@@ -939,7 +692,7 @@ class DataWeave:
         except Exception as e:
             raise DataWeaveError(f"Failed to execute callback input/output streaming: {e}")
 
-        return _parse_streaming_result(meta)
+        return parse_streaming_result(meta)
 
     def run(self, script: str, inputs: Optional[Dict[str, Any]] = None, raise_on_error: bool = False) -> ExecutionResult:
         if not self._initialized:
@@ -948,7 +701,7 @@ class DataWeave:
         if inputs is None:
             inputs = {}
 
-        normalized_inputs = {key: _normalize_input_value(val) for key, val in inputs.items()}
+        normalized_inputs = {key: normalize_input_value(val) for key, val in inputs.items()}
         inputs_json = json.dumps(normalized_inputs)
 
         try:
@@ -958,7 +711,7 @@ class DataWeave:
                 inputs_json.encode("utf-8"),
             )
             raw = self._decode_and_free(result_ptr)
-            result = _parse_native_encoded_response(raw)
+            result = parse_native_encoded_response(raw)
         except Exception as e:
             raise DataWeaveError(f"Failed to execute script: {e}")
 
