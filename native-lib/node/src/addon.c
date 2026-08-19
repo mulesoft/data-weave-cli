@@ -1879,10 +1879,18 @@ static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) 
       return NULL;
     }
     g_active_ops++;
+    // Round-11 (#3): pin the engine in the same critical section as the
+    // g_active_ops reservation so a concurrent destroyEngine cannot free the
+    // resolver bridge (still held by Java as the resolver ctx) while this
+    // synchronous op attaches to Graal or runs. NULL for a resolver-less/unknown
+    // handle -- bridge_end_op no-ops on NULL. Released in the attach-failure and
+    // completion paths below, alongside g_active_ops.
+    engine_bridge_t* bridge = bridge_begin_op_locked(handle);
     uv_mutex_unlock(&g_mutex);
 
     void* thread = NULL;
     if (fn_attach_thread(g_isolate, &thread) != 0) {
+      bridge_end_op(bridge, /*env_still_alive=*/true);
       uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
       free(script); free(inputs);
       napi_throw_error(env, NULL, "Failed to attach thread");
@@ -1891,9 +1899,9 @@ static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) 
 
     char* result = (char*)fn_run_script_engine(thread, handle, script, inputs);
 
-    uv_mutex_lock(&g_mutex);
-    engine_bridge_t* bridge = bridge_find(handle);
-    uv_mutex_unlock(&g_mutex);
+    // The pin taken at admission kept this record alive across the run, so no
+    // second lookup is needed. resolver_results_free_all is a no-op for a
+    // resolver-less/unknown engine (bridge == NULL).
     if (bridge != NULL) resolver_results_free_all(bridge);
 
     char* result_copy = result ? strdup(result) : NULL;
@@ -1901,9 +1909,12 @@ static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) 
     fn_detach_thread(thread);
     free(script); free(inputs);
 
-    // Release the op reservation now that no GraalVM-attached thread remains
-    // for this call. Broadcast so a teardown_waiter_thread_fn blocked on
-    // g_active_ops > 0 re-checks and can proceed.
+    // Round-11 (#3): release the per-engine pin (may finalize a destroy that a
+    // concurrent Worker deferred while this op held in_flight > 0), then release
+    // the global op reservation. env is live on this JS thread, so env_still_alive
+    // is true. Order: bridge_end_op before the g_active_ops release, mirroring
+    // streaming/transform completion.
+    bridge_end_op(bridge, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
 
     napi_value out;
