@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as ffi from "../../src/ffi";
 import { findLibrary, buildInputsJson } from "../../src/utils";
 
@@ -27,13 +27,29 @@ import { findLibrary, buildInputsJson } from "../../src/utils";
 //
 // The native addon globals (g_ref_count, g_initialized, g_bridges, etc.) are
 // process-wide C statics -- vitest's per-file module isolation does NOT reset
-// them. Every ffi.initialize() here is balanced by a final ffi.cleanup() (via
-// afterAll) so this file doesn't strand a ref-count bump or a leaked engine
-// bridge for sibling integration test files sharing the same vitest worker
-// process, mirroring independent-engines.test.ts and handle-validation.test.ts.
+// them, and napi_initialize/napi_cleanup are plain integer ref-counts (one
+// increment per initialize(), one decrement per cleanup(), teardown only on
+// the transition to zero). So this file calls ffi.initialize() exactly ONCE
+// for the whole suite (beforeAll), balanced by exactly one ffi.cleanup() that
+// brings the ref count to zero (in the last real test, "final cleanup..."
+// below) -- mirroring independent-engines.test.ts's single
+// initialize()/cleanup() pair rather than handle-validation.test.ts's
+// per-test balancing (that file calls initialize()/cleanup() once per test,
+// which does not fit here since several tests below deliberately build on a
+// still-live engine/isolate from a prior test). The trailing afterAll is a
+// pure safety net (idempotent no-op on the happy path) in case an earlier
+// assertion throws before the drainage test runs, so this file never strands
+// a ref-count bump for sibling integration test files sharing the same
+// vitest worker process.
 describe("*_engine unknown/destroyed-handle contract (round 11 #6)", () => {
+  beforeAll(() => {
+    ffi.initialize(findLibrary());
+  });
+
   afterAll(async () => {
-    // Idempotent: a no-op if nothing is left to release.
+    // Idempotent: a no-op if the ref count already reached zero (the normal
+    // case -- the drainage test below already did that). A genuine safety
+    // net only if an earlier test threw before reaching that point.
     await ffi.cleanup();
   });
 
@@ -44,8 +60,6 @@ describe("*_engine unknown/destroyed-handle contract (round 11 #6)", () => {
   const UNKNOWN_ENVELOPE = { success: false, error: "Unknown engine handle" };
 
   it("runScriptEngine on a never-registered handle returns the terminal envelope, does not throw", () => {
-    ffi.initialize(findLibrary());
-
     let raw: string | undefined;
     expect(() => {
       raw = ffi.runScriptEngine(
@@ -59,8 +73,6 @@ describe("*_engine unknown/destroyed-handle contract (round 11 #6)", () => {
   });
 
   it("runScriptStreamingEngine on a never-registered handle resolves (never rejects) with the terminal envelope", async () => {
-    ffi.initialize(findLibrary());
-
     const chunks: Buffer[] = [];
     const raw = await ffi.runScriptStreamingEngine(
       UNKNOWN_HANDLE,
@@ -75,8 +87,6 @@ describe("*_engine unknown/destroyed-handle contract (round 11 #6)", () => {
   });
 
   it("runScriptTransformEngine on a never-registered handle resolves (never rejects) with the terminal envelope", async () => {
-    ffi.initialize(findLibrary());
-
     let readCalls = 0;
     let firstRead = true;
     const readCb = (_bufSize: number): Buffer | null => {
@@ -109,7 +119,6 @@ describe("*_engine unknown/destroyed-handle contract (round 11 #6)", () => {
   });
 
   it("all three entrypoints on a destroyed handle return/resolve the same terminal envelope, after proving the handle worked", async () => {
-    ffi.initialize(findLibrary());
     const handle = ffi.createEngine();
 
     // Prove the handle is genuinely live before destroying it.
@@ -193,8 +202,6 @@ describe("*_engine unknown/destroyed-handle contract (round 11 #6)", () => {
   it(
     "best-effort: destroyEngine() racing an in-flight streaming op never crashes and always ends in a valid result or the terminal envelope",
     async () => {
-      ffi.initialize(findLibrary());
-
       const ITERATIONS = 50;
       for (let i = 0; i < ITERATIONS; i++) {
         const handle = ffi.createEngine();
@@ -225,9 +232,23 @@ describe("*_engine unknown/destroyed-handle contract (round 11 #6)", () => {
   );
 
   it("final cleanup drains the shared isolate (idempotent)", async () => {
+    // Exactly one ffi.initialize() ran for this whole file (beforeAll), so
+    // this is the ONE balancing ffi.cleanup() that brings the native
+    // g_ref_count to zero and genuinely tears the isolate down (napi_cleanup
+    // Case 4, since no op is in flight) -- not a no-op decrement of a
+    // still-positive count left over from other tests. Prove that teardown
+    // actually happened, not just that the call resolved: a subsequent
+    // engine-level call must now observe "not initialized" rather than
+    // silently succeeding against a still-live isolate.
     await ffi.cleanup();
-    // Calling it again must remain a safe no-op, mirroring
-    // independent-engines.test.ts's final teardown discipline.
+
+    expect(() =>
+      ffi.runScriptEngine(UNKNOWN_HANDLE, "%dw 2.0\noutput application/json\n---\n1", buildInputsJson({}))
+    ).toThrow(/not initialized/i);
+
+    // A second cleanup() call after the ref count already reached zero must
+    // remain a safe no-op, mirroring independent-engines.test.ts's final
+    // teardown discipline.
     await expect(ffi.cleanup()).resolves.toBeUndefined();
   });
 });
