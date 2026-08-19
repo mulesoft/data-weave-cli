@@ -1,0 +1,72 @@
+# Task 2 Report: Python Binding Unit Characterization Coverage
+
+## Changed Files
+
+- `native-lib/python/src/dataweave/__init__.py`
+  - Replaced dynamic `__import__("os")` environment access with a normal private module import. Public API and native ABI are unchanged.
+- `native-lib/python/tests/unit/test_models.py`
+  - Characterizes `InputValue` encoding and `ExecutionResult` decoding/error behavior.
+- `native-lib/python/tests/unit/test_encoding.py`
+  - Characterizes implicit text encoding and explicit-input validation/metadata preservation.
+- `native-lib/python/tests/unit/test_native.py`
+  - Characterizes native response decoding, malformed input handling, candidate library path priority, and native-string cleanup on decoding failure.
+- `native-lib/python/tests/unit/test_streaming.py`
+  - Characterizes callback exception-to-abort conversion, large input chunk remainders, empty native metadata, attach failure, worker detachment behavior, and early stream closure with a fake native collaborator.
+- `native-lib/python/tests/unit/test_facade.py`
+  - Characterizes module singleton initialization/recreation and global cleanup.
+
+## Implementation Details
+
+- Added 24 `@pytest.mark.unit` tests that import the Python package from source and never instantiate a staged `dwlib`.
+- Fake native collaborators exercise ctypes callback boundaries without a native shared library. They verify callback exceptions return the documented nonzero abort status rather than escaping C callbacks.
+- Tests preserve the existing stream contract: early generator closure leaves `Stream.metadata` unset because no terminal metadata was consumed.
+- `DataWeave._decode_and_free` is exercised through a failing UTF-8 decode to verify native strings are freed from its existing `finally` block.
+- The only source adjustment replaces dynamic standard-library import resolution with a normal `os` import; no public names, signatures, or ABI fields changed.
+
+## Commands And Output
+
+1. Initial required unit command before pytest was installed:
+
+   ```text
+   python3 -m pytest tests/unit -m unit -v
+   /Library/Developer/CommandLineTools/usr/bin/python3: No module named pytest
+   ```
+
+2. After installing local test dependencies, the initial test-first run collected 25 tests: 21 passed and 4 failed. The expected failures identified the existing dict-explicit-input behavior, callback abort status, empty-native-response metadata, and missing `Stream.close` API. Tests were refined to characterize the existing behavior rather than alter public API.
+
+3. Final unit verification:
+
+   ```text
+   python3 -m pytest tests/unit -m unit -v
+   24 passed in 0.02s
+   ```
+
+4. Syntax verification:
+
+   ```text
+   python3 -m compileall -q src tests/unit
+   exit 0
+   ```
+
+5. Diff whitespace verification:
+
+   ```text
+   git diff --check
+   exit 0
+   ```
+
+6. Gradle task configuration check:
+
+   ```text
+   ./gradlew native-lib:pythonTest --dry-run
+   BUILD SUCCESSFUL
+   ```
+
+## Commit
+
+- Pending at report creation: `test: add Python binding unit characterization coverage`
+
+## Concerns
+
+- None for Task 2 scope.
+- The local Python installation initially lacked pytest. It was installed in the user site to execute the required unit lane; this did not alter tracked project files.

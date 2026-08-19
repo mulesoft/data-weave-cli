@@ -46,6 +46,7 @@ Call dataweave.cleanup() to release them earlier if needed.
 import base64
 import ctypes
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from queue import Queue
@@ -221,7 +222,7 @@ def _parse_streaming_result(meta: dict) -> StreamingResult:
 def _candidate_library_paths() -> list[Path]:
     paths: list[Path] = []
 
-    env_value = (__import__("os").environ.get(_ENV_NATIVE_LIB) or "").strip()
+    env_value = (os.environ.get(_ENV_NATIVE_LIB) or "").strip()
     if env_value:
         paths.append(Path(env_value))
 
