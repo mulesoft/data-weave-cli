@@ -102,11 +102,14 @@ typedef struct engine_bridge {
     // freeing was deferred to the last op draining on the owner thread.
     int in_flight;
     bool destroy_pending;
-    // round-9 (#1): true only when destroyEngine deferred (in_flight > 0); gates
-    // the deferred fn_destroy_engine registry removal in bridge_end_op. The
-    // bridge_env_cleanup defer path leaves this false so it never makes a
-    // registry call during env teardown.
-    bool destroy_via_destroy_engine;
+    // True when a destroy (via destroyEngine OR the env cleanup hook) was
+    // deferred because in_flight > 0; gates the deferred fn_destroy_engine
+    // registry removal in bridge_end_op. round-9 (#1) introduced this for the
+    // destroyEngine path; round-10 (#1) extended it to bridge_env_cleanup, which
+    // must ALSO remove the Java registry entry when its free is deferred --
+    // otherwise a resolver-backed engine's ScriptRuntime is left registered with
+    // a CallbackWeaveResourceResolver whose ctx points at the freed bridge (UAF).
+    bool deferred_registry_remove;
     struct engine_bridge* next;
 } engine_bridge_t;
 static engine_bridge_t* g_bridges = NULL;  // linked list, guarded by g_mutex
@@ -207,16 +210,28 @@ static engine_bridge_t* bridge_find(long long handle) {
 // env cleanup hook via napi_remove_env_cleanup_hook so Node never invokes it
 // on freed memory; the hook path itself (bridge_env_cleanup) must not remove
 // itself and calls this directly.
-// `do_registry_remove` is true only when destroyEngine deferred the registry
-// removal (fn_destroy_engine) because an op was in flight -- the last op to
-// drain performs it here, exactly once, before freeing the record. It runs on
-// whichever thread finalizes (the owner JS thread from the completion
-// sentinel, or destroyEngine's thread); fn_destroy_engine attaches its own
-// isolate thread, so it is not JS-thread-affine. Must be called WITHOUT
-// g_mutex held (it enters GraalVM and, for env_still_alive, calls N-API).
+// `do_registry_remove` is true when the caller must remove the Java registry
+// entry (fn_destroy_engine) for this handle before freeing the record: the
+// immediate destroyEngine path, or the deferred drain of either destroyEngine
+// (round-9 #1) or the env cleanup hook (round-10 #1). fn_destroy_engine is
+// called at most once per handle because destroyEngine and bridge_env_cleanup
+// are mutually exclusive (destroyEngine removes the hook). It runs on whichever
+// thread finalizes (the owner JS thread from the completion sentinel,
+// destroyEngine's thread, or the env-cleanup hook thread); fn_destroy_engine
+// attaches its own isolate thread, so it is not JS-thread-affine. Must be
+// called WITHOUT g_mutex held (it enters GraalVM and, for env_still_alive,
+// calls N-API).
 static void bridge_finalize(engine_bridge_t* b, bool env_still_alive, bool do_registry_remove) {
     if (b == NULL) return;
-    if (do_registry_remove && fn_destroy_engine) {
+    // g_isolate is read without g_mutex here -- the same lock-free g_isolate
+    // read napi_destroy_engine's fallback below already does, but with an added
+    // NULL check that makes a torn-down isolate a no-op instead of an unsafe
+    // fn_attach_thread(NULL, ...). This
+    // matters for the env-cleanup deferred-drain path, where the isolate may
+    // already be gone (main env tearing down after napi_cleanup tore it down);
+    // there the Java registry died with the isolate, so there is nothing to
+    // remove and skipping is correct.
+    if (do_registry_remove && fn_destroy_engine && g_isolate) {
         void* thread = NULL;
         if (fn_attach_thread(g_isolate, &thread) == 0) { fn_destroy_engine(thread, b->handle); fn_detach_thread(thread); }
     }
@@ -253,6 +268,11 @@ static void bridge_env_cleanup(void* arg) {
     // background thread could still dereference this bridge).
     if (b->in_flight > 0) {
         b->destroy_pending = true;
+        // round-10 (#1): the draining op must ALSO remove the Java registry
+        // entry (like destroyEngine's deferred path), or the resolver engine's
+        // ScriptRuntime is left registered with a resolver ctx pointing at the
+        // freed bridge. Set the deferred-registry-removal flag here.
+        b->deferred_registry_remove = true;
         uv_mutex_unlock(&g_mutex);
         return;
     }
@@ -262,7 +282,15 @@ static void bridge_env_cleanup(void* arg) {
     // call napi_remove_env_cleanup_hook for ourselves here. The env is still
     // alive here -- that is the whole point of this hook's design (see above) --
     // so the napi_ref deletion in bridge_finalize is legal.
-    bridge_finalize(b, /*env_still_alive=*/true, /*do_registry_remove=*/false);
+    // round-10 (#1): remove the Java registry entry too (do_registry_remove=true).
+    // This hook only ever fires for a resolver-backed engine that was never
+    // passed to destroyEngine (destroyEngine removes this hook), so its
+    // initialize() ref was never released either -> the isolate is still live
+    // and fn_destroy_engine's fresh-thread attach is legal (bridge_finalize
+    // guards on g_isolate for the main-env-after-isolate-teardown corner). Not
+    // removing it would leave a CallbackWeaveResourceResolver whose ctx is the
+    // freed bridge -> UAF on a later invocation of this handle.
+    bridge_finalize(b, /*env_still_alive=*/true, /*do_registry_remove=*/true);
 }
 
 // Begin a streaming/transform op: look up the engine's record and mark one op in
@@ -295,11 +323,12 @@ static void bridge_end_op(engine_bridge_t* b, bool env_still_alive) {
     uv_mutex_lock(&g_mutex);
     b->in_flight--;
     bool finalize = (b->destroy_pending && b->in_flight == 0);
-    bool remove_registry = finalize && b->destroy_via_destroy_engine;
+    bool remove_registry = finalize && b->deferred_registry_remove;
     uv_mutex_unlock(&g_mutex);
-    // remove_registry is true only when destroyEngine deferred the registry
-    // removal while this op was in flight (round-9 #1); the env-cleanup-hook
-    // defer path leaves it false so no registry call is made during env teardown.
+    // remove_registry is true when either destroyEngine (round-9 #1) or the env
+    // cleanup hook (round-10 #1) deferred the registry removal while this op was
+    // in flight; the draining op performs it exactly once here. bridge_finalize
+    // guards the call on g_isolate, so a teardown that raced ahead is a no-op.
     if (finalize) bridge_finalize(b, env_still_alive, /*do_registry_remove=*/remove_registry);
 }
 
@@ -1724,9 +1753,9 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
     engine_bridge_t** pp = &g_bridges; engine_bridge_t* found = NULL;
     while (*pp != NULL) { if ((*pp)->handle == handle) { found = *pp; *pp = found->next; break; } pp = &(*pp)->next; }
     bool defer = false;
-    // destroy_via_destroy_engine gates the deferred registry removal in
-    // bridge_end_op (see Step 5); set it together with destroy_pending here.
-    if (found != NULL && found->in_flight > 0) { found->destroy_pending = true; found->destroy_via_destroy_engine = true; defer = true; }
+    // deferred_registry_remove gates the deferred registry removal in
+    // bridge_end_op; set it together with destroy_pending here.
+    if (found != NULL && found->in_flight > 0) { found->destroy_pending = true; found->deferred_registry_remove = true; defer = true; }
     uv_mutex_unlock(&g_mutex);
 
     if (found != NULL) {

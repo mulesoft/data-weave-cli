@@ -276,11 +276,16 @@ let cleanupStarted = false;
  *   CAN run async work (Node keeps the loop alive until it settles), so it
  *   drains any in-flight streaming/transform operation gracefully. This is
  *   the common case.
- * - `exit` fires unconditionally but runs strictly synchronously — it is
- *   the last-ditch fallback for `process.exit()`, uncaught exceptions, and
- *   fatal signals, none of which trigger `beforeExit`. It can only perform
- *   a best-effort synchronous cleanup, so an in-flight async operation may
- *   still be abandoned in that narrow set of cases.
+ * - `exit` runs strictly synchronously and is only a best-effort fallback for
+ *   the paths that skip `beforeExit` — `process.exit()`, an uncaught
+ *   exception, and normal process termination. Because it is synchronous it
+ *   can only run the fast cleanup path, so an in-flight async operation may be
+ *   abandoned. Node does NOT emit `exit` (nor `beforeExit`) for termination
+ *   signals such as SIGTERM/SIGINT/SIGKILL, nor for every fatal failure mode,
+ *   so this is not a guarantee: callers that require graceful shutdown must
+ *   register and await their own handlers for the catchable signals (e.g.
+ *   `process.on("SIGTERM", async () => { await cleanup(); process.exit(0); })`);
+ *   SIGKILL cannot be caught, so no in-process cleanup can run for it.
  * The `cleanupStarted` guard ensures only one of the two hooks actually
  * runs cleanup for a given shutdown.
  */
