@@ -34,7 +34,7 @@
 
 ## Commit
 
-- Pending creation: `test: migrate Python binding checks to pytest`
+- `9cf376d test: migrate Python binding checks to pytest`
 
 ## Concerns
 
