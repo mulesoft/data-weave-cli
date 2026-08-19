@@ -155,7 +155,24 @@ tasks.register('pythonTest', Exec) {
 
   dependsOn tasks.named('stagePythonNativeLib')
   workingDir("${projectDir}/python")
-  commandLine(pythonExe, 'tests/test_dataweave_module.py')
+  def testReportsDir = layout.buildDirectory.dir('test-results/python')
+  def coverageReportsDir = layout.buildDirectory.dir('reports/coverage/python')
+  outputs.file(testReportsDir.map { it.file('junit.xml') })
+  outputs.file(coverageReportsDir.map { it.file('coverage.xml') })
+  doFirst {
+    testReportsDir.get().asFile.mkdirs()
+    coverageReportsDir.get().asFile.mkdirs()
+  }
+  commandLine(
+    pythonExe,
+    '-m',
+    'pytest',
+    '-m',
+    'unit or integration',
+    '--junitxml', testReportsDir.map { it.file('junit.xml') }.get().asFile,
+    '--cov=dataweave',
+    '--cov-report=xml:' + coverageReportsDir.map { it.file('coverage.xml') }.get().asFile,
+  )
 }
 
 // --- Node.js native package tasks ---
