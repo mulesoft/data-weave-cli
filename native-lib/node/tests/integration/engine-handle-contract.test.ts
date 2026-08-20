@@ -174,33 +174,29 @@ describe("*_engine unknown/destroyed-handle contract (round 11 #6)", () => {
     expect(transformChunks).toHaveLength(0);
   });
 
-  // Best-effort probabilistic guard (green on fixed code, cannot false-fail
-  // on it) -- matching the documented posture of rounds 5-10's cross-Worker
-  // races (see run-admission.test.ts / admission-during-teardown.test.ts):
-  // the exact interleaving of a concurrent destroyEngine() against the
-  // admission window of an in-flight streaming/transform op on the SAME
-  // handle is not deterministically forceable from JS.
+  // Same-thread post-admission ordering (deterministic, not best-effort):
+  // destroyEngine() is fired synchronously immediately after admission of the
+  // op (right after starting runScriptStreamingEngine, before awaiting it).
+  // The round-11 #2/#3 pin is taken atomically at admission, under g_mutex, in
+  // bridge_begin_op_locked -- so this same-thread ordering deterministically
+  // lands AFTER the pin is already held. That means the op MUST complete
+  // successfully with complete chunks; there is no closed set of "success or
+  // Unknown-engine-handle envelope" to tolerate here, because the envelope can
+  // only arise if the pin were NOT held at admission. Requiring success (and
+  // no longer accepting the envelope) makes this test fail if a future
+  // regression drops the admission-time pin, instead of silently passing by
+  // returning the accepted terminal envelope.
   //
-  // This harness has no existing `worker_threads` pattern to reuse (checked:
-  // no test file under tests/integration uses `worker_threads`/`Worker`), and
-  // spinning up a real Worker here would still race the SAME non-deterministic
-  // window -- it would not make the interleaving forceable, only add overhead
-  // and flakiness risk without truer coverage. Instead this uses the closest
-  // deterministic proxy available on a single thread: destroyEngine() is
-  // fired synchronously immediately after admission of the op (right after
-  // starting runScriptStreamingEngine, before awaiting it), which is exactly
-  // when a genuinely concurrent Worker's destroyEngine() would most plausibly
-  // land relative to the round-11 #2/#3 pin taken under g_mutex at admission.
-  // Because the pin is taken atomically at admission, this same-thread
-  // ordering deterministically lands AFTER the pin, so on fixed code every
-  // iteration is expected to observe a valid successful result (the pin keeps
-  // the engine alive for the run) -- but the test tolerates either outcome
-  // (success or the terminal Unknown-engine-handle envelope) and only fails
-  // if the process crashes or an iteration returns something outside that
-  // closed set, so it cannot false-fail on the fix and stays meaningful if
-  // future changes narrow the pinned window.
+  // Genuinely concurrent cross-thread interleavings (a real Worker racing
+  // destroyEngine() against admission on a different thread) are a distinct,
+  // non-deterministic window that this same-thread ordering does not exercise
+  // and cannot stand in for. That case remains covered best-effort by the
+  // forthcoming Worker-based suite (Task 8), matching the documented posture
+  // of rounds 5-10's cross-Worker races (see run-admission.test.ts /
+  // admission-during-teardown.test.ts) -- it is not tolerated away in this
+  // test.
   it(
-    "best-effort: destroyEngine() racing an in-flight streaming op never crashes and always ends in a valid result or the terminal envelope",
+    "destroyEngine() fired right after admission of an in-flight streaming op deterministically succeeds (pin held at admission)",
     async () => {
       const ITERATIONS = 50;
       for (let i = 0; i < ITERATIONS; i++) {
@@ -212,20 +208,18 @@ describe("*_engine unknown/destroyed-handle contract (round 11 #6)", () => {
           buildInputsJson({}),
           (chunk) => chunks.push(chunk)
         );
-        // Fire the racing destroy as close to the admission window as this
-        // single thread allows: immediately after starting the op, before
-        // awaiting it.
+        // Fire destroy immediately after admission, before awaiting. The round-11
+        // pin is taken atomically at admission (under g_mutex, in
+        // bridge_begin_op_locked), so this ordering lands AFTER the pin and the
+        // op MUST complete successfully. Requiring success (not tolerating the
+        // Unknown-engine-handle envelope) makes this test fail if a regression
+        // drops the admission-time pin.
         expect(() => ffi.destroyEngine(handle)).not.toThrow();
 
         const raw = await resultPromise;
         const parsed = JSON.parse(raw);
-
-        if (parsed.success) {
-          expect(JSON.parse(Buffer.concat(chunks).toString("utf-8"))).toEqual([1, 2, 3]);
-        } else {
-          expect(parsed).toEqual(UNKNOWN_ENVELOPE);
-          expect(chunks).toHaveLength(0);
-        }
+        expect(parsed.success).toBe(true);
+        expect(JSON.parse(Buffer.concat(chunks).toString("utf-8"))).toEqual([1, 2, 3]);
       }
     },
     60000
