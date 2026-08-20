@@ -13,7 +13,7 @@ import dataweave
 
 def _tck_discovery():
     from tck.case_loader import discover_cases
-    from tck.ignore_list import exclusion_for
+    from tck.ignore_list import EXCLUDED_CASES, STRUCTURAL_MODULE_CASES, validate_exclusions
 
     suites_dir = Path(__file__).resolve().parents[2] / "node" / "tests" / "tck" / "suites"
     discovery = discover_cases(suites_dir)
@@ -22,12 +22,15 @@ def _tck_discovery():
         for discovered_case in discovery.cases
         for scenario in discovered_case.scenarios
     ]
+    errors = validate_exclusions(EXCLUDED_CASES, scenarios)
+    if errors:
+        raise pytest.UsageError("Invalid active TCK exclusions: " + "; ".join(errors))
     exclusions = [
-        scenario
-        for scenario in scenarios
-        if exclusion_for(scenario.identifier.rsplit(":", 1)[0])
+        scenario for scenario in scenarios
+        if scenario.identifier.rsplit(":", 1)[0] in EXCLUDED_CASES
     ]
-    return discovery, scenarios, exclusions
+    structural_modules = set(discovery.structural_case_identifiers) & STRUCTURAL_MODULE_CASES
+    return discovery, scenarios, exclusions, structural_modules
 
 
 def pytest_configure(config):
@@ -38,7 +41,7 @@ def pytest_configure(config):
 def pytest_report_header(config):
     if not hasattr(config, "_tck_discovery"):
         return None
-    discovery, scenarios, exclusions = config._tck_discovery
+    discovery, scenarios, exclusions, structural_modules = config._tck_discovery
     categories = {}
     from tck.ignore_list import exclusion_for
 
@@ -50,14 +53,15 @@ def pytest_report_header(config):
     ) or "none"
     return (
         f"TCK: discovered={len(scenarios)}, structural-skips={discovery.structural_skips}, "
-        f"categorized-exclusions={len(exclusions)} ({category_totals})"
+        f"structural-module-cases={len(structural_modules)}, "
+        f"active-exclusions={len(exclusions)} ({category_totals})"
     )
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if not hasattr(config, "_tck_discovery"):
         return
-    discovery, scenarios, exclusions = config._tck_discovery
+    discovery, scenarios, exclusions, structural_modules = config._tck_discovery
     reports = [
         report
         for reports in terminalreporter.stats.values()
@@ -67,22 +71,35 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     ]
     totals = {
         outcome: sum(report.outcome == outcome for report in reports)
-        for outcome in ("passed", "failed")
+        for outcome in ("passed", "failed", "skipped")
     }
+    executed = totals["passed"] + totals["failed"]
     terminalreporter.write_line(
         "TCK totals: "
-        f"discovered={len(scenarios)}, structural-skips={discovery.structural_skips}, "
-        f"categorized-exclusions={len(exclusions)}, passed={totals['passed']}, "
+        f"selected={len(scenarios)}, structural-skips={discovery.structural_skips}, "
+        f"structural-module-cases={len(structural_modules)}, "
+        f"executed={executed}, active-exclusions={totals['skipped']}, passed={totals['passed']}, "
         f"failed={totals['failed']}"
     )
 
 
 @pytest.fixture(autouse=True)
-def clean_dataweave_runtime():
+def clean_dataweave_runtime(request):
     """Keep module-level isolate state from leaking between integration tests."""
+    if request.node.get_closest_marker("tck"):
+        yield
+        return
     dataweave.cleanup()
     yield
     dataweave.cleanup()
+
+
+@pytest.fixture(scope="session")
+def tck_runtime():
+    """Own one isolate for the TCK session; deferred writers cannot be torn down per case."""
+    runtime = dataweave.DataWeave()
+    runtime.initialize()
+    yield runtime
 
 
 @pytest.fixture

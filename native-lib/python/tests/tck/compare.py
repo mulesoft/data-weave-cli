@@ -67,7 +67,10 @@ def _xml_value(element: ElementTree.Element) -> Any:
         element.tag,
         tuple(sorted(element.attrib.items())),
         (element.text or "").strip(),
-        tuple(_xml_value(child) for child in element),
+        tuple(
+            (_xml_value(child), (child.tail or "").strip())
+            for child in element
+        ),
     )
 
 

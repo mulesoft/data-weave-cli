@@ -40,6 +40,7 @@ class DiscoveredCase:
 class Discovery:
     cases: List[DiscoveredCase]
     structural_skips: int
+    structural_case_identifiers: List[str]
 
 
 def extension_of(name: str) -> str:
@@ -49,20 +50,23 @@ def extension_of(name: str) -> str:
 def discover_cases(suites_dir: Path) -> Discovery:
     cases: List[DiscoveredCase] = []
     structural_skips = 0
+    structural_case_identifiers: List[str] = []
     if not suites_dir.exists():
-        return Discovery(cases, structural_skips)
+        return Discovery(cases, structural_skips, structural_case_identifiers)
 
     for suite_dir in sorted(path for path in suites_dir.iterdir() if path.is_dir()):
         for case_dir in sorted(path for path in suite_dir.iterdir() if path.is_dir()):
             if not case_dir.exists():
                 structural_skips += 1
+                structural_case_identifiers.append(f"{suite_dir.name}/{case_dir.name}")
                 continue
             scenarios = _load_case(suite_dir.name, case_dir)
             if scenarios is None:
                 structural_skips += 1
+                structural_case_identifiers.append(f"{suite_dir.name}/{case_dir.name}")
             else:
                 cases.append(DiscoveredCase(f"{suite_dir.name}/{case_dir.name}", scenarios))
-    return Discovery(cases, structural_skips)
+    return Discovery(cases, structural_skips, structural_case_identifiers)
 
 
 def _load_case(suite_name: str, case_dir: Path) -> Optional[List[TckScenario]]:
