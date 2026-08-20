@@ -139,10 +139,15 @@ describe("worker_threads engine lifecycle (round 12 #9)", () => {
 
   it("Worker.terminate() mid-life leaves the main thread able to initialize and run", async () => {
     const body = `
-      const { workerData } = require('node:worker_threads');
+      const { parentPort, workerData } = require('node:worker_threads');
       const addon = require(workerData.addonPath);
       addon.initialize(workerData.libPath);
       addon.createEngineWithResolver((p) => null);
+      // Signal readiness only once the engine is actually live, so the parent
+      // terminates a worker that genuinely has a live engine rather than
+      // racing a fixed sleep against initialize()/createEngineWithResolver on
+      // a possibly-loaded box (final review round 12 #3).
+      parentPort.postMessage('ready');
       // Spin so the parent can terminate() us mid-life (no message posted).
       setInterval(() => {}, 10);
     `;
@@ -150,8 +155,23 @@ describe("worker_threads engine lifecycle (round 12 #9)", () => {
       eval: true,
       workerData: { addonPath: ADDON_PATH, libPath: LIB_PATH },
     });
-    // Give it time to initialize + create the engine, then terminate abruptly.
-    await new Promise((r) => setTimeout(r, 500));
+    // A throw in the worker body (e.g. a bad addon path) must fail this test
+    // cleanly rather than crash the vitest process -- the ad hoc Worker here,
+    // unlike runWorker() above, previously had no error listener wired up
+    // (final review round 12 #2).
+    const workerError = new Promise<never>((_, reject) => w.once("error", reject));
+    // Avoid an unhandled-rejection warning if "error" fires (or would fire)
+    // after the race below has already settled via the "ready" path.
+    workerError.catch(() => {});
+    // Wait for the worker to report the engine is live, racing against a
+    // generous timeout so a slow box doesn't false-fail this test, then
+    // terminate abruptly.
+    const ready = new Promise<void>((resolve) => w.once("message", (m) => { if (m === "ready") resolve(); }));
+    await Promise.race([
+      ready,
+      workerError,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("worker did not signal ready in time")), 10000)),
+    ]);
     await w.terminate();
 
     ffi.initialize(LIB_PATH);

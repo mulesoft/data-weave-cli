@@ -281,6 +281,14 @@ let cleanupStarted = false;
 // violating cleanup()'s "resolves once native teardown has finished" contract
 // for the last reference. (round 12 #5)
 let cleanupPromise: Promise<void> | null = null;
+// The instance that `cleanupPromise` is currently draining. Needed because
+// coalescing must NOT be keyed on the module-global promise alone: if a
+// caller revives the singleton (via run()/getGlobalInstance()) while a prior
+// drain is still in flight, a subsequent cleanup() must clean the freshly
+// revived instance rather than returning the stale promise as if it had
+// covered it too -- otherwise the revived instance's native ref is silently
+// leaked (final-review round 12 #1, fixing round 12 Task 6's regression).
+let cleaningInstance: DataWeave | null = null;
 // Process exit hooks are registered exactly once for the lifetime of the
 // module, NOT per singleton. Re-creating the singleton after cleanup() must
 // not attach a second pair of listeners (that accumulates until Node emits
@@ -387,20 +395,49 @@ export function runTransform(
  * singleton is created lazily on the next convenience-API call.
  */
 export async function cleanup(): Promise<void> {
-  // Coalesce overlapping calls onto one drain (round 12 #5).
-  if (cleanupPromise) return cleanupPromise;
+  // Coalesce overlapping calls onto one drain (round 12 #5) -- but ONLY when
+  // nothing new has been revived since that drain started. If `globalInstance`
+  // is still the same instance the in-flight promise is draining, or is null
+  // (nobody has revived since), it's safe to piggyback on the existing
+  // promise. If a DIFFERENT instance is now the singleton (a caller called
+  // run() and revived it while the old drain was still in flight), that new
+  // instance has never been handed to a cleanup() call -- returning the old
+  // promise here would resolve as if it had been cleaned when it hasn't,
+  // leaking its native ref for the rest of the process (final-review round 12
+  // #1). Fall through and drain the current instance instead.
+  if (cleanupPromise && (globalInstance === null || globalInstance === cleaningInstance)) {
+    return cleanupPromise;
+  }
   if (!globalInstance) return;
   const instance = globalInstance;
   globalInstance = null;
+  // Chosen semantics for overlapping different-instance drains: coalescing
+  // tracks only the MOST RECENT drain. An older drain that is still in flight
+  // when a newer one starts is not stomped -- it keeps running against its own
+  // promise, which whoever started it already holds and will await -- but it
+  // stops being the thing later cleanup() calls coalesce onto. Two distinct
+  // instances tearing down concurrently is fine: each owns its own engine
+  // handle and native ref, exactly like two DataWeave instances calling
+  // .cleanup() independently. This keeps the invariant that matters: no
+  // cleanup() call ever returns as if it drained an instance it didn't.
+  cleaningInstance = instance;
   cleanupPromise = instance.cleanup();
   try {
     await cleanupPromise;
   } finally {
-    cleanupPromise = null;
-    // Reset the exit-hook guard only after the drain has fully completed, so a
-    // revived singleton gets its own live hooks for the next real exit. Must
-    // stay last: resetting earlier could let a concurrent `exit` firing on this
-    // same shutdown re-enter cleanup while the async drain above is in flight.
+    // Only clear the shared coalescing state if it's still ours to clear --
+    // i.e. nobody has started a newer drain (for a newer revived instance)
+    // that has since taken over `cleanupPromise`/`cleaningInstance`. Guards
+    // against this drain's finally clobbering a later drain's in-flight state.
+    if (cleaningInstance === instance) {
+      cleanupPromise = null;
+      cleaningInstance = null;
+    }
+    // Reset the exit-hook guard only after THIS drain has fully completed, so
+    // a revived singleton gets its own live hooks for the next real exit.
+    // Must stay last: resetting earlier could let a concurrent `exit` firing
+    // on this same shutdown re-enter cleanup while the async drain above is
+    // in flight.
     cleanupStarted = false;
   }
 }

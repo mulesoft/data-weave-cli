@@ -171,3 +171,56 @@ describe("module-level cleanup() coalescing (round 12 Task 6)", () => {
     await cleanup();
   });
 });
+
+// Final review round 12 #1: Task 6's coalescing guard (`if (cleanupPromise)
+// return cleanupPromise;`) is unconditional, so a caller that revives the
+// singleton (via run()) while an OLDER drain is still in flight gets the OLD
+// drain's promise handed back by the newer cleanup() call -- the freshly
+// revived instance is never hooked up to any doCleanup()/ffi.cleanup() call
+// and its native ref leaks for the rest of the process. Pinned via the same
+// ref-count proxy as the "napi_cleanup refactor" test above: after both
+// cleanup() calls settle, the isolate's ref count must have actually returned
+// to zero (not be left at 1 by a leaked, unrevived-then-abandoned instance).
+describe("module-level cleanup() does not orphan a revived singleton (final review round 12 #1)", () => {
+  it("cleanup() started during an in-flight drain cleans the CURRENT (revived) singleton, not the stale one", async () => {
+    // (a) Create the singleton (instance A).
+    expect(run("%dw 2.0\noutput application/json\n---\n1 + 1").success).toBe(true);
+
+    // (b) Start draining A WITHOUT awaiting.
+    const p1 = cleanup();
+
+    // (c) Revive a FRESH singleton (instance B) while A's drain is in flight.
+    expect(run("%dw 2.0\noutput application/json\n---\n2 + 2").success).toBe(true);
+
+    // (d) Call cleanup() again. Under the bug this returns p1 verbatim,
+    // leaving B's native ref uncleaned once both promises settle.
+    const p2 = cleanup();
+    await Promise.all([p1, p2]);
+
+    // (e) Prove B was actually torn down via the isolate's ref count, the same
+    // technique as "napi_cleanup refactor preserves last-release teardown"
+    // above: do one extra balanced initialize()/cleanup() pair. If the ref
+    // count was already back to zero (both A and B cleaned), this nets back
+    // to zero and a subsequent raw engine call observes "not initialized". If
+    // B's ref instead leaked, the ref count is already >=1 going into this
+    // balanced pair, so it nets to >=1 afterward and the isolate stays alive
+    // -- the subsequent call would NOT report "not initialized".
+    ffi.initialize(findLibrary());
+    const h = ffi.createEngine();
+    const envelope = JSON.parse(
+      ffi.runScriptEngine(h, "%dw 2.0\noutput application/json\n---\n5 + 5", buildInputsJson({}))
+    );
+    expect(envelope.success).toBe(true);
+    expect(JSON.parse(Buffer.from(envelope.result, "base64").toString("utf-8"))).toBe(10);
+    ffi.destroyEngine(h);
+    await ffi.cleanup(); // Balances the initialize() just above, ONLY.
+
+    expect(() =>
+      ffi.runScriptEngine(Number.MAX_SAFE_INTEGER, "%dw 2.0\noutput application/json\n---\n1", buildInputsJson({}))
+    ).toThrow(/not initialized/i);
+
+    // The singleton revives cleanly again afterward -- no wedged module state.
+    expect(run("%dw 2.0\noutput application/json\n---\n3 + 3").success).toBe(true);
+    await cleanup();
+  });
+});
