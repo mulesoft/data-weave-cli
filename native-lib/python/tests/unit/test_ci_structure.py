@@ -30,6 +30,11 @@ def test_python_artifact_owns_test_dependencies_and_tck_junit_upload():
 
     assert "Install Python test dependencies" not in foundation
     assert "native-lib/python[test]" in action
+    assert "platform:" in action
+    assert "python-tck-junit-${{ inputs.platform }}" in action
+    assert action.index("Create Native Lib Python Wheel") < action.index("Run Python TCK Conformance")
+    assert action.index("Upload Python wheel (artifact)") < action.index("Run Python TCK Conformance")
+    assert action.index("Upload Python wheel to release") < action.index("Run Python TCK Conformance")
     assert action.index("Run Python TCK Conformance") < action.index("Upload Python TCK JUnit")
     assert "if: always() && inputs.run-tck == 'true'" in action
     assert "native-lib/python/build/test-results/pythonTck.xml" in action
@@ -47,3 +52,19 @@ def test_master_tck_stages_the_shared_corpus_once_before_python_and_node():
     assert "native-lib:stageTckSuites" not in node_action
     assert workflow.index("Stage TCK corpus") < workflow.index("- name: Python")
     assert workflow.index("Stage TCK corpus") < workflow.index("- name: Node")
+
+
+@pytest.mark.unit
+def test_foundation_skips_python_tests_and_master_aggregates_binding_failures():
+    root = Path(__file__).resolve().parents[4]
+    foundation = (root / ".github/actions/build-foundation/action.yml").read_text()
+    workflow = (root / ".github/workflows/main.yml").read_text()
+
+    assert "-PskipPythonTests=true" in foundation
+    assert "id: python" in workflow
+    assert "id: node" in workflow
+    assert workflow.count("continue-on-error: true") >= 2
+    assert "Fail if binding artifacts failed" in workflow
+    assert "steps.python.outcome == 'failure'" in workflow
+    assert "steps.node.outcome == 'failure'" in workflow
+    assert "platform: ${{ matrix.script_name }}" in workflow

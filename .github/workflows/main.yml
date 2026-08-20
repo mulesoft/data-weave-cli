@@ -64,21 +64,31 @@ jobs:
         shell: bash
 
       - name: Python
+        id: python
         uses: ./.github/actions/python
+        continue-on-error: true
         with:
           native-version: ${{ env.NATIVE_VERSION }}
           break-system-packages: 'true'
           run-tck: ${{ github.ref == 'refs/heads/master' }}
+          platform: ${{ matrix.script_name }}
           publish: 'artifact'
 
       - name: Node
+        id: node
         uses: ./.github/actions/node
+        continue-on-error: true
         with:
           native-version: ${{ env.NATIVE_VERSION }}
           run-tck: ${{ github.ref == 'refs/heads/master' }}
           publish: 'artifact'
           arch: ${{ env.ARCH }}
           script-name: ${{ matrix.script_name }}
+
+      - name: Fail if binding artifacts failed
+        if: always() && (steps.python.outcome == 'failure' || steps.node.outcome == 'failure')
+        run: exit 1
+        shell: bash
 
       - name: Native library
         uses: ./.github/actions/native-lib

@@ -17,6 +17,23 @@
   Python and Node artifact actions. Neither binding action restages it; local
   `pythonTck` remains usable after an explicit `stageTckSuites` invocation.
 
+## Fix Round 2
+
+- The foundation Gradle build now passes `-PskipPythonTests=true`, leaving the
+  Python artifact action as the only CI owner that installs Python dependencies
+  and runs `native-lib:pythonTest`.
+- The Python wheel is built and uploaded before the optional Python TCK. This
+  preserves the package artifact when TCK conformance fails, while the TCK
+  result still determines the final job outcome.
+- The Python and Node artifact steps use `continue-on-error: true`, so a failed
+  binding lane does not prevent the other lane from executing. A following
+  `always()` aggregation step fails the job when either binding lane failed.
+- Python TCK JUnit artifacts include the workflow matrix platform token:
+  `python-tck-junit-${{ inputs.platform }}`, preventing cross-platform upload
+  name collisions.
+- The strict xfail baseline remains unchanged: only the three accepted named
+  mismatches are strict xfails; any new mismatch and any XPASS fail the TCK.
+
 ## Changes
 
 - `.github/actions/python/action.yml` installs the Python `test` extra, runs
@@ -51,9 +68,21 @@
    selected scenarios passed or used independently categorized exclusions.
 5. YAML parsing and `git diff --check` are recorded with the final change.
 
+### Fix Round 2 Verification
+
+1. RED: `python3 -m pytest tests/unit/test_ci_structure.py -m unit -v` failed
+   with the missing platform input/artifact name and missing
+   `-PskipPythonTests=true` foundation flag.
+2. GREEN: the same focused CI structure test passed with `5 passed` after the
+   workflow, action, and structure-test updates.
+3. YAML parsing for the changed workflow/actions and `git diff --check` passed.
+4. Foundation-equivalent dry run/build command passed:
+   `./gradlew --stacktrace --no-problems-report -PskipNodeTests=true
+   -PskipPythonTests=true -PskipTCKTests=true build`.
+
 ## Commit
 
-- Pending Fix Round 1 commit: `ci: make Python TCK mismatches strict xfails`
+- Pending Fix Round 2 commit: `ci: harden binding artifact sequencing`
 
 ## Concerns
 
