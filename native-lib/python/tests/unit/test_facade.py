@@ -69,7 +69,7 @@ def test_cleanup_is_noop_without_global_runtime():
 
 
 @pytest.mark.unit
-def test_global_cleanup_clears_failed_runtime_and_allows_recreation(monkeypatch):
+def test_global_cleanup_retains_failed_runtime_for_retry(monkeypatch):
     created = []
 
     class FakeRuntime:
@@ -89,5 +89,5 @@ def test_global_cleanup_clears_failed_runtime_and_allows_recreation(monkeypatch)
         dataweave.cleanup()
 
     second = dataweave._get_global_instance()
-    assert second is not first
+    assert second is first
     dataweave._global_instance = None

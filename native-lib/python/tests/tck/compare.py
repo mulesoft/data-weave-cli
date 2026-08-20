@@ -85,6 +85,12 @@ def _xml_child_value(node) -> Any:
 
 
 def _json_equal(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return type(actual) is type(expected) and actual == expected
+    if _is_number(actual) and _is_number(expected):
+        return actual == expected
+    if type(actual) is not type(expected):
+        return False
     if isinstance(actual, str) and isinstance(expected, str):
         return _normalize_eol(actual) == _normalize_eol(expected)
     if isinstance(actual, list) and isinstance(expected, list):
@@ -96,6 +102,10 @@ def _json_equal(actual: Any, expected: Any) -> bool:
             _json_equal(actual[key], expected[key]) for key in actual
         )
     return actual == expected
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _python_encoding(charset: Optional[str]) -> str:

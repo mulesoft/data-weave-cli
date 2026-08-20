@@ -52,7 +52,7 @@ def test_python_artifact_owns_test_dependencies_and_tck_junit_upload():
     assert action.index("Upload Python wheel to release") < action.index("Run Python TCK Conformance")
     assert action.index("Run Python TCK Conformance") < action.index("Upload Python TCK JUnit")
     assert named_step_if(action, "Run Python TCK Conformance") == "always() && inputs.run-tck == 'true'"
-    assert "native-lib/python/build/test-results/pythonTck.xml" in action
+    assert "native-lib/build/test-results/pythonTck.xml" in action
 
 
 @pytest.mark.unit

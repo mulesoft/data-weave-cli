@@ -83,5 +83,5 @@ runs:
       uses: actions/upload-artifact@v7.0.1
       with:
         name: python-tck-junit-${{ inputs.platform }}
-        path: native-lib/python/build/test-results/pythonTck.xml
+        path: native-lib/build/test-results/pythonTck.xml
         if-no-files-found: error

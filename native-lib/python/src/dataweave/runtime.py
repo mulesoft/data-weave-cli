@@ -1,7 +1,7 @@
 import ctypes
 import json
 from queue import Empty, Full, Queue
-from threading import Event, Thread
+from threading import Event, Lock, Thread, current_thread
 from typing import Any, Dict, Generator, Iterable, Optional
 
 from .encoding import normalize_input_value, parse_native_encoded_response, parse_streaming_result
@@ -29,12 +29,42 @@ class DataWeave:
 
     def __init__(self, lib_path: Optional[str] = None):
         self._native = NativeRuntime(lib_path)
+        self._stream_workers = set()
+        self._stream_workers_lock = Lock()
+        self._cleaning_up = False
 
     def initialize(self):
         self._native.initialize()
 
     def cleanup(self):
-        self._native.cleanup()
+        workers, lock = self._worker_registry()
+        with lock:
+            if workers:
+                raise DataWeaveError("Cannot clean up DataWeave runtime while an active streaming worker is attached.")
+            self._cleaning_up = True
+        try:
+            self._native.cleanup()
+        finally:
+            with lock:
+                self._cleaning_up = False
+
+    def _worker_registry(self):
+        if not hasattr(self, "_stream_workers"):
+            self._stream_workers = set()
+            self._stream_workers_lock = Lock()
+        return self._stream_workers, self._stream_workers_lock
+
+    def _register_stream_worker(self, worker: Thread) -> None:
+        workers, lock = self._worker_registry()
+        with lock:
+            if getattr(self, "_cleaning_up", False):
+                raise DataWeaveError("Cannot start a streaming worker while the DataWeave runtime is being cleaned up.")
+            workers.add(worker)
+
+    def _unregister_stream_worker(self, worker: Optional[Thread] = None) -> None:
+        workers, lock = self._worker_registry()
+        with lock:
+            workers.discard(worker or current_thread())
 
     def _require_initialized(self, supported: bool, api_name: str) -> None:
         if not self._native.initialized:
@@ -68,9 +98,9 @@ class DataWeave:
         try:
             ptr = self._native.run_script_callback(self._native.thread, script.encode("utf-8"), self._inputs_json(inputs), write_cb)
             raw = self._native.decode_and_free(ptr)
+            return parse_streaming_result(json.loads(raw) if raw else {"success": False, "error": "Empty response"})
         except Exception as error:
             raise DataWeaveError(f"Failed to execute callback streaming: {error}")
-        return parse_streaming_result(json.loads(raw) if raw else {"success": False, "error": "Empty response"})
 
     def _stream_worker(self, invoke, cancelled: Event) -> Generator[bytes, None, StreamingResult]:
         sentinel = object()
@@ -119,11 +149,17 @@ class DataWeave:
                         if primary_error is None and not primary_outcome:
                             publish(CleanupFailure(error))
                 publish(sentinel)
+                self._unregister_stream_worker()
 
         # Python cannot cancel a native call. Daemon workers keep an abandoned
         # call from extending interpreter lifetime after bounded cancellation.
         worker = Thread(target=worker_main, name="dw-streaming-worker", daemon=True)
-        worker.start()
+        self._register_stream_worker(worker)
+        try:
+            worker.start()
+        except Exception:
+            self._unregister_stream_worker(worker)
+            raise
         metadata = None
         try:
             while True:
@@ -216,9 +252,9 @@ class DataWeave:
         try:
             ptr = self._native.run_script_input_output_callback(self._native.thread, script.encode("utf-8"), self._inputs_json(inputs), input_name.encode("utf-8"), input_mime_type.encode("utf-8"), input_charset.encode("utf-8") if input_charset else None, read_cb, write_cb)
             raw = self._native.decode_and_free(ptr)
+            return parse_streaming_result(json.loads(raw) if raw else {"success": False, "error": "Empty response"})
         except Exception as error:
             raise DataWeaveError(f"Failed to execute callback input/output streaming: {error}")
-        return parse_streaming_result(json.loads(raw) if raw else {"success": False, "error": "Empty response"})
 
     def __enter__(self):
         self.initialize()

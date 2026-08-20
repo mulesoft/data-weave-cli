@@ -103,6 +103,23 @@ def test_run_input_output_callback_converts_read_exception_to_abort_result():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        lambda runtime: runtime.run_callback("script", lambda _data: 0),
+        lambda runtime: runtime.run_input_output_callback(
+            "script", "payload", "application/json", lambda _size: b"", lambda _data: 0,
+        ),
+    ],
+)
+def test_callback_apis_translate_malformed_native_metadata(invoke):
+    runtime = configured_runtime(FakeNative("not-json"))
+
+    with pytest.raises(dataweave.DataWeaveError, match="Failed to execute callback"):
+        invoke(runtime)
+
+
+@pytest.mark.unit
 def test_run_transform_preserves_remainder_of_large_input_chunk():
     native = FakeNative('{"success": true, "mimeType": "application/json", "charset": "utf-8"}', consume_input=True)
     runtime = configured_runtime(native)
@@ -260,6 +277,22 @@ def test_run_streaming_reports_worker_timeout_when_native_call_produces_no_outpu
 
 
 @pytest.mark.unit
+def test_stream_worker_start_failure_does_not_block_cleanup(monkeypatch):
+    native = FakeNative('{"success": true}')
+    native.graal_tear_down_isolate = lambda _thread: 0
+    runtime = configured_runtime(native)
+
+    def fail_start(_worker):
+        raise RuntimeError("cannot start")
+
+    monkeypatch.setattr(runtime_module.Thread, "start", fail_start)
+
+    with pytest.raises(RuntimeError, match="cannot start"):
+        list(runtime.run_streaming("script"))
+    runtime.cleanup()
+
+
+@pytest.mark.unit
 def test_stream_finalization_does_not_raise_when_a_native_worker_cannot_cancel(monkeypatch):
     class UncancellableNative(FakeNative):
         def run_script_callback(self, _thread, _script, _inputs, _write_callback, _context):
@@ -271,6 +304,79 @@ def test_stream_finalization_does_not_raise_when_a_native_worker_cannot_cancel(m
     stream = runtime.run_streaming("script")
 
     stream.close()
+
+
+@pytest.mark.unit
+def test_cleanup_refuses_to_tear_down_isolate_while_stream_worker_is_active(monkeypatch):
+    class BlockingNative(FakeNative):
+        def __init__(self):
+            super().__init__('{"success": true}')
+            self.started = Event()
+            self.release = Event()
+            self.torn_down = False
+
+        def run_script_callback(self, _thread, _script, _inputs, _write_callback, _context):
+            self.started.set()
+            self.release.wait()
+            return self._response_pointer()
+
+        def graal_tear_down_isolate(self, _thread):
+            self.torn_down = True
+            return 0
+
+    monkeypatch.setattr(runtime_module, "_WORKER_JOIN_TIMEOUT_SECONDS", 0.001)
+    native = BlockingNative()
+    runtime = configured_runtime(native)
+    stream = runtime.run_streaming("script")
+    consumer_error = []
+
+    def consume():
+        try:
+            next(stream, None)
+        except dataweave.DataWeaveError as error:
+            consumer_error.append(error)
+
+    consumer = Thread(target=consume)
+    consumer.start()
+    assert native.started.wait(timeout=1)
+    stream.close()
+
+    with pytest.raises(dataweave.DataWeaveError, match="active streaming worker"):
+        runtime.cleanup()
+    assert native.torn_down is False
+
+    native.release.set()
+    consumer.join(timeout=1)
+    assert consumer_error == []
+    assert native.detached_event.wait(timeout=1)
+    runtime.cleanup()
+    assert native.torn_down is True
+
+
+@pytest.mark.unit
+def test_stream_worker_cannot_register_after_isolate_teardown_starts():
+    class BlockingCleanupNative(FakeNative):
+        def __init__(self):
+            super().__init__('{"success": true}')
+            self.cleanup_started = Event()
+            self.release_cleanup = Event()
+
+        def graal_tear_down_isolate(self, _thread):
+            self.cleanup_started.set()
+            self.release_cleanup.wait()
+            return 0
+
+    native = BlockingCleanupNative()
+    runtime = configured_runtime(native)
+    cleanup = Thread(target=runtime.cleanup)
+    cleanup.start()
+    assert native.cleanup_started.wait(timeout=1)
+
+    with pytest.raises(dataweave.DataWeaveError, match="being cleaned up"):
+        runtime._register_stream_worker(Thread())
+
+    native.release_cleanup.set()
+    cleanup.join(timeout=1)
 
 
 @pytest.mark.unit

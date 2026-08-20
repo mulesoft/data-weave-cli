@@ -61,10 +61,8 @@ def run_input_output_callback(script: str, input_name: str, input_mime_type: str
 def cleanup() -> None:
     global _global_instance
     if _global_instance is not None:
-        try:
-            _global_instance.cleanup()
-        finally:
-            _global_instance = None
+        _global_instance.cleanup()
+        _global_instance = None
 
 
 __all__ = [

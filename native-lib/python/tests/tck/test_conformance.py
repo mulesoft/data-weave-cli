@@ -273,6 +273,11 @@ def test_compare_output_rejects_unknown_extension():
     assert "unknown output extension" in result.detail
 
 
+@pytest.mark.parametrize(("actual", "expected"), [(b"true", b"1"), (b"false", b"0")])
+def test_compare_output_rejects_json_booleans_as_numbers(actual: bytes, expected: bytes):
+    assert not compare_output("json", actual, expected).match
+
+
 def test_compare_output_rejects_different_xml_tail_text():
     """Catches structural XML comparison that discards text after child elements."""
     result = compare_output(
