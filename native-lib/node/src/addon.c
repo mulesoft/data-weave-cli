@@ -1766,16 +1766,23 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
     napi_status hook_st = napi_add_env_cleanup_hook(env, bridge_env_cleanup, rec);
     if (hook_st != napi_ok) {
         // Creation must be all-or-nothing (round-12 #6): without a cleanup hook a
-        // Worker that abandons this engine would strand the record, the Java
-        // registry entry, and the init reference. Unlink, remove the registry
-        // entry, release this creation's init ref, free, and throw -- no usable
-        // handle escapes. The record was just linked on this thread with
-        // in_flight==0 and its handle was never returned to JS, so no op can be
-        // in flight against it.
+        // Worker that abandons this engine would strand the record and the Java
+        // registry entry. Unlink, remove the registry entry, free, and throw --
+        // no usable handle escapes. The record was just linked on this thread
+        // with in_flight==0 and its handle was never returned to JS, so no op
+        // can be in flight against it.
+        // Do NOT release the init reference here (fix round 1): this throw
+        // propagates to initialize()'s TS catch (dataweave.ts), which sees
+        // libRefAcquired==true and calls ffi.cleanup() -- that is the ONE
+        // release for this creation's ref, matching every sibling
+        // creation-failure path (invalid-handle guard, alloc failure) that also
+        // leaves the release to the TS catch. Releasing natively here too would
+        // double-decrement g_ref_count -- masked in a single-instance process
+        // (the guard no-ops a second release at 0) but a live UAF hazard with a
+        // second engine instance still holding a reference.
         uv_mutex_lock(&g_mutex);
         engine_bridge_t** pp = &g_bridges;
         while (*pp != NULL) { if (*pp == rec) { *pp = rec->next; break; } pp = &(*pp)->next; }
-        isolate_ref_release_core_locked();
         uv_mutex_unlock(&g_mutex);
         bridge_finalize_registry(rec);
         bridge_finalize_free(rec, /*env_still_alive=*/true);
@@ -1835,16 +1842,25 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
     napi_status hook_st = napi_add_env_cleanup_hook(env, bridge_env_cleanup, bridge);
     if (hook_st != napi_ok) {
         // Creation must be all-or-nothing (round-12 #6): without a cleanup hook a
-        // Worker that abandons this engine would strand the record, the Java
-        // registry entry, and the init reference. Unlink, remove the registry
-        // entry, release this creation's init ref, free, and throw -- no usable
-        // handle escapes. The record was just linked on this thread with
-        // in_flight==0 and its handle was never returned to JS, so no op can be
-        // in flight against it.
+        // Worker that abandons this engine would strand the record and the Java
+        // registry entry. Unlink, remove the registry entry, free, and throw --
+        // no usable handle escapes. The record was just linked on this thread
+        // with in_flight==0 and its handle was never returned to JS, so no op
+        // can be in flight against it.
+        // Do NOT release the init reference here (fix round 1): this throw
+        // propagates to initialize()'s TS catch (dataweave.ts), which sees
+        // libRefAcquired==true and calls ffi.cleanup() -- that is the ONE
+        // release for this creation's ref, matching every sibling
+        // creation-failure path (resolver invalid-handle guard uses
+        // bridge_finalize with do_registry_remove=false and also does NOT
+        // release) that also leaves the release to the TS catch. Releasing
+        // natively here too would double-decrement g_ref_count -- masked in a
+        // single-instance process (the guard no-ops a second release at 0) but
+        // a live UAF hazard with a second engine instance still holding a
+        // reference.
         uv_mutex_lock(&g_mutex);
         engine_bridge_t** pp = &g_bridges;
         while (*pp != NULL) { if (*pp == bridge) { *pp = bridge->next; break; } pp = &(*pp)->next; }
-        isolate_ref_release_core_locked();
         uv_mutex_unlock(&g_mutex);
         bridge_finalize_registry(bridge);
         bridge_finalize_free(bridge, /*env_still_alive=*/true);
