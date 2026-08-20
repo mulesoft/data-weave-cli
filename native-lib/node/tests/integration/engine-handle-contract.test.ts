@@ -231,6 +231,37 @@ describe("*_engine unknown/destroyed-handle contract (round 11 #6)", () => {
     60000
   );
 
+  it("deferred registry removal after an in-flight op finalizes without wedging the isolate (round 12 #3)", async () => {
+    // Uses the shared beforeAll isolate. Create an engine, start a streaming
+    // op, destroy the engine while the op is admitted, drain the op. The
+    // deferred finalize (bridge_end_op -> bridge_finalize_registry) must
+    // complete and a subsequent run on a fresh engine must still work
+    // (isolate not torn down / not wedged by the transient reservation).
+    const handle = ffi.createEngine();
+    const chunks: Buffer[] = [];
+    const resultPromise = ffi.runScriptStreamingEngine(
+      handle,
+      "%dw 2.0\noutput application/json\n---\n[1, 2, 3]",
+      buildInputsJson({}),
+      (chunk) => chunks.push(chunk)
+    );
+    expect(() => ffi.destroyEngine(handle)).not.toThrow();
+    const raw = await resultPromise;
+    const parsed = JSON.parse(raw);
+    // Pin held at admission (round 11) -> success expected; either way no crash.
+    if (parsed.success) {
+      expect(JSON.parse(Buffer.concat(chunks).toString("utf-8"))).toEqual([1, 2, 3]);
+    }
+    // Isolate still healthy after the deferred finalize ran:
+    const h2 = ffi.createEngine();
+    const envelope = JSON.parse(
+      ffi.runScriptEngine(h2, "%dw 2.0\noutput application/json\n---\n2 + 2", buildInputsJson({}))
+    );
+    expect(envelope.success).toBe(true);
+    expect(JSON.parse(Buffer.from(envelope.result, "base64").toString("utf-8"))).toBe(4);
+    ffi.destroyEngine(h2);
+  });
+
   it("final cleanup drains the shared isolate (idempotent)", async () => {
     // Exactly one ffi.initialize() ran for this whole file (beforeAll), so
     // this is the ONE balancing ffi.cleanup() that brings the native

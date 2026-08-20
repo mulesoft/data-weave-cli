@@ -221,25 +221,60 @@ static engine_bridge_t* bridge_find(long long handle) {
 // attaches its own isolate thread, so it is not JS-thread-affine. Must be
 // called WITHOUT g_mutex held (it enters GraalVM and, for env_still_alive,
 // calls N-API).
-static void bridge_finalize(engine_bridge_t* b, bool env_still_alive, bool do_registry_remove) {
-    if (b == NULL) return;
-    // g_isolate is read without g_mutex here -- the same lock-free g_isolate
-    // read napi_destroy_engine's fallback below already does, but with an added
-    // NULL check that makes a torn-down isolate a no-op instead of an unsafe
-    // fn_attach_thread(NULL, ...). This
-    // matters for the env-cleanup deferred-drain path, where the isolate may
-    // already be gone (main env tearing down after napi_cleanup tore it down);
-    // there the Java registry died with the isolate, so there is nothing to
-    // remove and skipping is correct.
-    if (do_registry_remove && fn_destroy_engine && g_isolate) {
-        void* thread = NULL;
-        if (fn_attach_thread(g_isolate, &thread) == 0) { fn_destroy_engine(thread, b->handle); fn_detach_thread(thread); }
+// #3 (round 12): the isolate-touching registry removal. Takes a TRANSIENT
+// g_active_ops reservation so graal_tear_down_isolate() cannot run across the
+// attach. The teardown-state check and the g_active_ops++ are ONE critical
+// section: no teardown path can interleave between "isolate is live" and
+// "reservation taken". Callable from any thread NOT holding g_mutex.
+static void bridge_finalize_registry(engine_bridge_t* b) {
+    if (b == NULL || fn_destroy_engine == NULL) return;
+    uv_mutex_lock(&g_mutex);
+    // If the waiter already committed to physical teardown (TEARING_DOWN) or the
+    // isolate is already gone, the Java registry died/dies with it -- nothing to
+    // remove, and attaching would race graal_tear_down_isolate. Skip. Because
+    // the waiter publishes TEARING_DOWN (and Case 4 holds g_mutex across its
+    // g_active_ops==0 check + teardown) under this same lock, this check plus the
+    // increment below cannot be split by a teardown.
+    if (g_teardown_state == TEARDOWN_TEARING_DOWN || g_isolate == NULL) {
+        uv_mutex_unlock(&g_mutex);
+        return;
     }
+    g_active_ops++;  // pins the live isolate against teardown for this attach
+    uv_mutex_unlock(&g_mutex);
+
+    void* thread = NULL;
+    if (fn_attach_thread(g_isolate, &thread) == 0) {
+        fn_destroy_engine(thread, b->handle);
+        fn_detach_thread(thread);
+    }
+
+    // Verbatim g_active_ops release pattern.
+    uv_mutex_lock(&g_mutex);
+    g_active_ops--;
+    uv_cond_broadcast(&g_teardown_cond);
+    uv_mutex_unlock(&g_mutex);
+}
+
+// The non-isolate finalize phase: delete the resolver napi_ref (owner JS thread
+// only, and only while its env is alive -- resolver-gated), free tracked result
+// buffers, free the record. Touches no GraalVM isolate state, so it is safe to
+// run after the g_active_ops reservation above is released.
+static void bridge_finalize_free(engine_bridge_t* b, bool env_still_alive) {
+    if (b == NULL) return;
     if (env_still_alive && b->resolver_js != NULL && b->env != NULL) {
         napi_delete_reference(b->env, b->resolver_js);
     }
     resolver_results_free_all(b);
     free(b);
+}
+
+// Thin wrapper preserving the original signature and every call site. Registry
+// removal (if requested) runs first under its transient reservation, then the
+// record is freed.
+static void bridge_finalize(engine_bridge_t* b, bool env_still_alive, bool do_registry_remove) {
+    if (b == NULL) return;
+    if (do_registry_remove) bridge_finalize_registry(b);
+    bridge_finalize_free(b, env_still_alive);
 }
 
 // Env cleanup hook (F2): registered per resolver-backed bridge at creation via
