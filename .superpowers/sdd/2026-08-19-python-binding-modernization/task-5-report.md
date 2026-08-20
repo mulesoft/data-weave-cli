@@ -98,3 +98,52 @@
   active, non-excluded mismatches. This round fixes the deferred-writer
   teardown stall and reporting attribution; it does not claim to resolve those
   runtime/output compatibility failures.
+
+## Fix Round 2
+
+### Evidence-Backed Exclusions
+
+- Read the reviewed `task-5-failure-inventory.md` before changing the registry.
+  Its 40 observed failures contained 37 unsupported environment/runtime cases
+  and three retained conformance mismatches.
+- Replaced the generic module-only registry shape with per-case `Exclusion`
+  records. Every active record carries its full case identifier, a reason with
+  the direct observed limitation, and one of the nine approved categories.
+- Added 37 case-specific entries for the inventory evidence. Together with the
+  pre-existing 18 unresolved-import exclusions, the active registry now has 55
+  entries:
+  `unsupported-dw-module-resolution=24`, `unavailable-java-module=11`,
+  `unavailable-classpath-test-resource=4`,
+  `nondeterministic-properties-output=2`, `multipart-runtime-compatibility=6`,
+  `coercion-runtime-compatibility=3`, `dw-runtime-compatibility=2`,
+  `locale-dependent-output=1`, and `source-location-dependent-output=2`.
+- Registry validation now rejects missing or mismatched case identity, blank
+  category/reason fields, unsupported categories, and entries that cannot
+  affect a discovered runnable scenario. The category-count test locks the
+  inventory reconciliation and prevents a later category collapse.
+
+### Retained Conformance Mismatches
+
+- `core-modules/csv-invalid-utf8-out.csv:out.csv` remains active: the runtime
+  emits a replacement character where the fixture requires an empty CSV value.
+- `core-modules/number-addition-out.json:out.json` remains active: numeric
+  serialization differs from the fixture's exact integer representation.
+- `core-modules/number-subtraction-out.json:out.json` remains active: numeric
+  serialization produces `0` where the fixture requires `0.0`.
+
+### Verification
+
+1. RED: `python3 -m pytest tests/tck/test_conformance.py -m tck -k
+   exclusion_registry_requires_case_identity_supported_category_and_reason -vv`
+   Result: failed as expected before the registry change because it did not
+   validate case identity, approved category, or nonblank reason.
+2. Focused registry validation: `python3 -m pytest
+   tests/tck/test_conformance.py -m tck -k exclusion -vv`
+   Result: 4 passed. The header reported all 55 active exclusions by category.
+3. Full terminal TCK: `python3 -m pytest tests/tck/test_conformance.py -m tck
+   -vv --maxfail=0`
+   Result: 3 failed, 693 passed, 55 skipped in 32.38s. The reconciled terminal
+   totals were `selected=731`, `structural-skips=191`,
+   `structural-module-cases=13`, `executed=676`, `active-exclusions=55`,
+   `passed=673`, and `failed=3`. Both invariants hold:
+   `676 + 55 == 731` and `673 + 3 == 676`.

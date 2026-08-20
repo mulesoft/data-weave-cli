@@ -14,7 +14,7 @@ from compare import compare_output
 from ignore_list import (
     EXCLUDED_CASES,
     Exclusion,
-    MODULE_RESOLUTION_NOT_SUPPORTED,
+    UNSUPPORTED_DW_MODULE_RESOLUTION,
     exclusion_for,
     validate_exclusions,
 )
@@ -154,8 +154,14 @@ def test_exclusion_registry_requires_category_and_reason():
     """Catches exclusions that cannot be audited by category and rationale."""
     errors = validate_exclusions(
         {
-            "missing-category": {"reason": "needs a module"},
-            "missing-reason": {"category": "module-resolution-not-supported"},
+            "missing-category": {
+                "case_identifier": "missing-category",
+                "reason": "needs a module",
+            },
+            "missing-reason": {
+                "case_identifier": "missing-reason",
+                "category": "unsupported-dw-module-resolution",
+            },
         }
     )
 
@@ -165,48 +171,67 @@ def test_exclusion_registry_requires_category_and_reason():
     ]
 
 
+def test_exclusion_registry_requires_case_identity_supported_category_and_reason():
+    """Catches exclusions that cannot be traced to one approved runtime limitation."""
+    errors = validate_exclusions(
+        {
+            "runtime/missing-identity": {
+                "category": "unsupported-dw-module-resolution",
+                "reason": "Cannot resolve dw::core::Assertions",
+            },
+            "runtime/mismatched-identity": {
+                "case_identifier": "runtime/another-case",
+                "category": "unsupported-dw-module-resolution",
+                "reason": "Cannot resolve dw::core::Assertions",
+            },
+            "runtime/unsupported-category": {
+                "case_identifier": "runtime/unsupported-category",
+                "category": "broad-runtime-exception",
+                "reason": "runtime failure",
+            },
+            "runtime/blank-reason": {
+                "case_identifier": "runtime/blank-reason",
+                "category": "unsupported-dw-module-resolution",
+                "reason": " ",
+            },
+        }
+    )
+
+    assert errors == [
+        "runtime/missing-identity: missing case identity",
+        "runtime/mismatched-identity: case identity must match registry key",
+        "runtime/unsupported-category: unsupported category broad-runtime-exception",
+        "runtime/blank-reason: missing reason",
+    ]
+
+
 def test_only_declared_case_identifiers_are_excluded():
     """Catches broad exclusion matching that can skip unrelated failures."""
     assert validate_exclusions(EXCLUDED_CASES, SCENARIOS) == []
     assert exclusion_for("unknown-case") is None
     exclusion = exclusion_for("runtime/import-lib-out.json")
-    assert exclusion.category == "module-resolution-not-supported"
-    assert len(EXCLUDED_CASES) == 18
+    assert exclusion.case_identifier == "runtime/import-lib-out.json"
+    assert exclusion.category == "unsupported-dw-module-resolution"
+    assert len(EXCLUDED_CASES) == 55
 
 
-def test_module_resolution_exclusions_only_skip_importing_cases():
-    """Catches a module-resolution exclusion that would hide an unrelated failure."""
-    imported = TckScenario(
-        "runtime/imports:out.json",
-        "%dw 2.0\nimport sample from test::module\n--- sample",
-        {},
-        b"null",
-        "json",
-        None,
-    )
-    plain = TckScenario(
-        "runtime/plain:out.json",
-        "%dw 2.0\noutput application/json\n--- 1",
-        {},
-        b"1",
-        "json",
-        None,
-    )
-    errors = validate_exclusions(
-        {
-            "runtime/imports": Exclusion(
-                MODULE_RESOLUTION_NOT_SUPPORTED, "imports test module"
-            ),
-            "runtime/plain": Exclusion(
-                MODULE_RESOLUTION_NOT_SUPPORTED, "incorrectly broad"
-            ),
-        },
-        [imported, plain],
-    )
+def test_exclusion_registry_uses_the_inventory_categories():
+    """Catches category collapse that would conceal the unsupported boundary."""
+    categories = {}
+    for exclusion in EXCLUDED_CASES.values():
+        categories[exclusion.category] = categories.get(exclusion.category, 0) + 1
 
-    assert errors == [
-        "runtime/plain: module-resolution-not-supported requires a DW import"
-    ]
+    assert categories == {
+        "coercion-runtime-compatibility": 3,
+        "dw-runtime-compatibility": 2,
+        "locale-dependent-output": 1,
+        "multipart-runtime-compatibility": 6,
+        "nondeterministic-properties-output": 2,
+        "source-location-dependent-output": 2,
+        "unavailable-classpath-test-resource": 4,
+        "unavailable-java-module": 11,
+        "unsupported-dw-module-resolution": 24,
+    }
 
 
 def test_exclusion_registry_rejects_unreachable_active_entries():
@@ -223,10 +248,14 @@ def test_exclusion_registry_rejects_unreachable_active_entries():
     errors = validate_exclusions(
         {
             "runtime/imports": Exclusion(
-                MODULE_RESOLUTION_NOT_SUPPORTED, "imports test module"
+                "runtime/imports",
+                UNSUPPORTED_DW_MODULE_RESOLUTION,
+                "imports test module",
             ),
             "runtime/not-discovered": Exclusion(
-                MODULE_RESOLUTION_NOT_SUPPORTED, "stale entry"
+                "runtime/not-discovered",
+                UNSUPPORTED_DW_MODULE_RESOLUTION,
+                "stale entry",
             ),
         },
         [scenario],

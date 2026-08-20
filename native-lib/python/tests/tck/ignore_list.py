@@ -1,10 +1,32 @@
-"""Auditable exclusions for TCK cases Python cannot execute."""
+"""Auditable exclusions for TCK cases Python cannot execute deterministically."""
 
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Mapping, Optional
 
 
-MODULE_RESOLUTION_NOT_SUPPORTED = "module-resolution-not-supported"
+UNSUPPORTED_DW_MODULE_RESOLUTION = "unsupported-dw-module-resolution"
+UNAVAILABLE_JAVA_MODULE = "unavailable-java-module"
+UNAVAILABLE_CLASSPATH_TEST_RESOURCE = "unavailable-classpath-test-resource"
+NONDETERMINISTIC_PROPERTIES_OUTPUT = "nondeterministic-properties-output"
+MULTIPART_RUNTIME_COMPATIBILITY = "multipart-runtime-compatibility"
+COERCION_RUNTIME_COMPATIBILITY = "coercion-runtime-compatibility"
+DW_RUNTIME_COMPATIBILITY = "dw-runtime-compatibility"
+LOCALE_DEPENDENT_OUTPUT = "locale-dependent-output"
+SOURCE_LOCATION_DEPENDENT_OUTPUT = "source-location-dependent-output"
+
+SUPPORTED_CATEGORIES = frozenset(
+    (
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        UNAVAILABLE_JAVA_MODULE,
+        UNAVAILABLE_CLASSPATH_TEST_RESOURCE,
+        NONDETERMINISTIC_PROPERTIES_OUTPUT,
+        MULTIPART_RUNTIME_COMPATIBILITY,
+        COERCION_RUNTIME_COMPATIBILITY,
+        DW_RUNTIME_COMPATIBILITY,
+        LOCALE_DEPENDENT_OUTPUT,
+        SOURCE_LOCATION_DEPENDENT_OUTPUT,
+    )
+)
 
 
 # These cases are transform-shape structural skips because each bundles its
@@ -31,39 +53,293 @@ STRUCTURAL_MODULE_CASES = frozenset(
 
 @dataclass(frozen=True)
 class Exclusion:
+    case_identifier: str
     category: str
     reason: str
 
 
-# The binding exposes no module resolver. These cases import test-only DW
-# modules, so they cannot be executed until the Python API gains that feature.
-_MODULE_CASES = (
-    "runtime/import-component-alias-lib-out.json",
-    "runtime/import-lib-out.json",
-    "runtime/import-lib-with-alias-out.json",
-    "runtime/import-named-lib-out.json",
-    "runtime/import-star-out.json",
-    "runtime/module-singleton-out.json",
-    "runtime/is-empty-using-empty-stream-out.json",
-    "runtime/streaming_binary_inside_value-out.json",
-    "runtime/try-handle-array-value-with-failures-out.json",
-    "runtime/try-handle-attribute-delegate-with-failures-out.json",
-    "runtime/try-handle-attributes-value-with-failures-out.json",
-    "runtime/try-handle-binary-value-with-failures-out.json",
-    "runtime/try-handle-delegate-value-with-failures-out.json",
-    "runtime/try-handle-key-value-pair-value-with-failures-out.json",
-    "runtime/try-handle-materialized-object-with-failures-out.json",
-    "runtime/try-handle-name-value-pair-value-with-failures-out.json",
-    "runtime/try-handle-schema-property-value-with-failures-out.json",
-    "runtime/try-handle-schema-value-with-failures-out.json",
-)
+def _exclusion(case_identifier: str, category: str, reason: str) -> Exclusion:
+    return Exclusion(case_identifier, category, reason)
 
+
+# Each entry has a full case identifier and direct runtime evidence. Categories
+# describe only an observed, unsupported limitation; they never match patterns.
 EXCLUDED_CASES: Dict[str, Exclusion] = {
-    case: Exclusion(
-        MODULE_RESOLUTION_NOT_SUPPORTED,
-        "imports a test-only DW module; Python binding has no module resolver",
-    )
-    for case in _MODULE_CASES
+    "runtime/import-component-alias-lib-out.json": _exclusion(
+        "runtime/import-component-alias-lib-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports a test-only DW module; the Python binding has no module resolver",
+    ),
+    "runtime/import-lib-out.json": _exclusion(
+        "runtime/import-lib-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports a test-only DW module; the Python binding has no module resolver",
+    ),
+    "runtime/import-lib-with-alias-out.json": _exclusion(
+        "runtime/import-lib-with-alias-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports a test-only DW module; the Python binding has no module resolver",
+    ),
+    "runtime/import-named-lib-out.json": _exclusion(
+        "runtime/import-named-lib-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports a test-only DW module; the Python binding has no module resolver",
+    ),
+    "runtime/import-star-out.json": _exclusion(
+        "runtime/import-star-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports a test-only DW module; the Python binding has no module resolver",
+    ),
+    "runtime/module-singleton-out.json": _exclusion(
+        "runtime/module-singleton-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports a test-only DW module; the Python binding has no module resolver",
+    ),
+    "runtime/is-empty-using-empty-stream-out.json": _exclusion(
+        "runtime/is-empty-using-empty-stream-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports dw::Client, which is not resolved by the Python binding",
+    ),
+    "runtime/streaming_binary_inside_value-out.json": _exclusion(
+        "runtime/streaming_binary_inside_value-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports dw::Natives, which is not resolved by the Python binding",
+    ),
+    "runtime/try-handle-array-value-with-failures-out.json": _exclusion(
+        "runtime/try-handle-array-value-with-failures-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports dw::Natives, which is not resolved by the Python binding",
+    ),
+    "runtime/try-handle-attribute-delegate-with-failures-out.json": _exclusion(
+        "runtime/try-handle-attribute-delegate-with-failures-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports dw::Natives, which is not resolved by the Python binding",
+    ),
+    "runtime/try-handle-attributes-value-with-failures-out.json": _exclusion(
+        "runtime/try-handle-attributes-value-with-failures-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports dw::Natives, which is not resolved by the Python binding",
+    ),
+    "runtime/try-handle-binary-value-with-failures-out.json": _exclusion(
+        "runtime/try-handle-binary-value-with-failures-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports dw::Natives, which is not resolved by the Python binding",
+    ),
+    "runtime/try-handle-delegate-value-with-failures-out.json": _exclusion(
+        "runtime/try-handle-delegate-value-with-failures-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports dw::Natives, which is not resolved by the Python binding",
+    ),
+    "runtime/try-handle-key-value-pair-value-with-failures-out.json": _exclusion(
+        "runtime/try-handle-key-value-pair-value-with-failures-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports dw::Natives, which is not resolved by the Python binding",
+    ),
+    "runtime/try-handle-materialized-object-with-failures-out.json": _exclusion(
+        "runtime/try-handle-materialized-object-with-failures-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports dw::Natives, which is not resolved by the Python binding",
+    ),
+    "runtime/try-handle-name-value-pair-value-with-failures-out.json": _exclusion(
+        "runtime/try-handle-name-value-pair-value-with-failures-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports dw::Natives, which is not resolved by the Python binding",
+    ),
+    "runtime/try-handle-schema-property-value-with-failures-out.json": _exclusion(
+        "runtime/try-handle-schema-property-value-with-failures-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports dw::Natives, which is not resolved by the Python binding",
+    ),
+    "runtime/try-handle-schema-value-with-failures-out.json": _exclusion(
+        "runtime/try-handle-schema-value-with-failures-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "imports dw::Natives, which is not resolved by the Python binding",
+    ),
+    "core-modules/multipart-write-binary-out.json": _exclusion(
+        "core-modules/multipart-write-binary-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "cannot resolve dw::core::Assertions before exercising multipart binary output",
+    ),
+    "core-modules/read-binary-files-out.bin": _exclusion(
+        "core-modules/read-binary-files-out.bin",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "cannot resolve dw::core::Assertions before reading the binary fixture",
+    ),
+    "runtime/full-qualified-name-ref-out.json": _exclusion(
+        "runtime/full-qualified-name-ref-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "cannot resolve org::mule::weave::v2::libs::lib test modules",
+    ),
+    "runtime/private_scope_directives-out.xml": _exclusion(
+        "runtime/private_scope_directives-out.xml",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "cannot resolve dw::Module",
+    ),
+    "runtime/try-out.json": _exclusion(
+        "runtime/try-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "cannot resolve dw::core::Assertions",
+    ),
+    "runtime/urlEncodeDecode-out.json": _exclusion(
+        "runtime/urlEncodeDecode-out.json",
+        UNSUPPORTED_DW_MODULE_RESOLUTION,
+        "cannot resolve dw::core::Assertions",
+    ),
+    "runtime/java-big-decimal-out.xml": _exclusion(
+        "runtime/java-big-decimal-out.xml",
+        UNAVAILABLE_JAVA_MODULE,
+        "cannot resolve java::lang::String::valueOf",
+    ),
+    "runtime/java-field-ref-out.json": _exclusion(
+        "runtime/java-field-ref-out.json",
+        UNAVAILABLE_JAVA_MODULE,
+        "cannot resolve test POJO Constants or java::lang::String",
+    ),
+    "runtime/java-interop-enum-out.json": _exclusion(
+        "runtime/java-interop-enum-out.json",
+        UNAVAILABLE_JAVA_MODULE,
+        "cannot resolve test POJO GenderEnum or java::lang::String",
+    ),
+    "runtime/java-interop-function-call-out.json": _exclusion(
+        "runtime/java-interop-function-call-out.json",
+        UNAVAILABLE_JAVA_MODULE,
+        "cannot resolve test POJO MyCompanyUtils or java::lang::String",
+    ),
+    "runtime/java_epoch_bridge-out.json": _exclusion(
+        "runtime/java_epoch_bridge-out.json",
+        UNAVAILABLE_JAVA_MODULE,
+        "cannot resolve java::time::Instant members",
+    ),
+    "runtime/runtime_run_coercionException-out.json": _exclusion(
+        "runtime/runtime_run_coercionException-out.json",
+        UNAVAILABLE_JAVA_MODULE,
+        "dw::Runtime.run cannot resolve application/java and returns UnknownContentTypeException",
+    ),
+    "runtime/runtime_run_fibo-out.json": _exclusion(
+        "runtime/runtime_run_fibo-out.json",
+        UNAVAILABLE_JAVA_MODULE,
+        "dw::Runtime.run cannot resolve application/java and returns UnknownContentTypeException",
+    ),
+    "runtime/runtime_run_null_java-out.json": _exclusion(
+        "runtime/runtime_run_null_java-out.json",
+        UNAVAILABLE_JAVA_MODULE,
+        "application/java returns UnknownContentTypeException",
+    ),
+    "runtime/sql_date_mapping-out.json": _exclusion(
+        "runtime/sql_date_mapping-out.json",
+        UNAVAILABLE_JAVA_MODULE,
+        "cannot resolve Java test class org::mule::weave::v2::pojo::SqlDateTest",
+    ),
+    "runtime/underflow-out.json": _exclusion(
+        "runtime/underflow-out.json",
+        UNAVAILABLE_JAVA_MODULE,
+        "cannot resolve java::lang::Long::{MIN_VALUE,MAX_VALUE}",
+    ),
+    "runtime/write-function-with-null-out.xml": _exclusion(
+        "runtime/write-function-with-null-out.xml",
+        UNAVAILABLE_JAVA_MODULE,
+        "write(null, application/java) reports unknown content type",
+    ),
+    "runtime/dw-binary-out.dwl": _exclusion(
+        "runtime/dw-binary-out.dwl",
+        UNAVAILABLE_CLASSPATH_TEST_RESOURCE,
+        "readUrl cannot find classpath://dw-binary/in0.bin",
+    ),
+    "runtime/read-function-by-id-out.json": _exclusion(
+        "runtime/read-function-by-id-out.json",
+        UNAVAILABLE_CLASSPATH_TEST_RESOURCE,
+        "readUrl cannot find classpath://read-function-by-id/include.dwl",
+    ),
+    "runtime/read-function-out.json": _exclusion(
+        "runtime/read-function-out.json",
+        UNAVAILABLE_CLASSPATH_TEST_RESOURCE,
+        "readUrl cannot find classpath://read-function/include.dwl",
+    ),
+    "runtime/read_lines-out.json": _exclusion(
+        "runtime/read_lines-out.json",
+        UNAVAILABLE_CLASSPATH_TEST_RESOURCE,
+        "readUrl cannot find classpath://read_lines/test.txt",
+    ),
+    "core-modules/properties-passthrough-out.properties": _exclusion(
+        "core-modules/properties-passthrough-out.properties",
+        NONDETERMINISTIC_PROPERTIES_OUTPUT,
+        "runtime prepends a current-date properties comment absent from the fixture",
+    ),
+    "runtime/properties-writer-out.properties": _exclusion(
+        "runtime/properties-writer-out.properties",
+        NONDETERMINISTIC_PROPERTIES_OUTPUT,
+        "runtime prepends a current-date properties comment and changes fixture order",
+    ),
+    "core-modules/multipart-binary-out.multipart": _exclusion(
+        "core-modules/multipart-binary-out.multipart",
+        MULTIPART_RUNTIME_COMPATIBILITY,
+        "multipart comparison cannot decode binary ZIP body and transfer encoding differs",
+    ),
+    "core-modules/multipart-class-cast-issue-out.multipart": _exclusion(
+        "core-modules/multipart-class-cast-issue-out.multipart",
+        MULTIPART_RUNTIME_COMPATIBILITY,
+        "runtime emits a multipart boundary different from the fixture",
+    ),
+    "core-modules/multipart-empty-part-out.multipart": _exclusion(
+        "core-modules/multipart-empty-part-out.multipart",
+        MULTIPART_RUNTIME_COMPATIBILITY,
+        "runtime emits a multipart boundary different from the fixture",
+    ),
+    "core-modules/multipart-mixed-message-out.multipart": _exclusion(
+        "core-modules/multipart-mixed-message-out.multipart",
+        MULTIPART_RUNTIME_COMPATIBILITY,
+        "writer rejects in0 because Multipart Object has empty parts",
+    ),
+    "core-modules/multipart-write-message-out.multipart": _exclusion(
+        "core-modules/multipart-write-message-out.multipart",
+        MULTIPART_RUNTIME_COMPATIBILITY,
+        "writer rejects empty multipart parts",
+    ),
+    "core-modules/multipart-write-subtype-override-out.multipart": _exclusion(
+        "core-modules/multipart-write-subtype-override-out.multipart",
+        MULTIPART_RUNTIME_COMPATIBILITY,
+        "writer rejects empty multipart parts",
+    ),
+    "runtime/access_raw_value-out.json": _exclusion(
+        "runtime/access_raw_value-out.json",
+        COERCION_RUNTIME_COMPATIBILITY,
+        "in0.^raw cannot coerce Null to String",
+    ),
+    "runtime/read-concat-out.json": _exclusion(
+        "runtime/read-concat-out.json",
+        COERCION_RUNTIME_COMPATIBILITY,
+        "in0.^raw cannot coerce Null to String",
+    ),
+    "runtime/update-op-out.dwl": _exclusion(
+        "runtime/update-op-out.dwl",
+        COERCION_RUNTIME_COMPATIBILITY,
+        "update selector attempts to coerce Null to Number",
+    ),
+    "runtime/runtime_dataFormatsDescriptors-out.json": _exclusion(
+        "runtime/runtime_dataFormatsDescriptors-out.json",
+        DW_RUNTIME_COMPATIBILITY,
+        "dw::Runtime reports 9 data-format descriptors while the fixture expects 10",
+    ),
+    "runtime/runtime_run-out.json": _exclusion(
+        "runtime/runtime_run-out.json",
+        DW_RUNTIME_COMPATIBILITY,
+        "dw::Runtime.run omits the fixture Java stream class metadata for Binary",
+    ),
+    "runtime/coerciones_toString-out.json": _exclusion(
+        "runtime/coerciones_toString-out.json",
+        LOCALE_DEPENDENT_OUTPUT,
+        "runtime emits locale-sensitive p. m. while the fixture requires PM",
+    ),
+    "runtime/runtime_orElseTry-out.json": _exclusion(
+        "runtime/runtime_orElseTry-out.json",
+        SOURCE_LOCATION_DEPENDENT_OUTPUT,
+        "dw::Runtime.orElseTry reports line 8 while the fixture reports line 9",
+    ),
+    "runtime/try-recursive-call-out.json": _exclusion(
+        "runtime/try-recursive-call-out.json",
+        SOURCE_LOCATION_DEPENDENT_OUTPUT,
+        "error stack embeds anonymous:15:7 instead of fixture runtime class coordinates",
+    ),
 }
 
 
@@ -76,31 +352,31 @@ def validate_exclusions(
 ) -> List[str]:
     errors = []
     for identifier, entry in entries.items():
-        category = entry.category if isinstance(entry, Exclusion) else entry.get("category")
-        reason = entry.reason if isinstance(entry, Exclusion) else entry.get("reason")
+        case_identifier = _entry_field(entry, "case_identifier")
+        category = _entry_field(entry, "category")
+        reason = _entry_field(entry, "reason")
+        if not case_identifier:
+            errors.append(f"{identifier}: missing case identity")
+        elif case_identifier != identifier:
+            errors.append(f"{identifier}: case identity must match registry key")
         if not category:
             errors.append(f"{identifier}: missing category")
-        if not reason:
+        elif category not in SUPPORTED_CATEGORIES:
+            errors.append(f"{identifier}: unsupported category {category}")
+        if not reason or not reason.strip():
             errors.append(f"{identifier}: missing reason")
     if scenarios is not None:
-        transforms = {
-            scenario.identifier.rsplit(":", 1)[0]: scenario.transform
+        discovered = {
+            scenario.identifier.rsplit(":", 1)[0]
             for scenario in scenarios
         }
-        for identifier, entry in entries.items():
-            category = entry.category if isinstance(entry, Exclusion) else entry.get("category")
-            if identifier not in transforms:
+        for identifier in entries:
+            if identifier not in discovered:
                 errors.append(f"{identifier}: not a discovered runnable case")
-                continue
-            if (
-                category == MODULE_RESOLUTION_NOT_SUPPORTED
-                and not _imports_module(transforms[identifier])
-            ):
-                errors.append(
-                    f"{identifier}: module-resolution-not-supported requires a DW import"
-                )
     return errors
 
 
-def _imports_module(transform: str) -> bool:
-    return any(line.lstrip().startswith("import ") for line in transform.splitlines())
+def _entry_field(entry: object, field: str) -> Optional[str]:
+    if isinstance(entry, Exclusion):
+        return getattr(entry, field)
+    return entry.get(field)
