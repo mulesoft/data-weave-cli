@@ -228,6 +228,18 @@ tasks.register('stageTckSuites') {
   }
 }
 
+// Python consumes the corpus already staged for the Node TCK lane above. This
+// shares the resolved artifacts and extraction, avoiding a second download.
+tasks.register('pythonTck', Exec) {
+  dependsOn tasks.named('stagePythonNativeLib')
+  dependsOn tasks.named('stageTckSuites')
+  workingDir("${projectDir}/python")
+  inputs.dir("${projectDir}/python/tests/tck")
+  inputs.dir(tckSuitesDir)
+  inputs.file("${projectDir}/python/pytest.ini")
+  commandLine(pythonExe, '-m', 'pytest', '-m', 'tck')
+}
+
 tasks.register('buildNodePackage', Exec) {
   dependsOn tasks.named('stageNodeNativeLib')
   workingDir("${projectDir}/node")
