@@ -1763,7 +1763,25 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
     // or via bridge_end_op if an op is draining), so all three are reclaimed.
     // destroyEngine removes this hook before an early free so Node never invokes
     // it on freed memory.
-    napi_add_env_cleanup_hook(env, bridge_env_cleanup, rec);
+    napi_status hook_st = napi_add_env_cleanup_hook(env, bridge_env_cleanup, rec);
+    if (hook_st != napi_ok) {
+        // Creation must be all-or-nothing (round-12 #6): without a cleanup hook a
+        // Worker that abandons this engine would strand the record, the Java
+        // registry entry, and the init reference. Unlink, remove the registry
+        // entry, release this creation's init ref, free, and throw -- no usable
+        // handle escapes. The record was just linked on this thread with
+        // in_flight==0 and its handle was never returned to JS, so no op can be
+        // in flight against it.
+        uv_mutex_lock(&g_mutex);
+        engine_bridge_t** pp = &g_bridges;
+        while (*pp != NULL) { if (*pp == rec) { *pp = rec->next; break; } pp = &(*pp)->next; }
+        isolate_ref_release_core_locked();
+        uv_mutex_unlock(&g_mutex);
+        bridge_finalize_registry(rec);
+        bridge_finalize_free(rec, /*env_still_alive=*/true);
+        napi_throw_error(env, NULL, "Failed to register engine cleanup hook");
+        return NULL;
+    }
 
     napi_value out; napi_create_int64(env, (int64_t)handle, &out); return out;
 }
@@ -1814,7 +1832,25 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
     // bridge's napi_ref on its own thread when its env tears down (F2). napi_cleanup
     // no longer touches bridge refs. destroyEngine removes this hook before an
     // early free so Node never calls it on freed memory.
-    napi_add_env_cleanup_hook(env, bridge_env_cleanup, bridge);
+    napi_status hook_st = napi_add_env_cleanup_hook(env, bridge_env_cleanup, bridge);
+    if (hook_st != napi_ok) {
+        // Creation must be all-or-nothing (round-12 #6): without a cleanup hook a
+        // Worker that abandons this engine would strand the record, the Java
+        // registry entry, and the init reference. Unlink, remove the registry
+        // entry, release this creation's init ref, free, and throw -- no usable
+        // handle escapes. The record was just linked on this thread with
+        // in_flight==0 and its handle was never returned to JS, so no op can be
+        // in flight against it.
+        uv_mutex_lock(&g_mutex);
+        engine_bridge_t** pp = &g_bridges;
+        while (*pp != NULL) { if (*pp == bridge) { *pp = bridge->next; break; } pp = &(*pp)->next; }
+        isolate_ref_release_core_locked();
+        uv_mutex_unlock(&g_mutex);
+        bridge_finalize_registry(bridge);
+        bridge_finalize_free(bridge, /*env_still_alive=*/true);
+        napi_throw_error(env, NULL, "Failed to register engine cleanup hook");
+        return NULL;
+    }
     napi_value out; napi_create_int64(env, (int64_t)handle, &out); return out;
 }
 
