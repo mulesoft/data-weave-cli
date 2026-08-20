@@ -2233,6 +2233,15 @@ static napi_value already_resolved_promise(napi_env env) {
 // core omits on purpose (binding a waiter/promise to a tearing-down env is a
 // thread-affinity hazard). They share the last-release *policy* only; see
 // release_isolate_ref_locked's header comment for the promise-bearing twin.
+//
+// Assumes the sanctioned 1:1 pairing of one initialize() reference to one
+// engine bridge, exactly as the product-facing DataWeave class enforces (one
+// initialize() call per engine, released together by one cleanup()). Nothing
+// in this file enforces that pairing for a raw-ffi caller: creating multiple
+// engines under a single initialize() registers one env-cleanup hook per
+// engine, and each abandoned engine's hook would call this function -- so an
+// out-of-contract multi-engine-per-initialize() caller could over-release
+// g_ref_count under a cross-env teardown race.
 static void isolate_ref_release_core_locked(void) {
   if (g_ref_count > 0) {
     g_ref_count--;
