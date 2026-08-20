@@ -36,7 +36,7 @@
 
 ## Commit
 
-- Pending: `ci: validate Python binding tests and TCK`
+- `83ef2c6 ci: validate Python binding tests and TCK`
 
 ## Concerns
 
