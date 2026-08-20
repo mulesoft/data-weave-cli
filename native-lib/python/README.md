@@ -159,12 +159,19 @@ Stream output chunks as they're produced, without buffering the entire result:
 import sys
 
 stream = dataweave.run_streaming("output application/json --- (1 to 10000) map {id: $}")
-for chunk in stream:
-    sys.stdout.buffer.write(chunk)
+with stream:
+    for chunk in stream:
+        sys.stdout.buffer.write(chunk)
 
 metadata = stream.metadata
 print(f"\nDone: {metadata.mime_type}, {metadata.charset}")
 ```
+
+Call `stream.close()` when stopping consumption early. `Stream` also supports a
+context manager, as above. Closing requests cancellation and waits only briefly
+for the native worker. A native call cannot be forcibly cancelled by Python, so
+an unresponsive call is left to finish in a daemon worker rather than delaying
+application shutdown or raising during finalization.
 
 Or with explicit context:
 
@@ -261,6 +268,8 @@ Read callbacks return bytes and are called with the native buffer size. Return
 operation. Write callbacks return `0` on success. Any nonzero return value, or
 an exception, aborts the operation and returns unsuccessful `StreamingResult`
 metadata rather than unwinding a Python exception through the native callback.
+Low-level read callbacks must return no more than the requested buffer size;
+oversized callback data is rejected with `-1` rather than silently truncated.
 
 ## Running Tests
 
@@ -288,9 +297,12 @@ To stage and run the Python conformance suite, use:
 
 `pythonTck` is intentionally separate from normal testing and runs only in the
 master-only CI lane. It reuses the corpus staged for Node TCK. It excludes
-cases requiring unsupported DataWeave module resolution and other documented
-environment limitations. The remaining three known conformance mismatches are
-reported as failures, so this lane currently exits nonzero by design.
+only binding/environment capability gaps, such as unavailable module resolution,
+Java modules, and classpath test resources. Accepted runtime/output baseline
+mismatches are strict xfails: a new mismatch fails the lane and a repaired
+baseline mismatch XPASSes and also fails. The deferred-writer TCK scenario runs
+in a subprocess because that runtime's isolate teardown may block; the main TCK
+session runtime is always cleaned up.
 
 ## Running Examples
 
@@ -340,7 +352,7 @@ Low-level callback API for advanced use cases.
 
 ### `DataWeave` Class
 
-#### `DataWeave(library_path=None)`
+#### `DataWeave(lib_path=None)`
 
 Context manager for explicit lifecycle control.
 
@@ -379,6 +391,9 @@ Iterator that yields output chunks through a bounded queue.
 **Attributes:**
 - `metadata: StreamingResult` - Available only after the iterator completes;
   check `success` and `error` after consuming the stream
+
+**Methods:**
+- `close() -> None` - Stop consuming early and request bounded worker cleanup
 
 ### `StreamingResult`
 

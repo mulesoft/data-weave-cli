@@ -101,10 +101,13 @@ def clean_dataweave_runtime(request):
 
 @pytest.fixture(scope="session")
 def tck_runtime():
-    """Own one isolate for the TCK session; deferred writers cannot be torn down per case."""
+    """Own one isolate for the TCK session and release it after the lane."""
     runtime = dataweave.DataWeave()
     runtime.initialize()
-    yield runtime
+    try:
+        yield runtime
+    finally:
+        runtime.cleanup()
 
 
 @pytest.fixture

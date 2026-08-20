@@ -62,3 +62,23 @@ def test_parse_native_response_preserves_error_result():
     result = dataweave._parse_native_encoded_response('{"success": false, "error": "script failed"}')
 
     assert result == dataweave.ExecutionResult(False, None, "script failed", False, None, None)
+
+
+@pytest.mark.unit
+def test_stream_public_close_and_context_manager_close_the_underlying_generator():
+    closed = []
+
+    def generate():
+        try:
+            yield b"chunk"
+        finally:
+            closed.append(True)
+
+    stream = dataweave.Stream(generate())
+
+    with stream as managed:
+        assert next(managed) == b"chunk"
+
+    stream.close()
+
+    assert closed == [True]

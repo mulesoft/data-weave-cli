@@ -141,7 +141,7 @@ def test_run_streaming_returns_attach_failure_without_detaching_unattached_threa
 
 
 @pytest.mark.unit
-def test_stream_private_close_aborts_worker_and_detaches_after_consumer_abandons_output():
+def test_stream_public_close_aborts_worker_and_detaches_after_consumer_abandons_output():
     class BlockingFakeNative(FakeNative):
         def __init__(self):
             super().__init__('{"success": false, "error": "aborted"}')
@@ -164,10 +164,33 @@ def test_stream_private_close_aborts_worker_and_detaches_after_consumer_abandons
 
     assert next(stream) == b"first"
     assert native.first_chunk_written.wait(1)
-    stream._close()
+    stream.close()
 
     assert native.detached_event.wait(1)
     assert native.write_status == -1
+
+
+@pytest.mark.unit
+def test_run_input_output_callback_rejects_oversized_read_chunk_without_truncating():
+    class OversizedInputNative(FakeNative):
+        def run_script_input_output_callback(
+            self, _thread, _script, _inputs, _input_name, _mime_type, _charset, read_callback, _write_callback, _context,
+        ):
+            buffer = ctypes.create_string_buffer(3)
+            self.read_status = read_callback(None, ctypes.addressof(buffer), len(buffer))
+            self.read_input = bytes(buffer.raw[:max(self.read_status, 0)])
+            return self._response_pointer()
+
+    native = OversizedInputNative('{"success": false, "error": "read aborted"}')
+    runtime = configured_runtime(native)
+
+    result = runtime.run_input_output_callback(
+        "script", "payload", "application/json", lambda _size: b"oversized", lambda _data: 0,
+    )
+
+    assert result == dataweave.StreamingResult(False, "read aborted", None, None, False)
+    assert native.read_status == -1
+    assert native.read_input == b""
 
 
 @pytest.mark.unit
@@ -234,6 +257,20 @@ def test_run_streaming_reports_worker_timeout_when_native_call_produces_no_outpu
 
     with pytest.raises(dataweave.DataWeaveError, match="Worker thread timeout after 0.01 seconds"):
         list(runtime.run_streaming("script"))
+
+
+@pytest.mark.unit
+def test_stream_finalization_does_not_raise_when_a_native_worker_cannot_cancel(monkeypatch):
+    class UncancellableNative(FakeNative):
+        def run_script_callback(self, _thread, _script, _inputs, _write_callback, _context):
+            sleep(0.1)
+            return self._response_pointer()
+
+    monkeypatch.setattr(runtime_module, "_WORKER_JOIN_TIMEOUT_SECONDS", 0.001)
+    runtime = configured_runtime(UncancellableNative('{"success": true}'))
+    stream = runtime.run_streaming("script")
+
+    stream.close()
 
 
 @pytest.mark.unit

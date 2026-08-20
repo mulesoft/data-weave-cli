@@ -1,7 +1,7 @@
 """Output comparators for the formats emitted by the staged TCK corpus."""
 
 import json
-import xml.etree.ElementTree as ElementTree
+from xml.dom import Node, minidom
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -52,26 +52,36 @@ def _compare_json(actual: str, expected: str) -> CompareResult:
 
 def _compare_xml(actual: str, expected: str) -> CompareResult:
     try:
-        actual_value = _xml_value(ElementTree.fromstring(actual))
-    except ElementTree.ParseError as error:
+        actual_value = _xml_value(minidom.parseString(actual).documentElement)
+    except Exception as error:
         return CompareResult(False, f"actual is not valid XML: {error}")
     try:
-        expected_value = _xml_value(ElementTree.fromstring(expected))
-    except ElementTree.ParseError as error:
+        expected_value = _xml_value(minidom.parseString(expected).documentElement)
+    except Exception as error:
         return CompareResult(False, f"expected is not valid XML: {error}")
     return _result(actual_value == expected_value, "XML mismatch")
 
 
-def _xml_value(element: ElementTree.Element) -> Any:
+def _xml_value(element) -> Any:
     return (
-        element.tag,
-        tuple(sorted(element.attrib.items())),
-        (element.text or "").strip(),
+        element.tagName,
+        tuple(sorted(
+            (attribute.name, attribute.value)
+            for attribute in element.attributes.values()
+            if not attribute.name.startswith("xmlns")
+        )),
         tuple(
-            (_xml_value(child), (child.tail or "").strip())
-            for child in element
+            _xml_child_value(child)
+            for child in element.childNodes
+            if child.nodeType == Node.ELEMENT_NODE or child.data.strip()
         ),
     )
+
+
+def _xml_child_value(node) -> Any:
+    if node.nodeType == Node.ELEMENT_NODE:
+        return _xml_value(node)
+    return ("#text", node.data.strip())
 
 
 def _json_equal(actual: Any, expected: Any) -> bool:

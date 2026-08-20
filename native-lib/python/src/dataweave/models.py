@@ -114,8 +114,26 @@ class Stream:
     def metadata(self) -> Optional[StreamingResult]:
         return self._metadata
 
-    def _close(self) -> None:
+    def close(self) -> None:
+        """Stop consuming output and request bounded worker cleanup."""
         on_close = getattr(self, "_on_close", None)
         if on_close is not None:
             on_close()
-        self._gen.close()
+        try:
+            self._gen.close()
+        except Exception:
+            # Stream cancellation is best-effort; native calls cannot be forcibly
+            # interrupted from Python and cleanup must not escape finalization.
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc_val, _exc_tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        self.close()
+
+    _close = close

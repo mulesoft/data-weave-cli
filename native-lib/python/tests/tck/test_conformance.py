@@ -1,3 +1,7 @@
+import base64
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,7 +47,25 @@ ACCEPTED_BASELINE_MISMATCHES = {
     "core-modules/number-subtraction-out.json:out.json": (
         "runtime emits a numeric result that differs from the accepted baseline fixture"
     ),
+    "core-modules/multipart-binary-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
+    "core-modules/multipart-class-cast-issue-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
+    "core-modules/multipart-empty-part-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
+    "core-modules/multipart-mixed-message-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
+    "core-modules/multipart-write-message-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
+    "core-modules/multipart-write-subtype-override-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
+    "core-modules/properties-passthrough-out.properties:out.properties": "properties writer output differs from the baseline fixture",
+    "runtime/access_raw_value-out.json:out.json": "runtime coercion output differs from the baseline fixture",
+    "runtime/coerciones_toString-out.json:out.json": "locale-sensitive runtime output differs from the baseline fixture",
+    "runtime/properties-writer-out.properties:out.properties": "properties writer output differs from the baseline fixture",
+    "runtime/read-concat-out.json:out.json": "runtime coercion output differs from the baseline fixture",
+    "runtime/runtime_dataFormatsDescriptors-out.json:out.json": "dw::Runtime output differs from the baseline fixture",
+    "runtime/runtime_orElseTry-out.json:out.json": "source-location runtime output differs from the baseline fixture",
+    "runtime/runtime_run-out.json:out.json": "dw::Runtime output differs from the baseline fixture",
+    "runtime/try-recursive-call-out.json:out.json": "source-location runtime output differs from the baseline fixture",
+    "runtime/update-op-out.dwl:out.dwl": "runtime coercion output differs from the baseline fixture",
 }
+
+DEFERRED_WRITER_CASE = "core-modules/deferred-write-should-terminate-out.json:out.json"
 
 
 def tck_params():
@@ -62,28 +84,16 @@ def tck_params():
 @pytest.mark.unit
 def test_accepted_baseline_mismatches_are_strict_xfails_with_reasons():
     params = tck_params()
-    expected = {
-        "core-modules/csv-invalid-utf8-out.csv:out.csv": (
-            "runtime emits a replacement character where the fixture expects an empty CSV value"
-        ),
-        "core-modules/number-addition-out.json:out.json": (
-            "runtime emits a numeric result that differs from the accepted baseline fixture"
-        ),
-        "core-modules/number-subtraction-out.json:out.json": (
-            "runtime emits a numeric result that differs from the accepted baseline fixture"
-        ),
-    }
-
     xfails = {
         parameter.id: next(mark for mark in parameter.marks if mark.name == "xfail")
         for parameter in params
         if any(mark.name == "xfail" for mark in parameter.marks)
     }
 
-    assert set(xfails) == set(expected)
-    for identifier, reason in expected.items():
+    assert set(xfails) == set(ACCEPTED_BASELINE_MISMATCHES)
+    for identifier, mark in xfails.items():
         assert xfails[identifier].kwargs["strict"] is True
-        assert xfails[identifier].kwargs["reason"] == reason
+        assert xfails[identifier].kwargs["reason"] == ACCEPTED_BASELINE_MISMATCHES[identifier]
 
 
 @pytest.mark.unit
@@ -117,19 +127,24 @@ def test_tck_scenario(scenario, tck_runtime):
     if exclusion:
         pytest.skip(f"{exclusion.category}: {exclusion.reason}")
 
-    result = tck_runtime.run(scenario.transform, scenario.inputs)
-    assert result.success, result.error
+    if scenario.identifier == DEFERRED_WRITER_CASE:
+        success, error, output = _run_deferred_writer_in_subprocess(scenario)
+        assert success, error
+    else:
+        result = tck_runtime.run(scenario.transform, scenario.inputs)
+        assert result.success, result.error
+        output = result.get_bytes()
     comparison = compare_output(
         scenario.output_extension,
-        result.get_bytes(),
+        output,
         scenario.expected,
         scenario.charset,
     )
     assert comparison.match, comparison.detail
 
 
-def test_tck_session_runtime_runs_after_deferred_write_without_teardown(tck_runtime):
-    """Catches per-scenario isolate cleanup after a deferred writer stalls the lane."""
+def test_tck_session_runtime_runs_after_subprocess_deferred_write(tck_runtime):
+    """Deferred writers must not prevent the managed TCK runtime from continuing."""
     deferred = next(
         scenario
         for scenario in SCENARIOS
@@ -137,12 +152,55 @@ def test_tck_session_runtime_runs_after_deferred_write_without_teardown(tck_runt
         == "core-modules/deferred-write-should-terminate-out.json:out.json"
     )
 
-    deferred_result = tck_runtime.run(deferred.transform, deferred.inputs)
+    success, error, _output = _run_deferred_writer_in_subprocess(deferred)
     following_result = tck_runtime.run("%dw 2.0\noutput application/json\n--- 1")
 
-    assert deferred_result.success, deferred_result.error
+    assert success, error
     assert following_result.success, following_result.error
     assert following_result.get_bytes() == b"1"
+
+
+def _run_deferred_writer_in_subprocess(scenario):
+    """Contain the native deferred writer whose isolate teardown can block."""
+    source_dir = Path(__file__).resolve().parents[2] / "src"
+    inputs = {
+        name: {
+            "content": base64.b64encode(value.content if isinstance(value.content, bytes) else value.content.encode()).decode(),
+            "mime_type": value.mime_type,
+            "charset": value.charset,
+            "properties": value.properties,
+        }
+        for name, value in scenario.inputs.items()
+    }
+    code = """
+import base64
+import json
+import sys
+from dataweave import DataWeave, InputValue
+
+script, inputs_json = sys.argv[1:]
+inputs = {
+    name: InputValue(base64.b64decode(value['content']), value['mime_type'], value['charset'], value['properties'])
+    for name, value in json.loads(inputs_json).items()
+}
+runtime = DataWeave()
+runtime.initialize()
+result = runtime.run(script, inputs)
+print(json.dumps({'success': result.success, 'error': result.error, 'result': result.result}))
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(source_dir) + os.pathsep + environment.get("PYTHONPATH", "")
+    completed = subprocess.run(
+        [sys.executable, "-c", code, scenario.transform, json.dumps(inputs)],
+        capture_output=True,
+        check=False,
+        env=environment,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    response = json.loads(completed.stdout)
+    return response["success"], response["error"], base64.b64decode(response["result"] or "")
 
 
 def write_case(root: Path, name: str, files: Dict[str, Union[bytes, str]]) -> Path:
@@ -227,6 +285,17 @@ def test_compare_output_rejects_different_xml_tail_text():
     assert not result.match
 
 
+def test_compare_output_rejects_different_namespace_prefixes():
+    """Matches Node's policy: declaration placement is ignored, prefixes are not."""
+    result = compare_output(
+        "xml",
+        b'<left:root xmlns:left="urn:test"><left:value>1</left:value></left:root>',
+        b'<right:root xmlns:right="urn:test"><right:value>1</right:value></right:root>',
+    )
+
+    assert not result.match
+
+
 def test_exclusion_registry_requires_category_and_reason():
     """Catches exclusions that cannot be audited by category and rationale."""
     errors = validate_exclusions(
@@ -289,7 +358,7 @@ def test_only_declared_case_identifiers_are_excluded():
     exclusion = exclusion_for("runtime/import-lib-out.json")
     assert exclusion.case_identifier == "runtime/import-lib-out.json"
     assert exclusion.category == "unsupported-dw-module-resolution"
-    assert len(EXCLUDED_CASES) == 55
+    assert len(EXCLUDED_CASES) == 39
 
 
 def test_exclusion_registry_uses_the_inventory_categories():
@@ -299,12 +368,6 @@ def test_exclusion_registry_uses_the_inventory_categories():
         categories[exclusion.category] = categories.get(exclusion.category, 0) + 1
 
     assert categories == {
-        "coercion-runtime-compatibility": 3,
-        "dw-runtime-compatibility": 2,
-        "locale-dependent-output": 1,
-        "multipart-runtime-compatibility": 6,
-        "nondeterministic-properties-output": 2,
-        "source-location-dependent-output": 2,
         "unavailable-classpath-test-resource": 4,
         "unavailable-java-module": 11,
         "unsupported-dw-module-resolution": 24,

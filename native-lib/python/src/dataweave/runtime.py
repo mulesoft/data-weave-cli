@@ -21,6 +21,7 @@ from .native import NativeRuntime
 
 _OUTPUT_QUEUE_MAXSIZE = 512
 _WORKER_TIMEOUT_SECONDS = 30
+_WORKER_JOIN_TIMEOUT_SECONDS = 0.1
 
 
 class DataWeave:
@@ -119,7 +120,9 @@ class DataWeave:
                             publish(CleanupFailure(error))
                 publish(sentinel)
 
-        worker = Thread(target=worker_main, name="dw-streaming-worker", daemon=False)
+        # Python cannot cancel a native call. Daemon workers keep an abandoned
+        # call from extending interpreter lifetime after bounded cancellation.
+        worker = Thread(target=worker_main, name="dw-streaming-worker", daemon=True)
         worker.start()
         metadata = None
         try:
@@ -128,7 +131,7 @@ class DataWeave:
                     item = queue.get(timeout=_WORKER_TIMEOUT_SECONDS)
                 except Empty:
                     cancelled.set()
-                    worker.join(timeout=_WORKER_TIMEOUT_SECONDS)
+                    worker.join(timeout=_WORKER_JOIN_TIMEOUT_SECONDS)
                     raise DataWeaveError(f"Worker thread timeout after {_WORKER_TIMEOUT_SECONDS} seconds")
                 if item is sentinel:
                     break
@@ -140,9 +143,7 @@ class DataWeave:
                     yield item
         finally:
             cancelled.set()
-            worker.join(timeout=_WORKER_TIMEOUT_SECONDS)
-            if worker.is_alive():
-                raise DataWeaveError(f"Worker thread timeout after {_WORKER_TIMEOUT_SECONDS} seconds")
+            worker.join(timeout=_WORKER_JOIN_TIMEOUT_SECONDS)
         return parse_streaming_result(metadata or {"success": False, "error": "No metadata received from native call"})
 
     def run_streaming(self, script: str, inputs: Optional[Dict[str, Any]] = None) -> Stream:
@@ -200,9 +201,10 @@ class DataWeave:
                 data = read_callback(buffer_size)
                 if not data:
                     return 0
-                size = min(len(data), buffer_size)
-                ctypes.memmove(buffer, data, size)
-                return size
+                if len(data) > buffer_size:
+                    return -1
+                ctypes.memmove(buffer, data, len(data))
+                return len(data)
             except Exception:
                 return -1
         @WRITE_CALLBACK
