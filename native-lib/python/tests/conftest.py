@@ -70,16 +70,21 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         and "::test_tck_scenario[" in report.nodeid
     ]
     totals = {
-        outcome: sum(report.outcome == outcome for report in reports)
+        outcome: sum(
+            report.outcome == outcome
+            and (outcome != "skipped" or not getattr(report, "wasxfail", None))
+            for report in reports
+        )
         for outcome in ("passed", "failed", "skipped")
     }
+    xfailed = sum(bool(getattr(report, "wasxfail", None)) for report in reports)
     executed = totals["passed"] + totals["failed"]
     terminalreporter.write_line(
         "TCK totals: "
         f"selected={len(scenarios)}, structural-skips={discovery.structural_skips}, "
         f"structural-module-cases={len(structural_modules)}, "
         f"executed={executed}, active-exclusions={totals['skipped']}, passed={totals['passed']}, "
-        f"failed={totals['failed']}"
+        f"failed={totals['failed']}, xfail={xfailed}"
     )
 
 

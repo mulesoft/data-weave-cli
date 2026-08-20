@@ -232,12 +232,12 @@ tasks.register('stageTckSuites') {
 // shares the resolved artifacts and extraction, avoiding a second download.
 tasks.register('pythonTck', Exec) {
   dependsOn tasks.named('stagePythonNativeLib')
-  dependsOn tasks.named('stageTckSuites')
   workingDir("${projectDir}/python")
   inputs.dir("${projectDir}/python/tests/tck")
   inputs.dir(tckSuitesDir)
   inputs.file("${projectDir}/python/pytest.ini")
-  commandLine(pythonExe, '-m', 'pytest', '-m', 'tck')
+  commandLine(pythonExe, '-m', 'pytest', '-m', 'tck',
+    '--junitxml', "${layout.buildDirectory.get().asFile}/test-results/pythonTck.xml")
 }
 
 tasks.register('buildNodePackage', Exec) {
