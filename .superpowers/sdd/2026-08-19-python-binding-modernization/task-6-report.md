@@ -118,9 +118,26 @@
    passed`.
 3. YAML parsing for changed workflow/actions and `git diff --check` passed.
 
+### Fix Round 5 Verification
+
+1. Root cause: the prior `named_step_if` extractor used `\s` for indentation.
+   Because `\s` includes newlines, the body capture could cross a same-level
+   step boundary and read that later step's `if` guard.
+2. RED: `test_named_step_if_does_not_read_a_later_step_guard` failed against
+   the prior extractor: after removing the aggregation step guard and placing
+   it on a later same-level step, the helper incorrectly returned the later
+   guard instead of raising `missing if guard`.
+3. GREEN: the extractor now captures the named step's leading horizontal
+   whitespace and consumes only lines with additional horizontal whitespace.
+   The new mutation regression and the focused CI structure suite passed with
+   `6 passed`.
+4. Python YAML parsing of the changed workflow/action files and `git diff
+   --check` passed.
+
 ## Commit
 
-- Pending Fix Round 4 commit: `test: scope CI workflow guard assertions`
+- Fix Round 4 commit: `test: scope CI workflow guard assertions`
+- Pending Fix Round 5 commit: `test: bound CI workflow guard step extraction`
 
 ## Concerns
 

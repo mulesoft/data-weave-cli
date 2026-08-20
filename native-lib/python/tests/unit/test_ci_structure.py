@@ -6,13 +6,14 @@ import pytest
 
 def named_step_if(document: str, name: str) -> str:
     step = re.search(
-        rf"^\s*- name: {re.escape(name)}\n(?P<body>(?:^\s{{6}}.*\n?)*)",
+        rf"^(?P<indent>[ \t]*)- name: {re.escape(name)}\n"
+        rf"(?P<body>(?:^(?P=indent)[ \t]+.*\n?)*)",
         document,
         re.MULTILINE,
     )
     assert step, f"missing step {name!r}"
 
-    guard = re.search(r"^\s+if: (?P<guard>.+)$", step.group("body"), re.MULTILINE)
+    guard = re.search(r"^[ \t]+if: (?P<guard>.+)$", step.group("body"), re.MULTILINE)
     assert guard, f"missing if guard for step {name!r}"
     return guard.group("guard")
 
@@ -90,3 +91,16 @@ def test_foundation_skips_python_tests_and_master_aggregates_binding_failures():
         "always() && (steps.python.outcome == 'failure' || steps.node.outcome == 'failure')"
     )
     assert workflow.index("- name: Native library") < workflow.index("- name: Fail if binding artifacts failed")
+
+
+@pytest.mark.unit
+def test_named_step_if_does_not_read_a_later_step_guard():
+    mutated_workflow = """\
+      - name: Fail if binding artifacts failed
+        run: exit 1
+      - name: Later step
+        if: always() && (steps.python.outcome == 'failure' || steps.node.outcome == 'failure')
+"""
+
+    with pytest.raises(AssertionError, match="missing if guard"):
+        named_step_if(mutated_workflow, "Fail if binding artifacts failed")
