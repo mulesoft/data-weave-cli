@@ -274,6 +274,13 @@ let globalInstance: DataWeave | null = null;
 // Guards against beforeExit and exit both driving cleanup for the same
 // shutdown. Belt-and-suspenders on top of cleanup()'s own idempotency.
 let cleanupStarted = false;
+// Coalesces overlapping module-level cleanup() calls, mirroring the
+// instance-level DataWeave.cleanupPromise. Without it, the second of two
+// overlapping module cleanup() calls sees globalInstance already nulled and
+// resolves immediately -- before the first call's native teardown finishes,
+// violating cleanup()'s "resolves once native teardown has finished" contract
+// for the last reference. (round 12 #5)
+let cleanupPromise: Promise<void> | null = null;
 // Process exit hooks are registered exactly once for the lifetime of the
 // module, NOT per singleton. Re-creating the singleton after cleanup() must
 // not attach a second pair of listeners (that accumulates until Node emits
@@ -380,16 +387,20 @@ export function runTransform(
  * singleton is created lazily on the next convenience-API call.
  */
 export async function cleanup(): Promise<void> {
-  if (globalInstance) {
-    const instance = globalInstance;
-    globalInstance = null;
-    await instance.cleanup();
-    // Reset the guard only after the drain has fully completed, so a
-    // revived singleton (created by a later getGlobalInstance() call)
-    // gets its own live hooks for the next real exit. This must stay
-    // last: resetting earlier could let a concurrent `exit` firing on
-    // this same shutdown re-enter cleanup while the async drain above
-    // is still in flight.
+  // Coalesce overlapping calls onto one drain (round 12 #5).
+  if (cleanupPromise) return cleanupPromise;
+  if (!globalInstance) return;
+  const instance = globalInstance;
+  globalInstance = null;
+  cleanupPromise = instance.cleanup();
+  try {
+    await cleanupPromise;
+  } finally {
+    cleanupPromise = null;
+    // Reset the exit-hook guard only after the drain has fully completed, so a
+    // revived singleton gets its own live hooks for the next real exit. Must
+    // stay last: resetting earlier could let a concurrent `exit` firing on this
+    // same shutdown re-enter cleanup while the async drain above is in flight.
     cleanupStarted = false;
   }
 }

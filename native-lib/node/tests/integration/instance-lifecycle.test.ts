@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { DataWeave } from "../../src/dataweave";
+import { DataWeave, run, cleanup } from "../../src/dataweave";
 import { DataWeaveError } from "../../src/errors";
 import * as ffi from "../../src/ffi";
 import { findLibrary, buildInputsJson } from "../../src/utils";
@@ -144,5 +144,30 @@ describe("runTransform re-checks readiness after async input pre-buffering (roun
     release();
 
     await expect(firstNext).rejects.toBeInstanceOf(DataWeaveError);
+  });
+});
+
+// Round 12, Task 6: the exported module-level cleanup() nulls globalInstance
+// synchronously, then awaits instance.cleanup(). A second overlapping
+// module-level cleanup() call must coalesce onto the SAME in-flight drain
+// rather than seeing globalInstance already nulled and resolving immediately
+// -- before the first call's native teardown actually finishes.
+describe("module-level cleanup() coalescing (round 12 Task 6)", () => {
+  it("module-level cleanup() coalesces overlapping calls (round 12 #5)", async () => {
+    // Create the singleton.
+    expect(run("%dw 2.0\noutput application/json\n---\n1 + 1").success).toBe(true);
+
+    let firstSettled = false;
+    const p1 = cleanup().then(() => { firstSettled = true; });
+    // Second call overlaps the first's in-flight drain.
+    const p2 = cleanup();
+    // The coalesced second call must not resolve before the first's drain does.
+    await p2;
+    expect(firstSettled).toBe(true);
+    await p1;
+
+    // A subsequent run lazily revives the singleton (no wedged state).
+    expect(run("%dw 2.0\noutput application/json\n---\n2 + 2").success).toBe(true);
+    await cleanup();
   });
 });
