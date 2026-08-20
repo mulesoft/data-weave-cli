@@ -177,7 +177,9 @@ with dataweave.DataWeave() as dw:
 
 ### Bidirectional Streaming (Input + Output)
 
-Stream both input and output for constant memory usage with large files:
+Stream both input and output with bounded Python-side queueing. Memory usage is
+bounded by the queue capacity plus the input and output chunk sizes; DataWeave
+itself can still buffer while parsing or evaluating a transform.
 
 ```python
 # Stream a file through DataWeave
@@ -254,11 +256,18 @@ print(result)            # StreamingResult(success=True, ...)
 print(b"".join(chunks))  # b'[1,4,9,16,25]'
 ```
 
+Read callbacks return bytes and are called with the native buffer size. Return
+`b""` for EOF; an exception is translated to `-1`, which aborts the native
+operation. Write callbacks return `0` on success. Any nonzero return value, or
+an exception, aborts the operation and returns unsuccessful `StreamingResult`
+metadata rather than unwinding a Python exception through the native callback.
+
 ## Running Tests
 
 ```bash
 cd native-lib/python
-python3 -m pytest tests/integration -m integration -v
+python3 -m pip install '.[test]'
+python3 -m pytest -m "unit or integration" -v
 ```
 
 Or via Gradle:
@@ -270,6 +279,18 @@ Or via Gradle:
 `pytest.ini` registers `unit`, `integration`, and `tck` markers. Normal pytest
 runs exclude `tck`; use `-m "unit or integration"` to run the lanes used by
 `pythonTest`.
+
+To stage and run the Python conformance suite, use:
+
+```bash
+./gradlew :native-lib:stageTckSuites :native-lib:pythonTck
+```
+
+`pythonTck` is intentionally separate from normal testing and runs only in the
+master-only CI lane. It reuses the corpus staged for Node TCK. It excludes
+cases requiring unsupported DataWeave module resolution and other documented
+environment limitations. The remaining three known conformance mismatches are
+reported as failures, so this lane currently exits nonzero by design.
 
 ## Running Examples
 
@@ -299,18 +320,19 @@ Execute a script and stream the output.
 
 **Returns:** `Stream` iterator yielding chunks, with `.metadata` attribute
 
-#### `run_transform(script, input_stream, input_name="payload", input_mime_type="application/json", input_charset=None, input_properties=None) -> Stream`
+#### `run_transform(script, input_stream, input_name="payload", input_mime_type="application/json", input_charset=None, inputs=None) -> Stream`
 
 Execute a script with streaming input and output.
 
 **Parameters:**
 - `input_stream`: Iterable of bytes (file, generator, list)
 - `input_mime_type`: MIME type of the input stream
-- Other parameters configure input handling
+- `input_charset`: Optional charset for the streamed input
+- `inputs`: Optional additional DataWeave input bindings
 
 **Returns:** `Stream` iterator yielding output chunks
 
-#### `run_input_output_callback(script, input_name, input_mime_type, read_callback, write_callback, input_charset=None, input_properties=None, inputs=None) -> StreamingResult`
+#### `run_input_output_callback(script, input_name, input_mime_type, read_callback, write_callback, input_charset=None, inputs=None) -> StreamingResult`
 
 Low-level callback API for advanced use cases.
 
@@ -352,10 +374,11 @@ class ExecutionResult:
 
 ### `Stream`
 
-Iterator that yields output chunks.
+Iterator that yields output chunks through a bounded queue.
 
 **Attributes:**
-- `metadata: StreamingResult` - Available after iteration completes
+- `metadata: StreamingResult` - Available only after the iterator completes;
+  check `success` and `error` after consuming the stream
 
 ### `StreamingResult`
 
@@ -474,7 +497,9 @@ if not stream.metadata.success:
 - **Buffered execution** (`run()`) - Best for small outputs (<1MB)
 - **Output streaming** (`run_streaming()`) - Use for large outputs (>10MB)
 - **Bidirectional streaming** (`run_transform()`) - Use for large inputs AND outputs
-- **Memory usage**: Streaming uses constant memory (~64KB buffer)
+- **Memory usage**: Streaming uses a bounded queue and native callback-sized
+  chunks. It avoids accumulating output in the Python binding, but does not
+  guarantee fixed or constant memory for the DataWeave runtime or transform.
 
 ## Environment Variables
 

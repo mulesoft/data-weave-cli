@@ -1,9 +1,10 @@
 name: Python artifact
 description: >-
   Installs Python build dependencies and builds the DataWeave Python wheel
-  (which embeds dwlib); optionally publishes the wheel as a CI artifact (main)
-  or a release asset (release). No TCK phase today. Requires build-foundation to
-  have run earlier in the same job.
+  (which embeds dwlib), runs the Python unit/integration tests, and optionally
+  runs the master-only Python TCK conformance lane before publishing the wheel
+  as a CI artifact (main) or a release asset (release). Requires
+  build-foundation to have run earlier in the same job.
 inputs:
   native-version:
     description: -PnativeVersion value; empty omits the flag.
@@ -14,6 +15,10 @@ inputs:
       When 'true', add --break-system-packages to the pip install (required on
       GitHub-hosted runners per PEP 668; not needed on self-hosted mulesoft
       runners).
+    required: false
+    default: 'false'
+  run-tck:
+    description: When 'true', run the master-only Python TCK conformance lane.
     required: false
     default: 'false'
   publish:
@@ -31,12 +36,21 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install Python build dependencies
+    - name: Install Python build and test dependencies
       # --ignore-installed: on macOS runners, Homebrew's own setuptools/wheel have no
       # pip RECORD file, so a plain --upgrade fails trying to uninstall them first
       # (pip error "uninstall-no-record-file"). --ignore-installed installs pip's
       # copy on top without needing to remove the untracked brew one.
-      run: python3 -m pip install ${{ inputs.break-system-packages == 'true' && '--break-system-packages' || '' }} --upgrade --ignore-installed setuptools wheel
+      run: python3 -m pip install ${{ inputs.break-system-packages == 'true' && '--break-system-packages' || '' }} --upgrade --ignore-installed setuptools wheel 'native-lib/python[test]'
+      shell: bash
+
+    - name: Run Python Tests
+      run: ./gradlew --stacktrace --no-problems-report native-lib:pythonTest ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
+      shell: bash
+
+    - name: Run Python TCK Conformance
+      if: inputs.run-tck == 'true'
+      run: ./gradlew --stacktrace --no-problems-report native-lib:pythonTck
       shell: bash
 
     - name: Create Native Lib Python Wheel

@@ -63,6 +63,7 @@ jobs:
         with:
           native-version: ${{ env.NATIVE_VERSION }}
           break-system-packages: 'true'
+          run-tck: ${{ github.ref == 'refs/heads/master' }}
           publish: 'artifact'
 
       - name: Node
