@@ -81,7 +81,6 @@ def tck_params():
     ]
 
 
-@pytest.mark.unit
 def test_accepted_baseline_mismatches_are_strict_xfails_with_reasons():
     params = tck_params()
     xfails = {

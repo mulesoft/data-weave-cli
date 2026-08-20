@@ -70,6 +70,14 @@ def test_master_tck_stages_the_shared_corpus_once_before_python_and_node():
 
 
 @pytest.mark.unit
+def test_tck_metadata_validation_is_not_selected_by_the_pr_python_test_lane():
+    root = Path(__file__).resolve().parents[4]
+    conformance = (root / "native-lib/python/tests/tck/test_conformance.py").read_text()
+
+    assert "@pytest.mark.unit\ndef test_accepted_baseline_mismatches" not in conformance
+
+
+@pytest.mark.unit
 def test_foundation_skips_python_tests_and_master_aggregates_binding_failures():
     root = Path(__file__).resolve().parents[4]
     foundation = (root / ".github/actions/build-foundation/action.yml").read_text()
