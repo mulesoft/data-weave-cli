@@ -45,6 +45,16 @@
 - CI structure tests assert both exact TCK conditions and that Native library
   precedes the aggregation step. Strict Python TCK xfails remain unchanged.
 
+## Fix Round 4
+
+- CI structure tests no longer use global `if` substring checks for TCK or
+  binding failure aggregation. A scoped `named_step_if` extractor selects the
+  named YAML step and reads only that step's `if` field.
+- The test asserts the exact guard for `Run Python TCK Conformance`, `Run
+  Node.js TCK Conformance`, and `Fail if binding artifacts failed`. Thus the
+  Python TCK assertion cannot be satisfied by the similarly guarded JUnit
+  upload step, and changes to any required `always()` or outcome clause fail.
+
 ## Changes
 
 - `.github/actions/python/action.yml` installs the Python `test` extra, runs
@@ -100,9 +110,17 @@
    composite action TCK guards and moving final aggregation.
 3. YAML parsing for the changed workflow/actions and `git diff --check` passed.
 
+### Fix Round 4 Verification
+
+1. RED: the focused CI structure test failed after replacing global checks with
+   calls to the not-yet-defined scoped extractor.
+2. GREEN: after adding `named_step_if`, the focused test passed with `5
+   passed`.
+3. YAML parsing for changed workflow/actions and `git diff --check` passed.
+
 ## Commit
 
-- Pending Fix Round 3 commit: `ci: run binding TCKs after failures`
+- Pending Fix Round 4 commit: `test: scope CI workflow guard assertions`
 
 ## Concerns
 
