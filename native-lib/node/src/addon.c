@@ -123,6 +123,25 @@ typedef struct engine_bridge {
 } engine_bridge_t;
 static engine_bridge_t* g_bridges = NULL;  // linked list, guarded by g_mutex
 
+// One record per napi_env that has ever taken an init reference (via
+// initialize()). init_refs is that env's net initialize()-minus-cleanup()
+// balance. Created lazily on the env's first initialize(); registers exactly
+// one env-death hook (env_init_cleanup) at creation; freed by that hook when
+// its env dies (after releasing every reference the env still holds). All
+// fields mutated ONLY under g_mutex.
+//
+// INVARIANT: g_ref_count == sum of init_refs over all records in g_env_recs.
+// This is the round-13 (#5) fix: the isolate's reference count is owned per
+// env, so an abandoned env (or a raw multi-engine-per-initialize() consumer)
+// can only release the references IT holds -- it can never drive g_ref_count
+// to zero and tear the isolate down while ANOTHER env's engines are live.
+typedef struct env_init_rec {
+    napi_env env;
+    int init_refs;
+    struct env_init_rec* next;
+} env_init_rec_t;
+static env_init_rec_t* g_env_recs = NULL;  // linked list, guarded by g_mutex
+
 // --- Teardown-vs-active-ops coordination (deadlock fix) ---
 //
 // napi_cleanup's last-release path used to synchronously join a thread that
@@ -208,6 +227,35 @@ static engine_bridge_t* bridge_find(long long handle) {
         if (b->handle == handle) return b;
     }
     return NULL;
+}
+
+// Find this env's init record, or NULL. Caller MUST hold g_mutex.
+static env_init_rec_t* env_init_rec_find_locked(napi_env env) {
+    for (env_init_rec_t* r = g_env_recs; r != NULL; r = r->next) {
+        if (r->env == env) return r;
+    }
+    return NULL;
+}
+
+// Find-or-create this env's init record and increment its init_refs. Sets
+// *is_new = true iff a record was just allocated (the caller must then register
+// the env-death hook on its own thread). Returns the record, or NULL only on
+// calloc failure (caller must NOT bump g_ref_count in that case). Caller MUST
+// hold g_mutex.
+static env_init_rec_t* env_init_rec_acquire_locked(napi_env env, bool* is_new) {
+    *is_new = false;
+    env_init_rec_t* r = env_init_rec_find_locked(env);
+    if (r == NULL) {
+        r = (env_init_rec_t*)calloc(1, sizeof(env_init_rec_t));
+        if (r == NULL) return NULL;
+        r->env = env;
+        r->init_refs = 0;
+        r->next = g_env_recs;
+        g_env_recs = r;
+        *is_new = true;
+    }
+    r->init_refs++;
+    return r;
 }
 
 // Fully dispose of a bridge: delete its napi_ref (if the owning env is still
