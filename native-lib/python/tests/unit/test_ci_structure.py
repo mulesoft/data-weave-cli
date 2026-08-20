@@ -17,7 +17,7 @@ def test_python_tck_is_gated_by_the_master_only_workflow_input():
     action = (root / ".github/actions/python/action.yml").read_text()
     workflow = (root / ".github/workflows/main.yml").read_text()
 
-    assert "if: inputs.run-tck == 'true'" in action
+    assert "if: always() && inputs.run-tck == 'true'" in action
     assert "native-lib:pythonTck" in action
     assert "run-tck: ${{ github.ref == 'refs/heads/master' }}" in workflow
 
@@ -59,6 +59,8 @@ def test_foundation_skips_python_tests_and_master_aggregates_binding_failures():
     root = Path(__file__).resolve().parents[4]
     foundation = (root / ".github/actions/build-foundation/action.yml").read_text()
     workflow = (root / ".github/workflows/main.yml").read_text()
+    python_action = (root / ".github/actions/python/action.yml").read_text()
+    node_action = (root / ".github/actions/node/action.yml").read_text()
 
     assert "-PskipPythonTests=true" in foundation
     assert "id: python" in workflow
@@ -68,3 +70,6 @@ def test_foundation_skips_python_tests_and_master_aggregates_binding_failures():
     assert "steps.python.outcome == 'failure'" in workflow
     assert "steps.node.outcome == 'failure'" in workflow
     assert "platform: ${{ matrix.script_name }}" in workflow
+    assert "if: always() && inputs.run-tck == 'true'" in python_action
+    assert "if: always() && inputs.run-tck == 'true'" in node_action
+    assert workflow.index("- name: Native library") < workflow.index("- name: Fail if binding artifacts failed")

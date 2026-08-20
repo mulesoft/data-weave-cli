@@ -85,11 +85,6 @@ jobs:
           arch: ${{ env.ARCH }}
           script-name: ${{ matrix.script_name }}
 
-      - name: Fail if binding artifacts failed
-        if: always() && (steps.python.outcome == 'failure' || steps.node.outcome == 'failure')
-        run: exit 1
-        shell: bash
-
       - name: Native library
         uses: ./.github/actions/native-lib
         with:
@@ -97,3 +92,8 @@ jobs:
           publish: 'artifact'
           arch: ${{ env.ARCH }}
           script-name: ${{ matrix.script_name }}
+
+      - name: Fail if binding artifacts failed
+        if: always() && (steps.python.outcome == 'failure' || steps.node.outcome == 'failure')
+        run: exit 1
+        shell: bash

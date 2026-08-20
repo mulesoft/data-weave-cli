@@ -34,6 +34,17 @@
 - The strict xfail baseline remains unchanged: only the three accepted named
   mismatches are strict xfails; any new mismatch and any XPASS fail the TCK.
 
+## Fix Round 3
+
+- The Python and Node master-only TCK conformance steps now use
+  `always() && inputs.run-tck == 'true'`, so they run even if an earlier step
+  in the same composite action failed.
+- The binding failure aggregation step remains guarded by `always()` and the
+  Python/Node step outcomes, but now follows the Native library artifact step.
+  It is therefore the workflow's final binding-failure verdict.
+- CI structure tests assert both exact TCK conditions and that Native library
+  precedes the aggregation step. Strict Python TCK xfails remain unchanged.
+
 ## Changes
 
 - `.github/actions/python/action.yml` installs the Python `test` extra, runs
@@ -80,9 +91,18 @@
    `./gradlew --stacktrace --no-problems-report -PskipNodeTests=true
    -PskipPythonTests=true -PskipTCKTests=true build`.
 
+### Fix Round 3 Verification
+
+1. RED: `python3 -m pytest tests/unit/test_ci_structure.py -m unit -v` failed
+   because the Node TCK condition lacked `always()` and the binding aggregation
+   preceded Native library.
+2. GREEN: the same focused test passed with `5 passed` after updating both
+   composite action TCK guards and moving final aggregation.
+3. YAML parsing for the changed workflow/actions and `git diff --check` passed.
+
 ## Commit
 
-- Pending Fix Round 2 commit: `ci: harden binding artifact sequencing`
+- Pending Fix Round 3 commit: `ci: run binding TCKs after failures`
 
 ## Concerns
 

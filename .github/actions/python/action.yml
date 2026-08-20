@@ -74,7 +74,7 @@ runs:
         overwrite: true
 
     - name: Run Python TCK Conformance
-      if: inputs.run-tck == 'true'
+      if: always() && inputs.run-tck == 'true'
       run: ./gradlew --stacktrace --no-problems-report native-lib:pythonTck
       shell: bash
 
