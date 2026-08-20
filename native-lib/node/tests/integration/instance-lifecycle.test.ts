@@ -108,3 +108,41 @@ describe("napi_cleanup refactor preserves last-release teardown (round 12 Task 1
     ).toThrow(/not initialized/i);
   });
 });
+
+// Round 12, Task 4: createChunkReader pre-buffers async inputs by awaiting
+// the entire iterable up front (see reader.ts), because the native read
+// callback is invoked synchronously and cannot await. That await can span
+// arbitrarily long, so if the caller cleans up the instance while it's in
+// flight, runTransform must re-check readiness on resume rather than
+// dispatching to a nulled/destroyed engine handle.
+describe("runTransform re-checks readiness after async input pre-buffering (round 12 Task 4)", () => {
+  it("throws a synchronous DataWeaveError if cleanup() runs during createChunkReader's await, instead of resolving an error envelope", async () => {
+    const dw = new DataWeave();
+    dw.initialize();
+
+    // An async input whose iterator blocks until released, so cleanup() can
+    // run while createChunkReader is still pre-buffering it.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    async function* slowInput(): AsyncGenerator<Buffer> {
+      await gate;
+      yield Buffer.from("[1,2,3]");
+    }
+
+    const gen = dw.runTransform("%dw 2.0\noutput application/json\n---\npayload", slowInput(), {
+      mimeType: "application/json",
+    });
+
+    // Start driving the generator; it suspends awaiting createChunkReader ->
+    // slowInput's gate.
+    const firstNext = gen.next();
+    // Clean up while the input is still pre-buffering.
+    await dw.cleanup();
+    // Release the gate so createChunkReader's await resolves; the readiness
+    // re-check must now throw synchronously rather than proceeding to a
+    // nulled engine handle.
+    release();
+
+    await expect(firstNext).rejects.toBeInstanceOf(DataWeaveError);
+  });
+});

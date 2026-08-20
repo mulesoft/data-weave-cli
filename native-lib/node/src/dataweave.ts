@@ -236,6 +236,14 @@ export class DataWeave {
 
     const readCb = await createChunkReader(input);
 
+    // The instance may have been cleaned up while an async input pre-buffered
+    // (createChunkReader can await arbitrarily long). Re-check readiness so a
+    // caller that raced cleanup() gets a synchronous DataWeaveError rather than
+    // a resolved "Unknown engine handle" envelope. The C admission pin is the
+    // authoritative memory-safety guard (round 11 #2/#3); this only improves the
+    // failure ergonomics for a misused instance. (round 12 #4)
+    this.ensureReady();
+
     return yield* streamFromNative((writeCb) =>
       ffi.runScriptTransformEngine(
         this.engineHandle!,
