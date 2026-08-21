@@ -27,6 +27,11 @@ export class TckAccountingReporter implements Reporter {
     this.testNamePattern = vitest.config.testNamePattern;
   }
 
+  onTestRunStart(): void {
+    this.selected.clear();
+    this.results.length = 0;
+  }
+
   onTestModuleCollected(testModule: TestModule): void {
     if (!testModule.moduleId.replaceAll("\\", "/").endsWith(TCK_FILE)) return;
     for (const testCase of testModule.children.allTests()) {
