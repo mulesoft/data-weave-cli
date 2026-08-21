@@ -5,6 +5,7 @@ export default defineConfig({
     // Groups are built out incrementally, so a lane with no test files yet
     // (e.g. tck) must not fail the run.
     passWithNoTests: true,
+    reporters: ["default", "./tests/tck/reporter.ts"],
     // Three test groups. Run all with `vitest run`, or one lane with
     // `vitest run --project unit` (etc.). Coverage merges across whichever ran.
     //   - unit:        pure TS logic, no native library (dwlib) required.

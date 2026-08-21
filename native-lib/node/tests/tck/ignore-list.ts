@@ -21,11 +21,26 @@
 //   coercion/runtime  — runtime coercion/streaming behavior, also CLI-ignored.
 //   xml               — attribute selector runtime behavior or namespace differences.
 
+export const SUPPORTED_CATEGORIES = [
+  "unavailable-module-or-resource",
+  "unavailable-java-module",
+  "runtime-baseline-mismatch",
+  "environment-sensitive",
+  "slow",
+] as const;
+
+export type IgnoreCategory = typeof SUPPORTED_CATEGORIES[number];
+
 export interface IgnoreEntry {
+  caseIdentifier: string;
+  category: IgnoreCategory | string;
   reason: string;
 }
 
-export const IGNORED_CASES: Readonly<Record<string, IgnoreEntry>> = {
+const EXPECTED_RUNNABLE_CASES = 729;
+const EXPECTED_STRUCTURAL_SKIPS = 193;
+
+const LEGACY_IGNORED_CASES: Readonly<Record<string, { reason: string }>> = {
   // unresolved-module — library/resource not present in dwlib
   "dw-binary-out.dwl": { reason: "unresolved-module: readUrl/classpath resource" },
   "is-empty-using-empty-stream-out.json": { reason: "unresolved-module: dw::Client streaming" },
@@ -105,12 +120,114 @@ export const IGNORED_CASES: Readonly<Record<string, IgnoreEntry>> = {
   "xml_empty_namespace-out.xml": { reason: "xml: empty namespace serialization" },
 };
 
+const CORE_MODULE_CASES = new Set([
+  "read-binary-files-out.bin",
+  "multipart-binary-out.multipart",
+  "multipart-class-cast-issue-out.multipart",
+  "multipart-empty-part-out.multipart",
+  "multipart-mixed-message-out.multipart",
+  "multipart-write-binary-out.json",
+  "multipart-write-message-out.multipart",
+  "multipart-write-subtype-override-out.multipart",
+  "properties-passthrough-out.properties",
+  "csv-invalid-utf8-out.csv",
+  "xml-escaped-data-out.xml",
+  "xml-streaming-selectors-out.xml",
+  "xml-value-selector-out.xml",
+  "xml_empty_namespace-out.xml",
+]);
+
+function categoryFor(reason: string): IgnoreCategory {
+  if (reason.startsWith("unresolved-module:")) return "unavailable-module-or-resource";
+  if (reason.startsWith("java:")) return "unavailable-java-module";
+  if (reason.startsWith("nondeterministic:")) return "environment-sensitive";
+  if (reason.startsWith("slow:")) return "slow";
+  return "runtime-baseline-mismatch";
+}
+
+export const IGNORED_CASES: Readonly<Record<string, IgnoreEntry>> = Object.fromEntries(
+  Object.entries(LEGACY_IGNORED_CASES).map(([caseName, entry]) => {
+    const suite = CORE_MODULE_CASES.has(caseName) ? "core-modules" : "runtime";
+    const caseIdentifier = `${suite}/${caseName}`;
+    return [caseIdentifier, {
+      caseIdentifier,
+      category: categoryFor(entry.reason),
+      reason: entry.reason,
+    }];
+  })
+);
+
+export const STRUCTURAL_MODULE_CASES = new Set([
+  "runtime/implicit_type_parameters-out.json",
+  "runtime/import_mapping-out.json",
+  "runtime/import_mapping_with_functions-out.json",
+  "runtime/import_mapping_with_implicit_input-out.json",
+  "runtime/import_namespace-out.xml",
+  "runtime/infinit_list-out.json",
+  "runtime/interceptor_functions-out.json",
+  "runtime/lazy_metadata_definition-out.json",
+  "runtime/location-out.json",
+  "runtime/locationString-out.json",
+  "runtime/logwith_function-out.json",
+  "runtime/read-function-by-id-out.json",
+  "runtime/read-function-out.json",
+  "runtime/runtime_evalUrl-out.json",
+  "runtime/runtime_runUrl-out.json",
+  "runtime/type_selector_materialize-out.json",
+  "runtime/weave_multiple_namespace-out.dwl",
+]);
+
+export function validateIgnorePolicy(
+  entries: Readonly<Record<string, IgnoreEntry>>,
+  runnableCases?: ReadonlySet<string>
+): string[] {
+  const errors: string[] = [];
+  for (const [identifier, entry] of Object.entries(entries)) {
+    if (!entry.caseIdentifier) errors.push(`${identifier}: missing case identity`);
+    else if (entry.caseIdentifier !== identifier) errors.push(`${identifier}: case identity must match registry key`);
+    if (!SUPPORTED_CATEGORIES.includes(entry.category as IgnoreCategory)) {
+      errors.push(`${identifier}: unsupported category ${entry.category}`);
+    }
+    if (!entry.reason.trim()) errors.push(`${identifier}: missing reason`);
+    if (runnableCases && !runnableCases.has(identifier)) {
+      errors.push(`${identifier}: not a discovered runnable case`);
+    }
+  }
+  return errors;
+}
+
+export function validateInventoryPolicy(runnableCases: number, structuralSkips: number): string[] {
+  const errors: string[] = [];
+  if (runnableCases !== EXPECTED_RUNNABLE_CASES) {
+    errors.push(`expected ${EXPECTED_RUNNABLE_CASES} runnable cases, discovered ${runnableCases}`);
+  }
+  if (structuralSkips !== EXPECTED_STRUCTURAL_SKIPS) {
+    errors.push(`expected ${EXPECTED_STRUCTURAL_SKIPS} structurally skipped cases, discovered ${structuralSkips}`);
+  }
+  return errors;
+}
+
+export function validateStructuralModulePolicy(
+  entries: ReadonlySet<string>,
+  structuralModuleCases: ReadonlySet<string>
+): string[] {
+  const errors = [...entries]
+    .filter((identifier) => !structuralModuleCases.has(identifier))
+    .sort()
+    .map((identifier) => `${identifier}: not a structural module case`);
+  errors.push(...[...structuralModuleCases]
+    .filter((identifier) => !entries.has(identifier))
+    .sort()
+    .map((identifier) => `${identifier}: structural module case is not registered`));
+  return errors;
+}
+
 /** Whether a case is on the ignore list. */
-export function isIgnored(caseName: string): boolean {
-  return Object.prototype.hasOwnProperty.call(IGNORED_CASES, caseName);
+export function isIgnored(caseIdentifier: string): boolean {
+  return Object.prototype.hasOwnProperty.call(IGNORED_CASES, caseIdentifier);
 }
 
 /** The documented skip reason for a case, or undefined if not ignored. */
-export function ignoreReason(caseName: string): string | undefined {
-  return IGNORED_CASES[caseName]?.reason;
+export function ignoreReason(caseIdentifier: string): string | undefined {
+  return IGNORED_CASES[caseIdentifier]?.reason;
 }

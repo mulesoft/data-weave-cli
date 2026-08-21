@@ -21,6 +21,16 @@ const OUTPUT_PATTERN = /^out\.[a-zA-Z]+$/;
 const INPUT_CONFIG_PATTERN = /^in[0-9]+-config\.properties$/;
 const OUTPUT_CONFIG_PATTERN = /^out[0-9]*-config\.properties$/;
 
+/** Whether a structurally skipped case carries a DWL module beside transform.dwl. */
+export function hasAdjacentDwlModule(fileNames: string[]): boolean {
+  return fileNames.some(
+    (name) => extensionOf(name) === "dwl"
+      && name !== MAIN_TRANSFORM
+      && !INPUT_PATTERN.test(name)
+      && !OUTPUT_PATTERN.test(name)
+  );
+}
+
 /** Returns the extension (without dot, lowercased) of a file name, or "" if none. */
 export function extensionOf(name: string): string {
   const i = name.lastIndexOf(".");
@@ -39,8 +49,10 @@ export interface TckInput {
 
 /** One runnable scenario: the transform plus its inputs and a single expected output. */
 export interface TckScenario {
-  /** Scenario id: the case directory name (`<scenario>-out.<ext>`). */
+  /** Scenario id: `<suite>/<case>:<output-file>`. */
   name: string;
+  /** Case id shared by all output scenarios: `<suite>/<case>`. */
+  caseIdentifier: string;
   inputs: TckInput[];
   /** Expected-output file name (e.g. `out.json`). */
   outputFileName: string;
@@ -63,11 +75,12 @@ export type CaseParseResult =
  * extension maps to an unsupported format (e.g. yaml) are dropped; if none
  * remain the case is skipped.
  *
- * @param caseName - The directory (case) name, used as the scenario prefix.
+ * @param suiteName - The staged suite name, such as `runtime`.
+ * @param caseName - The directory (case) name.
  * @param fileNames - The file names directly inside the case directory.
  * @returns Either the runnable scenarios or a reason the case was skipped.
  */
-export function parseCase(caseName: string, fileNames: string[]): CaseParseResult {
+export function parseCase(suiteName: string, caseName: string, fileNames: string[]): CaseParseResult {
   if (caseName.endsWith("_wip") || caseName.endsWith("wip")) {
     return { kind: "skipped", reason: "work-in-progress (_wip)" };
   }
@@ -115,8 +128,10 @@ export function parseCase(caseName: string, fileNames: string[]): CaseParseResul
     .filter((out) => isSupportedExtension(extensionOf(out)))
     .map((outputFileName) => {
       const outputExtension = extensionOf(outputFileName);
+      const caseIdentifier = `${suiteName}/${caseName}`;
       return {
-        name: caseName,
+        name: `${caseIdentifier}:${outputFileName}`,
+        caseIdentifier,
         inputs,
         outputFileName,
         outputExtension,
