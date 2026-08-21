@@ -595,6 +595,17 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
 
   uv_mutex_lock(&g_mutex);
 
+  // A prior last-release could not tear the isolate down and armed the retry
+  // signal (review #6 #3/#4). Because retries otherwise fire only at op
+  // completion (the streaming/transform drains), a zero-op stranded isolate
+  // would never be reclaimed and the adoption/fast paths below would silently
+  // discard the pending teardown (review #6 #5). Drive the pending teardown to
+  // completion here first: on success g_isolate/g_initialized are cleared and we
+  // build a fresh isolate below; on repeated failure the live isolate is adopted
+  // by the fast path (safe -- the teardown was resource reclamation, not a
+  // malfunction). No-ops cheaply when nothing is stranded (flag clear -> return).
+  retry_stranded_teardown_locked();
+
   // If a teardown from a prior cleanup() is still draining (the isolate is
   // being torn down on the waiter thread from Task 2), do not race a fresh
   // graal_create_isolate against it -- wait until the isolate is fully gone
@@ -2558,7 +2569,10 @@ static void isolate_ref_release_n_locked(int n) {
       // Sync teardown failed (spawn or cleanup_thread_fn attach) with the isolate
       // still live and no owners: arm the retry signal (round-14 #3). g_active_ops
       // is already 0 here, but a later op could still re-pin; the flag is cleared
-      // on adoption and retried on drain.
+      // on adoption and retried on drain or by the next initialize() (review #6
+      // #5). Documented residual: if NO later op or initialize() ever occurs, the
+      // isolate lingers until process exit, where the OS reclaims it -- benign
+      // (single process-lifetime isolate, no ref-count violation).
       g_teardown_needed = true;
     }
     return;
@@ -2733,9 +2747,11 @@ static napi_value release_isolate_ref_locked(napi_env env) {
       g_ref_count = 0;
     } else if (g_isolate != NULL && g_ref_count == 0) {
       // cleanup_thread_fn spawn/attach failed: the isolate is still live with
-      // zero owners. Arm the retry signal so a later op-completion drain (or a
-      // fresh initialize() adoption) tears it down instead of stranding it —
-      // mirrors the twin arm in isolate_ref_release_n_locked.
+      // zero owners. Arm the retry signal so a later op-completion drain or the
+      // next initialize() (review #6 #5) tears it down instead of stranding it —
+      // mirrors the twin arm in isolate_ref_release_n_locked. Documented residual:
+      // if no later op or initialize() ever runs, the isolate lingers to process
+      // exit (OS reclaims it) -- benign, no ref-count violation.
       g_teardown_needed = true;
     }
     uv_mutex_unlock(&g_mutex);
