@@ -1,9 +1,10 @@
 name: Python artifact
 description: >-
   Installs Python build dependencies and builds the DataWeave Python wheel
-  (which embeds dwlib); optionally publishes the wheel as a CI artifact (main)
-  or a release asset (release). No TCK phase today. Requires build-foundation to
-  have run earlier in the same job.
+  (which embeds dwlib), runs the Python unit/integration tests, and optionally
+  runs the master-only Python TCK conformance lane before publishing the wheel
+  as a CI artifact (main) or a release asset (release). Requires
+  build-foundation to have run earlier in the same job.
 inputs:
   native-version:
     description: -PnativeVersion value; empty omits the flag.
@@ -16,6 +17,14 @@ inputs:
       runners).
     required: false
     default: 'false'
+  run-tck:
+    description: When 'true', run the master-only Python TCK conformance lane.
+    required: false
+    default: 'false'
+  platform:
+    description: Platform token for matrix-qualified TCK JUnit artifact names.
+    required: false
+    default: ''
   publish:
     description: "'none' | 'artifact' | 'release'."
     required: false
@@ -31,12 +40,16 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install Python build dependencies
+    - name: Install Python build and test dependencies
       # --ignore-installed: on macOS runners, Homebrew's own setuptools/wheel have no
       # pip RECORD file, so a plain --upgrade fails trying to uninstall them first
       # (pip error "uninstall-no-record-file"). --ignore-installed installs pip's
       # copy on top without needing to remove the untracked brew one.
-      run: python3 -m pip install ${{ inputs.break-system-packages == 'true' && '--break-system-packages' || '' }} --upgrade --ignore-installed setuptools wheel
+      run: python3 -m pip install ${{ inputs.break-system-packages == 'true' && '--break-system-packages' || '' }} --upgrade --ignore-installed setuptools wheel 'native-lib/python[test]'
+      shell: bash
+
+    - name: Run Python Tests
+      run: ./gradlew --stacktrace --no-problems-report native-lib:pythonTest ${{ inputs.native-version != '' && format('-PnativeVersion={0}', inputs.native-version) || '' }}
       shell: bash
 
     - name: Create Native Lib Python Wheel
@@ -59,3 +72,16 @@ runs:
         file_glob: true
         tag: ${{ inputs.tag }}
         overwrite: true
+
+    - name: Run Python TCK Conformance
+      if: always() && inputs.run-tck == 'true'
+      run: ./gradlew --stacktrace --no-problems-report native-lib:pythonTck
+      shell: bash
+
+    - name: Upload Python TCK JUnit
+      if: always() && inputs.run-tck == 'true'
+      uses: actions/upload-artifact@v7.0.1
+      with:
+        name: python-tck-junit-${{ inputs.platform }}
+        path: native-lib/build/test-results/pythonTck.xml
+        if-no-files-found: error

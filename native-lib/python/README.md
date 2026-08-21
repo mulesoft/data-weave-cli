@@ -32,6 +32,15 @@ python3 -m pip install native-lib/python/dist/dataweave_native-0.0.1-*.whl
 python3 -m pip install -e native-lib/python
 ```
 
+### Test dependencies
+
+Install the pytest test extra before running the Python test lanes locally:
+
+```bash
+cd native-lib/python
+python3 -m pip install '.[test]'
+```
+
 ### Option C: Use externally-built library via environment variable
 
 ```bash
@@ -150,12 +159,19 @@ Stream output chunks as they're produced, without buffering the entire result:
 import sys
 
 stream = dataweave.run_streaming("output application/json --- (1 to 10000) map {id: $}")
-for chunk in stream:
-    sys.stdout.buffer.write(chunk)
+with stream:
+    for chunk in stream:
+        sys.stdout.buffer.write(chunk)
 
 metadata = stream.metadata
 print(f"\nDone: {metadata.mime_type}, {metadata.charset}")
 ```
+
+Call `stream.close()` when stopping consumption early. `Stream` also supports a
+context manager, as above. Closing requests cancellation and waits only briefly
+for the native worker. A native call cannot be forcibly cancelled by Python, so
+an unresponsive call is left to finish in a daemon worker rather than delaying
+application shutdown or raising during finalization.
 
 Or with explicit context:
 
@@ -168,7 +184,9 @@ with dataweave.DataWeave() as dw:
 
 ### Bidirectional Streaming (Input + Output)
 
-Stream both input and output for constant memory usage with large files:
+Stream both input and output with bounded Python-side queueing. Memory usage is
+bounded by the queue capacity plus the input and output chunk sizes; DataWeave
+itself can still buffer while parsing or evaluating a transform.
 
 ```python
 # Stream a file through DataWeave
@@ -245,11 +263,20 @@ print(result)            # StreamingResult(success=True, ...)
 print(b"".join(chunks))  # b'[1,4,9,16,25]'
 ```
 
+Read callbacks return bytes and are called with the native buffer size. Return
+`b""` for EOF; an exception is translated to `-1`, which aborts the native
+operation. Write callbacks return `0` on success. Any nonzero return value, or
+an exception, aborts the operation and returns unsuccessful `StreamingResult`
+metadata rather than unwinding a Python exception through the native callback.
+Low-level read callbacks must return no more than the requested buffer size;
+oversized callback data is rejected with `-1` rather than silently truncated.
+
 ## Running Tests
 
 ```bash
 cd native-lib/python
-python3 tests/test_dataweave_module.py
+python3 -m pip install '.[test]'
+python3 -m pytest -m "unit or integration" -v
 ```
 
 Or via Gradle:
@@ -257,6 +284,25 @@ Or via Gradle:
 ```bash
 ./gradlew :native-lib:pythonTest
 ```
+
+`pytest.ini` registers `unit`, `integration`, and `tck` markers. Normal pytest
+runs exclude `tck`; use `-m "unit or integration"` to run the lanes used by
+`pythonTest`.
+
+To stage and run the Python conformance suite, use:
+
+```bash
+./gradlew :native-lib:stageTckSuites :native-lib:pythonTck
+```
+
+`pythonTck` is intentionally separate from normal testing and runs only in the
+master-only CI lane. It reuses the corpus staged for Node TCK. It excludes
+only binding/environment capability gaps, such as unavailable module resolution,
+Java modules, and classpath test resources. Accepted runtime/output baseline
+mismatches are strict xfails: a new mismatch fails the lane and a repaired
+baseline mismatch XPASSes and also fails. The deferred-writer TCK scenario runs
+in a subprocess because that runtime's isolate teardown may block; the main TCK
+session runtime is always cleaned up.
 
 ## Running Examples
 
@@ -286,18 +332,19 @@ Execute a script and stream the output.
 
 **Returns:** `Stream` iterator yielding chunks, with `.metadata` attribute
 
-#### `run_transform(script, input_stream, input_name="payload", input_mime_type="application/json", input_charset=None, input_properties=None) -> Stream`
+#### `run_transform(script, input_stream, input_name="payload", input_mime_type="application/json", input_charset=None, inputs=None) -> Stream`
 
 Execute a script with streaming input and output.
 
 **Parameters:**
 - `input_stream`: Iterable of bytes (file, generator, list)
 - `input_mime_type`: MIME type of the input stream
-- Other parameters configure input handling
+- `input_charset`: Optional charset for the streamed input
+- `inputs`: Optional additional DataWeave input bindings
 
 **Returns:** `Stream` iterator yielding output chunks
 
-#### `run_input_output_callback(script, input_name, input_mime_type, read_callback, write_callback, input_charset=None, input_properties=None, inputs=None) -> StreamingResult`
+#### `run_input_output_callback(script, input_name, input_mime_type, read_callback, write_callback, input_charset=None, inputs=None) -> StreamingResult`
 
 Low-level callback API for advanced use cases.
 
@@ -305,7 +352,7 @@ Low-level callback API for advanced use cases.
 
 ### `DataWeave` Class
 
-#### `DataWeave(library_path=None)`
+#### `DataWeave(lib_path=None)`
 
 Context manager for explicit lifecycle control.
 
@@ -339,10 +386,14 @@ class ExecutionResult:
 
 ### `Stream`
 
-Iterator that yields output chunks.
+Iterator that yields output chunks through a bounded queue.
 
 **Attributes:**
-- `metadata: StreamingResult` - Available after iteration completes
+- `metadata: StreamingResult` - Available only after the iterator completes;
+  check `success` and `error` after consuming the stream
+
+**Methods:**
+- `close() -> None` - Stop consuming early and request bounded worker cleanup
 
 ### `StreamingResult`
 
@@ -461,7 +512,9 @@ if not stream.metadata.success:
 - **Buffered execution** (`run()`) - Best for small outputs (<1MB)
 - **Output streaming** (`run_streaming()`) - Use for large outputs (>10MB)
 - **Bidirectional streaming** (`run_transform()`) - Use for large inputs AND outputs
-- **Memory usage**: Streaming uses constant memory (~64KB buffer)
+- **Memory usage**: Streaming uses a bounded queue and native callback-sized
+  chunks. It avoids accumulating output in the Python binding, but does not
+  guarantee fixed or constant memory for the DataWeave runtime or transform.
 
 ## Environment Variables
 

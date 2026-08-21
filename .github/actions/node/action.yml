@@ -51,9 +51,8 @@ runs:
       shell: bash
 
     - name: Run Node.js TCK Conformance
-      if: inputs.run-tck == 'true'
+      if: always() && inputs.run-tck == 'true'
       run: |
-        ./gradlew --stacktrace --no-problems-report native-lib:stageTckSuites
         cd native-lib/node && npm run test:tck
       shell: bash
 

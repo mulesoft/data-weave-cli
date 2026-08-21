@@ -90,8 +90,7 @@ def main():
     stream = dataweave.run_transform(
         'output application/json --- payload map { name: $.name, age: $.age }',
         input_stream=iter(lambda: input_file.read(20), b""),  # Read 20 bytes at a time
-        input_mime_type="application/csv",
-        input_properties={"header": True}
+        input_mime_type="application/csv"
     )
 
     output = b"".join(stream).decode('utf-8')

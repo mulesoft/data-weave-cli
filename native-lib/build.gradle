@@ -155,7 +155,27 @@ tasks.register('pythonTest', Exec) {
 
   dependsOn tasks.named('stagePythonNativeLib')
   workingDir("${projectDir}/python")
-  commandLine(pythonExe, 'tests/test_dataweave_module.py')
+  inputs.dir("${projectDir}/python/tests")
+  inputs.file("${projectDir}/python/pytest.ini")
+  inputs.file("${projectDir}/python/pyproject.toml")
+  def testReportsDir = layout.buildDirectory.dir('test-results/python')
+  def coverageReportsDir = layout.buildDirectory.dir('reports/coverage/python')
+  outputs.file(testReportsDir.map { it.file('junit.xml') })
+  outputs.file(coverageReportsDir.map { it.file('coverage.xml') })
+  doFirst {
+    testReportsDir.get().asFile.mkdirs()
+    coverageReportsDir.get().asFile.mkdirs()
+  }
+  commandLine(
+    pythonExe,
+    '-m',
+    'pytest',
+    '-m',
+    'unit or integration',
+    '--junitxml', testReportsDir.map { it.file('junit.xml') }.get().asFile,
+    '--cov=dataweave',
+    '--cov-report=xml:' + coverageReportsDir.map { it.file('coverage.xml') }.get().asFile,
+  )
 }
 
 // --- Node.js native package tasks ---
@@ -206,6 +226,18 @@ tasks.register('stageTckSuites') {
       println("Staged TCK suite '${suiteName}' -> ${tckSuitesDir}/${suiteName}")
     }
   }
+}
+
+// Python consumes the corpus already staged for the Node TCK lane above. This
+// shares the resolved artifacts and extraction, avoiding a second download.
+tasks.register('pythonTck', Exec) {
+  dependsOn tasks.named('stagePythonNativeLib')
+  workingDir("${projectDir}/python")
+  inputs.dir("${projectDir}/python/tests/tck")
+  inputs.dir(tckSuitesDir)
+  inputs.file("${projectDir}/python/pytest.ini")
+  commandLine(pythonExe, '-m', 'pytest', '-m', 'tck',
+    '--junitxml', "${layout.buildDirectory.get().asFile}/test-results/pythonTck.xml")
 }
 
 tasks.register('buildNodePackage', Exec) {
