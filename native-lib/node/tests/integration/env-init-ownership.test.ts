@@ -20,11 +20,13 @@ import { findLibrary, buildInputsJson } from "../../src/utils";
 // revision, and the second cleanup() was already a no-op via the long-standing
 // `if (g_ref_count > 0)` floor). They guard that the sanctioned single-env path
 // still behaves (liveness + no double-decrement corruption); they do NOT prove
-// #5 is fixed. The cross-env behavior that #5 is actually about is exercised by
-// the Worker-abandonment cases in worker-lifecycle.test.ts (each Worker is its
-// own env, released via env_init_cleanup on Worker exit). A dedicated cross-env
-// regression test that goes RED on the pre-fix addon remains a known coverage
-// gap for this finding.
+// #5 is fixed. The cross-env behavior that #5 is actually about -- an abandoned env with N
+// engines under one initialize() -- is now pinned by the dedicated cross-env
+// regression test in worker-lifecycle.test.ts ("a Worker that inits once +
+// creates N engines + exits without cleanup() does NOT tear down the isolate
+// under a live main engine"), which fails RED on the round-12 implementation
+// and passes at round 13+. These single-env smoke tests remain as a fast guard
+// on the sanctioned single-env liveness path.
 
 const LIB = findLibrary();
 

@@ -194,4 +194,80 @@ describe("worker_threads engine lifecycle (round 12 #9)", () => {
     ffi.destroyEngine(h);
     await ffi.cleanup();
   });
+
+  it("a Worker that inits once + creates N engines + exits without cleanup() does NOT tear down the isolate under a live main engine (round 13 #5)", async () => {
+    // This is the cross-env regression the round-13 smoke tests could not pin
+    // (env-init-ownership.test.ts is single-env). It fails RED on the round-12
+    // implementation: the Worker's env death fired N per-engine init-reference
+    // releases against the ONE reference the Worker owned, driving g_ref_count to
+    // zero and tearing the shared isolate down under the live main engine -> the
+    // main engine's run below would fail (isolate gone) or the process wedges. On
+    // round-13+ each abandoned env releases exactly one reference regardless of
+    // engine count, so the main engine survives.
+    const N = 3;
+
+    // 1. Main thread: initialize and keep a live engine.
+    ffi.initialize(LIB_PATH);
+    const hMain = ffi.createEngine();
+    const first = JSON.parse(
+      ffi.runScriptEngine(hMain, "%dw 2.0\noutput application/json\n---\n6 * 7", buildInputsJson({}))
+    );
+    expect(first.success).toBe(true);
+    expect(JSON.parse(Buffer.from(first.result, "base64").toString("utf-8"))).toBe(42);
+
+    // 2. Worker: initialize ONCE, create N engines, run one, exit WITHOUT cleanup.
+    const workerBody = `
+      const { parentPort, workerData } = require('node:worker_threads');
+      (async () => {
+        const addon = require(workerData.addonPath);
+        addon.initialize(workerData.libPath); // ONE init reference for this env
+        const handles = [];
+        for (let i = 0; i < workerData.n; i++) handles.push(addon.createEngine());
+        const raw = addon.runScriptEngine(handles[0], workerData.script, '{}');
+        const parsed = JSON.parse(raw);
+        parentPort.postMessage({ ok: parsed.success !== false, count: handles.length });
+        // Return WITHOUT destroyEngine/cleanup: the env dies with N engines under
+        // one init reference -> env_init_cleanup releases exactly ONE reference.
+      })().catch((e) => { parentPort.postMessage({ ok: false, error: String(e) }); });
+    `;
+    const workerMsg = await new Promise<{ ok: boolean; count?: number; error?: string }>((resolve, reject) => {
+      const w = new Worker(workerBody, {
+        eval: true,
+        workerData: {
+          addonPath: ADDON_PATH,
+          libPath: LIB_PATH,
+          n: N,
+          script: "%dw 2.0\noutput application/json\n---\n1 + 1",
+        },
+      });
+      let msg: { ok: boolean; count?: number; error?: string } | undefined;
+      w.once("message", (m) => { msg = m; });
+      w.once("error", reject);
+      // Wait for EXIT (not just message) so the Worker env's death hooks
+      // (env_init_cleanup) have run before we assert the main engine survived.
+      w.once("exit", (code) => {
+        if (code !== 0) reject(new Error("Worker exited with code " + code + (msg ? "" : " and posted no message")));
+        else if (msg === undefined) reject(new Error("Worker exited 0 without posting a result"));
+        else resolve(msg);
+      });
+    });
+    expect(workerMsg.ok).toBe(true);
+    expect(workerMsg.count).toBe(N);
+
+    // 3. The Worker abandoned N engines under one init reference and its env
+    // died. The main engine's reference must be intact and the isolate live.
+    const second = JSON.parse(
+      ffi.runScriptEngine(hMain, "%dw 2.0\noutput application/json\n---\n1 + 1", buildInputsJson({}))
+    );
+    expect(second.success).toBe(true);
+    expect(JSON.parse(Buffer.from(second.result, "base64").toString("utf-8"))).toBe(2);
+
+    // 4. Balance the main reference and prove the count reached exactly zero
+    // (no leak, no over-release): a raw op now throws "not initialized".
+    ffi.destroyEngine(hMain);
+    await ffi.cleanup();
+    expect(() =>
+      ffi.runScriptEngine(Number.MAX_SAFE_INTEGER, "%dw 2.0\noutput application/json\n---\n1", buildInputsJson({}))
+    ).toThrow(/not initialized/i);
+  }, 20000);
 });
