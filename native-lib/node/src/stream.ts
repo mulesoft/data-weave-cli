@@ -36,15 +36,25 @@ export async function* streamFromNative(
     }
   };
 
-  const metaPromise = start(chunkCb).then((raw) => {
-    metaRaw = raw;
-    done = true;
-    // Wake all waiting consumers
+  let startError: unknown;
+  const wakeAll = () => {
     while (pendingResolves.length > 0) {
       const resolve = pendingResolves.shift();
       if (resolve) resolve();
     }
-  });
+  };
+
+  // Handle BOTH settlement branches. Without the rejection handler, a rejected
+  // start() leaves `done` false forever: a consumer parked in next() below is
+  // never woken and the generator hangs, and the rejection is unhandled
+  // (review #6 #2). On rejection we record the error, mark completion, and wake
+  // every waiter; the error is re-thrown after draining any chunks that arrived
+  // before the rejection. Because we handle rejection here, metaPromise itself
+  // always fulfills -- `await metaPromise` below never throws.
+  const metaPromise = start(chunkCb).then(
+    (raw) => { metaRaw = raw; done = true; wakeAll(); },
+    (err) => { startError = err; done = true; wakeAll(); }
+  );
 
   while (true) {
     if (chunks.length > 0) {
@@ -55,11 +65,12 @@ export async function* streamFromNative(
     await new Promise<void>((resolve) => { pendingResolves.push(resolve); });
   }
 
-  // Drain remaining chunks
+  // Drain remaining chunks buffered before completion/rejection.
   while (chunks.length > 0) {
     yield chunks.shift()!;
   }
 
   await metaPromise;
+  if (startError !== undefined) throw startError;
   return parseStreamingResult(metaRaw ?? "");
 }

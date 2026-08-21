@@ -20,8 +20,9 @@ async function collect(
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
-  const promise = new Promise<T>((res) => { resolve = res; });
-  return { promise, resolve };
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 }
 
 describe("streamFromNative", () => {
@@ -94,5 +95,36 @@ describe("streamFromNative", () => {
     const { result } = await collect(streamFromNative(() => Promise.resolve("")));
     expect(result.success).toBe(false);
     expect(result.error).toBe("Empty response");
+  });
+
+  it("rejects a parked consumer when native start() rejects (no hang)", async () => {
+    const startGate = deferred<string>();
+    const gen = streamFromNative(() => startGate.promise);
+
+    // Park a consumer in next() BEFORE the start promise settles: no chunk is
+    // ready and done is false, so next() awaits on pendingResolves.
+    const pending = gen.next();
+
+    // Now reject the native start. The parked consumer must be woken and see a
+    // rejection -- on the pre-fix code done never flips and this hangs forever.
+    startGate.reject(new Error("native start boom"));
+
+    await expect(pending).rejects.toThrow("native start boom");
+  });
+
+  it("drains buffered chunks, then throws, when start() rejects after pushing chunks", async () => {
+    const gen = streamFromNative((cb) => {
+      cb(Buffer.from("x"));
+      cb(Buffer.from("y"));
+      return Promise.reject(new Error("late boom"));
+    });
+
+    // Buffered chunks yield first...
+    const a = await gen.next();
+    const b = await gen.next();
+    expect([a.value?.toString(), b.value?.toString()]).toEqual(["x", "y"]);
+
+    // ...then the drained generator surfaces the start error.
+    await expect(gen.next()).rejects.toThrow("late boom");
   });
 });
