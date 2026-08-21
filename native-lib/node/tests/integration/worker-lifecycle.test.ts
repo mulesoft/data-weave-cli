@@ -60,8 +60,15 @@ function runWorker(opts: {
         msg = { ok: false, error: String(e) };
       }
       if (workerData.cleanup) {
-        try { addon.destroyEngine(handle); } catch (_) {}
-        await addon.cleanup();
+        let destroyErr;
+        try {
+          addon.destroyEngine(handle);
+        } catch (e) {
+          destroyErr = e; // preserve; do NOT let cleanup() mask a broken destroy
+        } finally {
+          await addon.cleanup();
+        }
+        if (destroyErr) msg = { ok: false, error: 'destroyEngine failed: ' + String(destroyErr) };
       }
       parentPort.postMessage(msg);
       // For the abandon variant we deliberately return WITHOUT cleanup so the
@@ -206,68 +213,81 @@ describe("worker_threads engine lifecycle (round 12 #9)", () => {
     // engine count, so the main engine survives.
     const N = 3;
 
-    // 1. Main thread: initialize and keep a live engine.
-    ffi.initialize(LIB_PATH);
-    const hMain = ffi.createEngine();
-    const first = JSON.parse(
-      ffi.runScriptEngine(hMain, "%dw 2.0\noutput application/json\n---\n6 * 7", buildInputsJson({}))
-    );
-    expect(first.success).toBe(true);
-    expect(JSON.parse(Buffer.from(first.result, "base64").toString("utf-8"))).toBe(42);
+    let hMain: number | null = null;
+    try {
+      // 1. Main thread: initialize and keep a live engine.
+      ffi.initialize(LIB_PATH);
+      hMain = ffi.createEngine();
+      const first = JSON.parse(
+        ffi.runScriptEngine(hMain, "%dw 2.0\noutput application/json\n---\n6 * 7", buildInputsJson({}))
+      );
+      expect(first.success).toBe(true);
+      expect(JSON.parse(Buffer.from(first.result, "base64").toString("utf-8"))).toBe(42);
 
-    // 2. Worker: initialize ONCE, create N engines, run one, exit WITHOUT cleanup.
-    const workerBody = `
-      const { parentPort, workerData } = require('node:worker_threads');
-      (async () => {
-        const addon = require(workerData.addonPath);
-        addon.initialize(workerData.libPath); // ONE init reference for this env
-        const handles = [];
-        for (let i = 0; i < workerData.n; i++) handles.push(addon.createEngine());
-        const raw = addon.runScriptEngine(handles[0], workerData.script, '{}');
-        const parsed = JSON.parse(raw);
-        parentPort.postMessage({ ok: parsed.success !== false, count: handles.length });
-        // Return WITHOUT destroyEngine/cleanup: the env dies with N engines under
-        // one init reference -> env_init_cleanup releases exactly ONE reference.
-      })().catch((e) => { parentPort.postMessage({ ok: false, error: String(e) }); });
-    `;
-    const workerMsg = await new Promise<{ ok: boolean; count?: number; error?: string }>((resolve, reject) => {
-      const w = new Worker(workerBody, {
-        eval: true,
-        workerData: {
-          addonPath: ADDON_PATH,
-          libPath: LIB_PATH,
-          n: N,
-          script: "%dw 2.0\noutput application/json\n---\n1 + 1",
-        },
+      // 2. Worker: initialize ONCE, create N engines, run one, exit WITHOUT cleanup.
+      const workerBody = `
+        const { parentPort, workerData } = require('node:worker_threads');
+        (async () => {
+          const addon = require(workerData.addonPath);
+          addon.initialize(workerData.libPath); // ONE init reference for this env
+          const handles = [];
+          for (let i = 0; i < workerData.n; i++) handles.push(addon.createEngine());
+          const raw = addon.runScriptEngine(handles[0], workerData.script, '{}');
+          const parsed = JSON.parse(raw);
+          parentPort.postMessage({ ok: parsed.success !== false, count: handles.length });
+          // Return WITHOUT destroyEngine/cleanup: the env dies with N engines under
+          // one init reference -> env_init_cleanup releases exactly ONE reference.
+        })().catch((e) => { parentPort.postMessage({ ok: false, error: String(e) }); });
+      `;
+      const workerMsg = await new Promise<{ ok: boolean; count?: number; error?: string }>((resolve, reject) => {
+        const w = new Worker(workerBody, {
+          eval: true,
+          workerData: {
+            addonPath: ADDON_PATH,
+            libPath: LIB_PATH,
+            n: N,
+            script: "%dw 2.0\noutput application/json\n---\n1 + 1",
+          },
+        });
+        let msg: { ok: boolean; count?: number; error?: string } | undefined;
+        w.once("message", (m) => { msg = m; });
+        w.once("error", reject);
+        // Wait for EXIT (not just message) so the Worker env's death hooks
+        // (env_init_cleanup) have run before we assert the main engine survived.
+        w.once("exit", (code) => {
+          if (code !== 0) reject(new Error("Worker exited with code " + code + (msg ? "" : " and posted no message")));
+          else if (msg === undefined) reject(new Error("Worker exited 0 without posting a result"));
+          else resolve(msg);
+        });
       });
-      let msg: { ok: boolean; count?: number; error?: string } | undefined;
-      w.once("message", (m) => { msg = m; });
-      w.once("error", reject);
-      // Wait for EXIT (not just message) so the Worker env's death hooks
-      // (env_init_cleanup) have run before we assert the main engine survived.
-      w.once("exit", (code) => {
-        if (code !== 0) reject(new Error("Worker exited with code " + code + (msg ? "" : " and posted no message")));
-        else if (msg === undefined) reject(new Error("Worker exited 0 without posting a result"));
-        else resolve(msg);
-      });
-    });
-    expect(workerMsg.ok).toBe(true);
-    expect(workerMsg.count).toBe(N);
+      expect(workerMsg.ok).toBe(true);
+      expect(workerMsg.count).toBe(N);
 
-    // 3. The Worker abandoned N engines under one init reference and its env
-    // died. The main engine's reference must be intact and the isolate live.
-    const second = JSON.parse(
-      ffi.runScriptEngine(hMain, "%dw 2.0\noutput application/json\n---\n1 + 1", buildInputsJson({}))
-    );
-    expect(second.success).toBe(true);
-    expect(JSON.parse(Buffer.from(second.result, "base64").toString("utf-8"))).toBe(2);
+      // 3. The Worker abandoned N engines under one init reference and its env
+      // died. The main engine's reference must be intact and the isolate live.
+      const second = JSON.parse(
+        ffi.runScriptEngine(hMain, "%dw 2.0\noutput application/json\n---\n1 + 1", buildInputsJson({}))
+      );
+      expect(second.success).toBe(true);
+      expect(JSON.parse(Buffer.from(second.result, "base64").toString("utf-8"))).toBe(2);
 
-    // 4. Balance the main reference and prove the count reached exactly zero
-    // (no leak, no over-release): a raw op now throws "not initialized".
-    ffi.destroyEngine(hMain);
-    await ffi.cleanup();
-    expect(() =>
-      ffi.runScriptEngine(Number.MAX_SAFE_INTEGER, "%dw 2.0\noutput application/json\n---\n1", buildInputsJson({}))
-    ).toThrow(/not initialized/i);
+      // 4. Balance the main reference and prove the count reached exactly zero
+      // (no leak, no over-release): a raw op now throws "not initialized".
+      ffi.destroyEngine(hMain);
+      hMain = null; // destroyed; finally must not double-destroy
+      await ffi.cleanup();
+      expect(() =>
+        ffi.runScriptEngine(Number.MAX_SAFE_INTEGER, "%dw 2.0\noutput application/json\n---\n1", buildInputsJson({}))
+      ).toThrow(/not initialized/i);
+    } finally {
+      // Balance global native state even if a Worker/assertion above threw, so
+      // this test cannot strand a live isolate + held reference for sibling
+      // integration tests (review #6 #7). Best-effort: do not let a cleanup
+      // error mask the original failure.
+      try {
+        if (hMain !== null) ffi.destroyEngine(hMain);
+        await ffi.cleanup();
+      } catch { /* original failure (if any) propagates from the try */ }
+    }
   }, 20000);
 });
