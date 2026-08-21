@@ -251,4 +251,35 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     dw.initialize();
     expect(ffi.createEngine).toHaveBeenLastCalledWith();
   });
+
+  it("does not publish a poisoned singleton when the first module-level init fails", async () => {
+    // Isolate module state: a fresh import gives a null globalInstance so this
+    // test controls the very first getGlobalInstance() call.
+    vi.resetModules();
+    const ffiMod = await import("../../src/ffi");
+    const dwMod = await import("../../src/dataweave");
+
+    // First module-level run(): ffi.initialize() throws (e.g. bad lib path).
+    vi.mocked(ffiMod.initialize).mockImplementationOnce(() => {
+      throw new Error("library not found");
+    });
+    expect(() => dwMod.run("%dw 2.0\noutput application/json\n---\n1")).toThrow();
+
+    // The fault is corrected; the NEXT module-level run() must build a fresh,
+    // working singleton -- not reuse a poisoned, uninitialized one that fails
+    // "not initialized" forever (review #6 #1).
+    vi.mocked(ffiMod.initialize).mockImplementation(() => {});
+    vi.mocked(ffiMod.createEngine).mockReturnValue(1);
+    vi.mocked(ffiMod.runScriptEngine).mockReturnValue(
+      JSON.stringify({
+        success: true,
+        result: Buffer.from("1").toString("base64"),
+        mimeType: "application/json",
+        charset: "utf-8",
+        binary: false,
+      })
+    );
+    const result = dwMod.run("%dw 2.0\noutput application/json\n---\n1");
+    expect(result.success).toBe(true);
+  });
 });

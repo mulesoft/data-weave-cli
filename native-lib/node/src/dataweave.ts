@@ -368,8 +368,15 @@ function registerExitHooksOnce(): void {
  */
 function getGlobalInstance(): DataWeave {
   if (!globalInstance) {
-    globalInstance = new DataWeave();
-    globalInstance.initialize();
+    // Initialize a LOCAL candidate first; publish the singleton only after
+    // initialize() succeeds. A failed first init (bad DATAWEAVE_NATIVE_LIB
+    // path / transient native failure) must NOT leave a poisoned, uninitialized
+    // singleton that makes every later run*() fail "not initialized" even after
+    // the fault is fixed (review #6 #1). On throw, globalInstance stays null and
+    // the next call retries cleanly with a fresh instance.
+    const candidate = new DataWeave();
+    candidate.initialize();
+    globalInstance = candidate;
     registerExitHooksOnce();
   }
   return globalInstance;
