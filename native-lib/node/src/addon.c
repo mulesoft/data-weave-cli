@@ -559,6 +559,11 @@ static bool env_init_acquire_and_hook(napi_env env) {
     return true;
 }
 
+// Forward declaration: tears down g_isolate on a dedicated attached thread.
+// Defined below; used here (napi_initialize's create-path acquire-failure
+// recovery) and further down by isolate_ref_release_n_locked.
+static void cleanup_thread_fn(void* arg);
+
 static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
@@ -647,6 +652,46 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   }
 
   if (!env_init_acquire_and_hook(env)) {
+    // init_thread_fn already built the isolate (g_isolate != NULL) but we have
+    // not yet set g_initialized = 1. If we just unlock and throw here, we leave
+    // g_isolate != NULL && g_initialized == 0 -- the exact condition the wait
+    // loop above (`g_isolate != NULL && !g_initialized`) treats as "a teardown
+    // is in flight". With g_teardown_state == TEARDOWN_NONE that loop cannot
+    // take the TEARDOWN_PENDING_WAIT adoption branch, so it falls into
+    // uv_cond_wait(&g_teardown_cond, ...) with nothing left to ever broadcast --
+    // every subsequent initialize() on any env hangs forever. Every sibling
+    // error path (args.result != 0 above, and the spawn-failure path before it)
+    // leaves g_isolate == NULL instead, which is the recoverable state. Tear
+    // the just-built isolate back down before throwing so we restore that same
+    // recoverable g_isolate == NULL state.
+    //
+    // g_ref_count is still 0 here (we never got past this check to bump it),
+    // and env_init_acquire_and_hook leaves no orphan record behind on failure
+    // (calloc failure never created one; hook-registration failure rolls its
+    // own record back) -- so the invariant g_ref_count == sum(init_refs) holds
+    // with both sides at 0 both before and after this block.
+    uv_thread_t cleanup_tid;
+    uv_thread_options_t cleanup_opts;
+    cleanup_opts.flags = UV_THREAD_HAS_STACK_SIZE;
+    cleanup_opts.stack_size = 2 * 1024 * 1024;
+    int torn_down = 0;
+    int cleanup_spawn_rc = uv_thread_create_ex(&cleanup_tid, &cleanup_opts, cleanup_thread_fn, &torn_down);
+    if (cleanup_spawn_rc == 0) {
+      uv_thread_join(&cleanup_tid);
+    }
+    if (torn_down) {
+      // Teardown ran (or there was nothing to tear down) -- clear the globals
+      // so the next initialize() sees a clean slate. g_ref_count is already 0.
+      g_thread = NULL;
+      g_isolate = NULL;
+      g_initialized = 0;
+    }
+    // else: spawn failed, or cleanup_thread_fn's attach to the isolate failed.
+    // The isolate is genuinely still alive -- leave g_isolate/g_thread as-is
+    // rather than orphaning it. This re-arms the same trap on a subsequent
+    // initialize(), but that is the pre-existing best-effort degradation
+    // policy already accepted for cleanup_thread_fn's attach-failure path
+    // elsewhere in this file; we don't invent new behavior for it here.
     uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "Failed to allocate/register env init record");
     return NULL;
