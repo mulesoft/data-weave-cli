@@ -2315,39 +2315,18 @@ static napi_value already_resolved_promise(napi_env env) {
   return promise;
 }
 
-// Promise-less core of an isolate-reference release. Caller holds g_mutex and
-// this function KEEPS it held (does not unlock). Decrements g_ref_count and, on
-// the last release, drives teardown WITHOUT binding any napi promise/waiter:
-//   - g_active_ops == 0 -> synchronous cleanup_thread_fn (same as Case 4).
-//   - g_active_ops  > 0 -> spawn the waiter thread with an EMPTY waiter list
-//                          (TEARDOWN_PENDING_WAIT); it tears down (or is adopted)
-//                          with no promises to resolve.
-//   - a teardown already pending (TEARDOWN_NONE != state) -> nothing to do; the
-//                          existing waiter will tear down; this release just
-//                          drops the count.
-// Used by the abandoned-env path (bridge_env_cleanup / bridge_end_op, round-12
-// #2), which has no live JS caller to hand a promise to.
-//
-// Deliberately does NOT call (or get called by) release_isolate_ref_locked
-// below: that promise-bearing sibling needs per-caller promise plumbing this
-// core omits on purpose (binding a waiter/promise to a tearing-down env is a
-// thread-affinity hazard). They share the last-release *policy* only; see
-// release_isolate_ref_locked's header comment for the promise-bearing twin.
-//
-// Assumes the sanctioned 1:1 pairing of one initialize() reference to one
-// engine bridge, exactly as the product-facing DataWeave class enforces (one
-// initialize() call per engine, released together by one cleanup()). Nothing
-// in this file enforces that pairing for a raw-ffi caller: creating multiple
-// engines under a single initialize() registers one env-cleanup hook per
-// engine, and each abandoned engine's hook would call this function -- so an
-// out-of-contract multi-engine-per-initialize() caller could over-release
-// g_ref_count under a cross-env teardown race.
-static void isolate_ref_release_core_locked(void) {
-  if (g_ref_count > 0) {
-    g_ref_count--;
-  }
-  if (g_ref_count > 0) return;              // not the last reference
-  if (g_teardown_state != TEARDOWN_NONE) return;  // a teardown is already driving
+// Release n (>=0) initialization references at once, then make the teardown
+// decision AT MOST ONCE. Caller holds g_mutex and this KEEPS it held. n==0 is a
+// no-op. Equivalent to n serial single-releases for the COUNT, but guarantees
+// the reached-zero teardown/waiter logic runs exactly once (a serial loop would
+// re-enter the decision on an already-zero count). Used by env_init_cleanup
+// (round-13 #5) to release all of a dead env's references from one decision
+// point, and by the single-release callers via isolate_ref_release_core_locked.
+static void isolate_ref_release_n_locked(int n) {
+  if (n <= 0) return;
+  if (g_ref_count >= n) g_ref_count -= n; else g_ref_count = 0;
+  if (g_ref_count > 0) return;              // other envs still hold references
+  if (g_teardown_state != TEARDOWN_NONE) return;  // a teardown already drives
 
   if (g_active_ops == 0) {
     uv_thread_t tid;
@@ -2378,11 +2357,43 @@ static void isolate_ref_release_core_locked(void) {
   waiter_opts.stack_size = 2 * 1024 * 1024;
   int spawn_rc = uv_thread_create_ex(&waiter_tid, &waiter_opts, teardown_waiter_thread_fn, NULL);
   if (spawn_rc != 0) {
-    // Waiter never started: roll back so state is not wedged and the isolate
-    // stays live (mirrors napi_cleanup Case-5 spawn-failure degradation).
     g_teardown_state = TEARDOWN_NONE;
     g_ref_count = 1;
   }
+}
+
+// Promise-less core of an isolate-reference release. Caller holds g_mutex and
+// this function KEEPS it held (does not unlock). Decrements g_ref_count and, on
+// the last release, drives teardown WITHOUT binding any napi promise/waiter:
+//   - g_active_ops == 0 -> synchronous cleanup_thread_fn (same as Case 4).
+//   - g_active_ops  > 0 -> spawn the waiter thread with an EMPTY waiter list
+//                          (TEARDOWN_PENDING_WAIT); it tears down (or is adopted)
+//                          with no promises to resolve.
+//   - a teardown already pending (TEARDOWN_NONE != state) -> nothing to do; the
+//                          existing waiter will tear down; this release just
+//                          drops the count.
+// Used by the abandoned-env path (bridge_env_cleanup / bridge_end_op, round-12
+// #2), which has no live JS caller to hand a promise to.
+//
+// Deliberately does NOT call (or get called by) release_isolate_ref_locked
+// below: that promise-bearing sibling needs per-caller promise plumbing this
+// core omits on purpose (binding a waiter/promise to a tearing-down env is a
+// thread-affinity hazard). They share the last-release *policy* only; see
+// release_isolate_ref_locked's header comment for the promise-bearing twin.
+//
+// Assumes the sanctioned 1:1 pairing of one initialize() reference to one
+// engine bridge, exactly as the product-facing DataWeave class enforces (one
+// initialize() call per engine, released together by one cleanup()). Nothing
+// in this file enforces that pairing for a raw-ffi caller: creating multiple
+// engines under a single initialize() registers one env-cleanup hook per
+// engine, and each abandoned engine's hook would call this function -- so an
+// out-of-contract multi-engine-per-initialize() caller could over-release
+// g_ref_count under a cross-env teardown race.
+//
+// Retained as a thin wrapper over isolate_ref_release_n_locked(1) for any
+// remaining single-release caller.
+static void isolate_ref_release_core_locked(void) {
+  isolate_ref_release_n_locked(1);
 }
 
 // Releases ONE initialization reference on the shared isolate. Caller MUST
