@@ -248,8 +248,12 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     // The instance is not stranded "ready": a later initialize() works.
     vi.mocked(ffi.destroyEngine).mockReset();
     vi.mocked(ffi.createEngine).mockReturnValue(9);
+    vi.mocked(ffi.createEngine).mockClear(); // ignore the first init's call
     dw.initialize();
-    expect(ffi.createEngine).toHaveBeenLastCalledWith();
+    // Prove the re-init genuinely created a fresh engine (not a no-op that
+    // false-passes toHaveBeenLastCalledWith because the FIRST init already
+    // called createEngine() with the same args -- review #6 #8).
+    expect(ffi.createEngine).toHaveBeenCalledTimes(1);
   });
 
   it("does not publish a poisoned singleton when the first module-level init fails", async () => {
