@@ -541,6 +541,40 @@ static void init_thread_fn(void* arg) {
   args->result = 0;
 }
 
+// Forward declaration: the env-death hook that reclaims an abandoned env's
+// init references. Defined below (round-13 #5); registered here (in
+// env_init_acquire_and_hook) because napi_add_env_cleanup_hook is only legal
+// while the env is alive on its own JS thread, which napi_initialize is.
+static void env_init_cleanup(void* arg);  // defined below (round-13 #5)
+
+// Acquire one init reference for `env` under g_mutex, registering the env-death
+// hook on first use. Returns true on success (caller then does g_ref_count++);
+// on failure the caller must NOT bump g_ref_count -- it unlocks and throws.
+// Caller MUST hold g_mutex; this function keeps it held on success and on the
+// calloc-failure return. On hook-registration failure it rolls back the
+// just-acquired init_refs (freeing the record if it drops to 0) so no orphan
+// record without a death hook survives.
+static bool env_init_acquire_and_hook(napi_env env) {
+    bool is_new = false;
+    env_init_rec_t* rec = env_init_rec_acquire_locked(env, &is_new);
+    if (rec == NULL) return false;  // calloc failed
+    if (is_new) {
+        napi_status hs = napi_add_env_cleanup_hook(env, env_init_cleanup, rec);
+        if (hs != napi_ok) {
+            // Roll back: this record has no death hook, so its references would
+            // never be reclaimed. Drop the one we just took; free if now empty.
+            rec->init_refs--;
+            if (rec->init_refs == 0) {
+                env_init_rec_t** pp = &g_env_recs;
+                while (*pp != NULL) { if (*pp == rec) { *pp = rec->next; break; } pp = &(*pp)->next; }
+                free(rec);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
@@ -575,6 +609,11 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
       // cancel the queued teardown, take a fresh ref, and wake the waiter so it
       // aborts without tearing down. g_initialized is already 1, so fall through
       // to the ref-count path below is unnecessary -- return directly.
+      if (!env_init_acquire_and_hook(env)) {
+        uv_mutex_unlock(&g_mutex);
+        napi_throw_error(env, NULL, "Failed to allocate/register env init record");
+        return NULL;
+      }
       g_teardown_cancelled = true;
       g_ref_count++;
       uv_cond_broadcast(&g_teardown_cond);
@@ -590,6 +629,11 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   }
 
   if (g_initialized) {
+    if (!env_init_acquire_and_hook(env)) {
+      uv_mutex_unlock(&g_mutex);
+      napi_throw_error(env, NULL, "Failed to allocate/register env init record");
+      return NULL;
+    }
     g_ref_count++;
     uv_mutex_unlock(&g_mutex);
     return NULL;
@@ -618,10 +662,24 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
     return NULL;
   }
 
+  if (!env_init_acquire_and_hook(env)) {
+    uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "Failed to allocate/register env init record");
+    return NULL;
+  }
   g_initialized = 1;
   g_ref_count++;
   uv_mutex_unlock(&g_mutex);
   return NULL;
+}
+
+// TEMPORARY STUB (Task 3, round-13 #5): env_init_cleanup's real body -- the
+// env-death hook that releases every reference an abandoned env still holds
+// and frees its env_init_rec_t -- lands in the next task (Task 4). This
+// no-op placeholder exists ONLY so the addon links for this task; it is
+// replaced wholesale by Task 4 and must not be left in place afterward.
+static void env_init_cleanup(void* arg) {
+    (void)arg;
 }
 
 // --- Helper: run any GraalVM call on a dedicated thread ---
