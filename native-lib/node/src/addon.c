@@ -1836,10 +1836,34 @@ static char* resolve_module_callback(void* thread, void* ctx, const char* module
 // createEngine() -> number
 static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
     (void)info;
-    if (!g_initialized) { napi_throw_error(env, NULL, "Not initialized. Call initialize() first."); return NULL; }
     if (!fn_create_engine) { napi_throw_error(env, NULL, "create_engine not available in native library"); return NULL; }
+
+    // Round-14 (#1): admission in ONE g_mutex critical section (mirrors
+    // bridge_finalize_registry). Require (a) a live isolate not past the point
+    // of no return, (b) that THIS env owns an init reference (round-13 ownership
+    // model: an env with no reference must not create engines on the shared
+    // isolate -- it could otherwise attach to an isolate another env is tearing
+    // down), and (c) pin the isolate with a g_active_ops reservation so
+    // graal_tear_down_isolate() cannot run across the attach/create below. The
+    // check and the g_active_ops++ cannot be split by a teardown because every
+    // teardown transition and the g_active_ops==0 fast path also hold g_mutex.
+    uv_mutex_lock(&g_mutex);
+    env_init_rec_t* self = env_init_rec_find_locked(env);
+    if (!g_initialized || g_isolate == NULL ||
+        g_teardown_state == TEARDOWN_TEARING_DOWN ||
+        self == NULL || self->init_refs == 0) {
+        uv_mutex_unlock(&g_mutex);
+        napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
+        return NULL;
+    }
+    g_active_ops++;  // pins the live isolate against teardown across the attach
+    uv_mutex_unlock(&g_mutex);
+
     void* thread = NULL;
-    if (fn_attach_thread(g_isolate, &thread) != 0) { napi_throw_error(env, NULL, "Failed to attach thread"); return NULL; }
+    if (fn_attach_thread(g_isolate, &thread) != 0) {
+        uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+        napi_throw_error(env, NULL, "Failed to attach thread"); return NULL;
+    }
     long long handle = fn_create_engine(thread);
     fn_detach_thread(thread);
     // A GraalVM @CEntryPoint that throws on the Java side returns the return
@@ -1847,7 +1871,10 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
     // long long. The real handle registry only ever hands out handles >= 1, so
     // any handle <= 0 means construction failed; never hand that back to JS as
     // if it were usable.
-    if (handle <= 0) { napi_throw_error(env, NULL, "create_engine returned an invalid handle"); return NULL; }
+    if (handle <= 0) {
+        uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+        napi_throw_error(env, NULL, "create_engine returned an invalid handle"); return NULL;
+    }
 
     // Round-9 (#1): every engine -- resolver-backed or not -- gets a per-engine
     // record so destroyEngine can defer the registry removal (fn_destroy_engine)
@@ -1871,6 +1898,7 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
             void* t2 = NULL;
             if (fn_attach_thread(g_isolate, &t2) == 0) { fn_destroy_engine(t2, handle); fn_detach_thread(t2); }
         }
+        uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
         napi_throw_error(env, NULL, "Failed to allocate engine record");
         return NULL;
     }
@@ -1915,16 +1943,18 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
         uv_mutex_unlock(&g_mutex);
         bridge_finalize_registry(rec);
         bridge_finalize_free(rec, /*env_still_alive=*/true);
+        uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
         napi_throw_error(env, NULL, "Failed to register engine cleanup hook");
         return NULL;
     }
 
-    napi_value out; napi_create_int64(env, (int64_t)handle, &out); return out;
+    napi_value out; napi_create_int64(env, (int64_t)handle, &out);
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    return out;
 }
 
 // createEngineWithResolver(resolver) -> number
 static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_info info) {
-    if (!g_initialized) { napi_throw_error(env, NULL, "Not initialized. Call initialize() first."); return NULL; }
     if (!fn_create_engine_with_resolver) { napi_throw_error(env, NULL, "create_engine_with_resolver not available in native library"); return NULL; }
     size_t argc = 1; napi_value argv[1];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
@@ -1937,8 +1967,25 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
     }
     bridge->env = env; bridge->owner = uv_thread_self(); bridge->results = NULL;
 
+    // Round-14 (#1): same admission block as napi_create_engine. Taken AFTER the
+    // bridge/resolver-ref allocation (those failures touch no isolate state and
+    // must not decrement a reservation not yet held) and BEFORE fn_attach_thread.
+    uv_mutex_lock(&g_mutex);
+    env_init_rec_t* self = env_init_rec_find_locked(env);
+    if (!g_initialized || g_isolate == NULL ||
+        g_teardown_state == TEARDOWN_TEARING_DOWN ||
+        self == NULL || self->init_refs == 0) {
+        uv_mutex_unlock(&g_mutex);
+        napi_delete_reference(env, bridge->resolver_js); free(bridge);
+        napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
+        return NULL;
+    }
+    g_active_ops++;  // pins the live isolate against teardown across the attach
+    uv_mutex_unlock(&g_mutex);
+
     void* thread = NULL;
     if (fn_attach_thread(g_isolate, &thread) != 0) {
+        uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
         napi_delete_reference(env, bridge->resolver_js); free(bridge);
         napi_throw_error(env, NULL, "Failed to attach thread"); return NULL;
     }
@@ -1956,6 +2003,7 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
     // bridge->results via resolver_results_track; bridge_finalize frees those
     // tracked buffers too, so nothing is dropped on the floor.
     if (handle <= 0) {
+        uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
         // Synchronous call on the JS thread -- env is live here.
         bridge_finalize(bridge, /*env_still_alive=*/true, /*do_registry_remove=*/false);
         napi_throw_error(env, NULL, "create_engine_with_resolver returned an invalid handle");
@@ -1993,10 +2041,13 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
         uv_mutex_unlock(&g_mutex);
         bridge_finalize_registry(bridge);
         bridge_finalize_free(bridge, /*env_still_alive=*/true);
+        uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
         napi_throw_error(env, NULL, "Failed to register engine cleanup hook");
         return NULL;
     }
-    napi_value out; napi_create_int64(env, (int64_t)handle, &out); return out;
+    napi_value out; napi_create_int64(env, (int64_t)handle, &out);
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    return out;
 }
 
 // destroyEngine(handle) -> void
@@ -2468,6 +2519,10 @@ static void isolate_ref_release_n_locked(int n) {
 // isolate down under a live env. Runs on the dying env's own thread with the
 // env alive; does only g_mutex-guarded integer/list work + free (no env-affine
 // napi calls).
+// Round-14 (#1): the create path now enforces per-env ownership (an env with
+// init_refs == 0 is rejected), so the pathological order below -- createEngine()
+// on this env BEFORE its own initialize() -- is now rejected at the create call
+// rather than relying on the finalize-time teardown-state re-check.
 static void env_init_cleanup(void* arg) {
     env_init_rec_t* rec = (env_init_rec_t*)arg;
     if (rec == NULL) return;
