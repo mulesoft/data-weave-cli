@@ -258,6 +258,15 @@ static env_init_rec_t* env_init_rec_acquire_locked(napi_env env, bool* is_new) {
     return r;
 }
 
+// Sum of live per-env init references. Caller holds g_mutex. Establishes the
+// value g_ref_count must equal (invariant g_ref_count == sum of init_refs); used
+// to restore g_ref_count coherently when a deferred teardown cannot be spawned.
+static int env_init_refs_total_locked(void) {
+    int total = 0;
+    for (env_init_rec_t* r = g_env_recs; r != NULL; r = r->next) total += r->init_refs;
+    return total;
+}
+
 // Fully dispose of a bridge: delete its napi_ref (if the owning env is still
 // alive), free tracked result buffers, free the struct. napi_ref/napi_env are
 // thread-affine, so napi_delete_reference MUST run on the bridge's owner
@@ -671,15 +680,6 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   g_ref_count++;
   uv_mutex_unlock(&g_mutex);
   return NULL;
-}
-
-// TEMPORARY STUB (Task 3, round-13 #5): env_init_cleanup's real body -- the
-// env-death hook that releases every reference an abandoned env still holds
-// and frees its env_init_rec_t -- lands in the next task (Task 4). This
-// no-op placeholder exists ONLY so the addon links for this task; it is
-// replaced wholesale by Task 4 and must not be left in place afterward.
-static void env_init_cleanup(void* arg) {
-    (void)arg;
 }
 
 // --- Helper: run any GraalVM call on a dedicated thread ---
@@ -2415,9 +2415,46 @@ static void isolate_ref_release_n_locked(int n) {
   waiter_opts.stack_size = 2 * 1024 * 1024;
   int spawn_rc = uv_thread_create_ex(&waiter_tid, &waiter_opts, teardown_waiter_thread_fn, NULL);
   if (spawn_rc != 0) {
+    // Deferred teardown could not be spawned: the isolate stays live but no
+    // waiter will drain it (best-effort degradation, matching the original
+    // intent). Restore g_ref_count to the true remaining ownership so the
+    // invariant g_ref_count == sum of init_refs holds -- NOT a hardcoded 1,
+    // which would resurrect a reference no env owns (wrong for the n>1
+    // env-death caller, which has already freed its record before calling).
     g_teardown_state = TEARDOWN_NONE;
-    g_ref_count = 1;
+    g_ref_count = env_init_refs_total_locked();
   }
+}
+
+// Env-death hook for a per-env init record (round-13 #5). Registered once per
+// env by initialize()'s first acquire (env_init_acquire_and_hook). Node runs
+// env-cleanup hooks LIFO, and this hook is registered BEFORE any engine's
+// bridge_env_cleanup for the same env, so it runs AFTER every engine bridge has
+// finalized -- each engine's Java registry entry is removed and napi_ref
+// deleted while the isolate is still alive, and only then does this hook
+// release the isolate reference(s). Releases exactly the references this env
+// still holds (n), from a single env-scoped decision point: because
+// g_ref_count == sum of init_refs, releasing this env's n reaches zero ONLY if
+// no other env holds a reference, so an abandoned env can never tear the
+// isolate down under a live env. Runs on the dying env's own thread with the
+// env alive; does only g_mutex-guarded integer/list work + free (no env-affine
+// napi calls).
+static void env_init_cleanup(void* arg) {
+    env_init_rec_t* rec = (env_init_rec_t*)arg;
+    if (rec == NULL) return;
+    uv_mutex_lock(&g_mutex);
+    // Unlink from g_env_recs if still present.
+    env_init_rec_t** pp = &g_env_recs;
+    while (*pp != NULL) {
+        if (*pp == rec) { *pp = rec->next; break; }
+        pp = &(*pp)->next;
+    }
+    int n = rec->init_refs;
+    rec->init_refs = 0;
+    free(rec);
+    // Release all n references and make the teardown decision at most once.
+    isolate_ref_release_n_locked(n);
+    uv_mutex_unlock(&g_mutex);
 }
 
 // Promise-less core of an isolate-reference release. Caller holds g_mutex and
