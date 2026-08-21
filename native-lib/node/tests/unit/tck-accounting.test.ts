@@ -18,7 +18,23 @@ describe("TCK result accounting", () => {
       passed: 1,
       failed: 1,
       skipped: 1,
+      xfailed: 0,
       accounted: 3,
+      unaccounted: 0,
+    });
+  });
+
+  it("reports expected failures separately from ordinary failures", () => {
+    expect(accountTckResults(
+      new Set(["runtime/xfail:out.json"]),
+      [{ identifier: "runtime/xfail:out.json", outcome: "xfailed" }],
+    )).toEqual({
+      selected: 1,
+      passed: 0,
+      failed: 0,
+      skipped: 0,
+      xfailed: 1,
+      accounted: 1,
       unaccounted: 0,
     });
   });

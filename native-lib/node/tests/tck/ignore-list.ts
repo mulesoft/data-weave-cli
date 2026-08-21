@@ -37,6 +37,8 @@ export interface IgnoreEntry {
   reason: string;
 }
 
+export type ExpectedFailurePolicy = Readonly<Record<string, string>>;
+
 const EXPECTED_RUNNABLE_CASES = 729;
 const EXPECTED_STRUCTURAL_SKIPS = 193;
 
@@ -145,7 +147,7 @@ function categoryFor(reason: string): IgnoreCategory {
   return "runtime-baseline-mismatch";
 }
 
-export const IGNORED_CASES: Readonly<Record<string, IgnoreEntry>> = Object.fromEntries(
+const LEGACY_POLICY: Readonly<Record<string, IgnoreEntry>> = Object.fromEntries(
   Object.entries(LEGACY_IGNORED_CASES).map(([caseName, entry]) => {
     const suite = CORE_MODULE_CASES.has(caseName) ? "core-modules" : "runtime";
     const caseIdentifier = `${suite}/${caseName}`;
@@ -156,6 +158,49 @@ export const IGNORED_CASES: Readonly<Record<string, IgnoreEntry>> = Object.fromE
     }];
   })
 );
+
+export const ACCEPTED_BASELINE_MISMATCHES: ExpectedFailurePolicy = {
+  "core-modules/csv-invalid-utf8-out.csv:out.csv": "runtime emits a replacement character where the fixture expects an empty CSV value",
+  "core-modules/multipart-binary-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
+  "core-modules/multipart-class-cast-issue-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
+  "core-modules/multipart-empty-part-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
+  "core-modules/multipart-mixed-message-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
+  "core-modules/multipart-write-message-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
+  "core-modules/multipart-write-subtype-override-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
+  "core-modules/properties-passthrough-out.properties:out.properties": "properties writer output differs from the baseline fixture",
+  "core-modules/xml-escaped-data-out.xml:out.xml": "XML character escaping differs from the baseline fixture",
+  "core-modules/xml-streaming-selectors-out.xml:out.xml": "streaming XML serialization differs from the baseline fixture",
+  "core-modules/xml-value-selector-out.xml:out.xml": "XML namespace scoping differs from the baseline fixture",
+  "core-modules/xml_empty_namespace-out.xml:out.xml": "empty XML namespace serialization differs from the baseline fixture",
+  "runtime/access_raw_value-out.json:out.json": "runtime coercion output differs from the baseline fixture",
+  "runtime/coerciones_toString-out.json:out.json": "locale-sensitive runtime output differs from the baseline fixture",
+  "runtime/properties-writer-out.properties:out.properties": "properties writer output differs from the baseline fixture",
+  "runtime/read-concat-out.json:out.json": "runtime coercion output differs from the baseline fixture",
+  "runtime/runtime_dataFormatsDescriptors-out.json:out.json": "dw::Runtime output differs from the baseline fixture",
+  "runtime/runtime_orElseTry-out.json:out.json": "source-location runtime output differs from the baseline fixture",
+  "runtime/runtime_run-out.json:out.json": "dw::Runtime output differs from the baseline fixture",
+  "runtime/try-recursive-call-out.json:out.json": "source-location runtime output differs from the baseline fixture",
+  "runtime/update-op-out.dwl:out.dwl": "runtime coercion output differs from the baseline fixture",
+};
+
+export const REENABLED_CASES = [
+  "runtime/big_intersection-out.json",
+  "runtime/dates_atBeginningOfDay-out.json",
+  "runtime/dates_atBeginningOfMonth-out.json",
+  "runtime/dates_atBeginningOfWeek-out.json",
+  "runtime/dates_atBeginningOfYear-out.json",
+  "runtime/multi_attribute_selector_after_empty_filter_slot-out.json",
+  "runtime/repeated_attribute_selector_map_slot_permutations-out.json",
+] as const;
+
+export const CAPABILITY_EXCLUSIONS = Object.fromEntries(
+  Object.entries(LEGACY_POLICY).filter(([identifier]) =>
+    !Object.keys(ACCEPTED_BASELINE_MISMATCHES).some((scenario) => scenario.startsWith(`${identifier}:`))
+      && !REENABLED_CASES.includes(identifier as typeof REENABLED_CASES[number])
+  )
+);
+
+export const IGNORED_CASES = CAPABILITY_EXCLUSIONS;
 
 export const STRUCTURAL_MODULE_CASES = new Set([
   "runtime/implicit_type_parameters-out.json",
@@ -205,6 +250,41 @@ export function validateInventoryPolicy(runnableCases: number, structuralSkips: 
     errors.push(`expected ${EXPECTED_STRUCTURAL_SKIPS} structurally skipped cases, discovered ${structuralSkips}`);
   }
   return errors;
+}
+
+export function validateReconciledPolicy(
+  exclusions: Readonly<Record<string, IgnoreEntry>>,
+  expectedFailures: ExpectedFailurePolicy,
+  reenabledCases: readonly string[] = [],
+  runnableScenarios?: ReadonlySet<string>,
+): string[] {
+  const errors: string[] = [];
+  const reenabledCounts = new Map<string, number>();
+  for (const identifier of reenabledCases) {
+    reenabledCounts.set(identifier, (reenabledCounts.get(identifier) ?? 0) + 1);
+  }
+  for (const identifier of reenabledCounts.keys()) {
+    if (Object.prototype.hasOwnProperty.call(exclusions, identifier)) {
+      errors.push(`${identifier}: case is both skipped and re-enabled`);
+    }
+    if (runnableScenarios && ![...runnableScenarios].some((scenario) => scenario.startsWith(`${identifier}:`))) {
+      errors.push(`${identifier}: not a discovered runnable case`);
+    }
+  }
+  errors.push(...[...reenabledCounts]
+    .filter(([, count]) => count > 1)
+    .map(([identifier]) => `${identifier}: duplicate re-enabled case`));
+  for (const [identifier, reason] of Object.entries(expectedFailures)) {
+    if (!reason.trim()) errors.push(`${identifier}: missing expected-failure reason`);
+    if (runnableScenarios && !runnableScenarios.has(identifier)) {
+      errors.push(`${identifier}: not a discovered runnable scenario`);
+    }
+    const caseIdentifier = identifier.slice(0, identifier.lastIndexOf(":"));
+    if (Object.prototype.hasOwnProperty.call(exclusions, caseIdentifier)) {
+      errors.push(`${identifier}: case is both skipped and expected to fail`);
+    }
+  }
+  return errors.sort();
 }
 
 export function validateStructuralModulePolicy(

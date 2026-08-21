@@ -13,12 +13,15 @@ import { DataWeave, modulesFromDirectory } from "../../src/index";
 import { hasAdjacentDwlModule, parseCase, MAIN_TRANSFORM, type TckScenario } from "./case-loader";
 import { compareOutput } from "./compare";
 import {
+  ACCEPTED_BASELINE_MISMATCHES,
   IGNORED_CASES,
+  REENABLED_CASES,
   STRUCTURAL_MODULE_CASES,
   isIgnored,
   ignoreReason,
   validateIgnorePolicy,
   validateInventoryPolicy,
+  validateReconciledPolicy,
   validateStructuralModulePolicy,
 } from "./ignore-list";
 
@@ -78,9 +81,11 @@ if (!existsSync(SUITES_DIR)) {
 } else {
   const { cases, skipped, structuralModuleCases } = discoverCases();
   const runnableCases = new Set(cases.map((item) => item.caseIdentifier));
+  const runnableScenarios = new Set(cases.flatMap((item) => item.scenarios.map((scenario) => scenario.name)));
   const policyErrors = [
     ...validateInventoryPolicy(cases.length, skipped),
     ...validateIgnorePolicy(IGNORED_CASES, runnableCases),
+    ...validateReconciledPolicy(IGNORED_CASES, ACCEPTED_BASELINE_MISMATCHES, REENABLED_CASES, runnableScenarios),
     ...validateStructuralModulePolicy(STRUCTURAL_MODULE_CASES, structuralModuleCases),
   ];
   if (policyErrors.length > 0) {
@@ -97,15 +102,21 @@ if (!existsSync(SUITES_DIR)) {
     // eslint-disable-next-line no-console
     console.log(
       `TCK: ${cases.length} runnable cases, ${skipped} structurally skipped, `
-      + `${structuralModuleCases.size} structural module cases, ${Object.keys(IGNORED_CASES).length} exclusions`
+      + `${structuralModuleCases.size} structural module cases, ${Object.keys(IGNORED_CASES).length} exclusions, `
+      + `${Object.keys(ACCEPTED_BASELINE_MISMATCHES).length} expected failures`
     );
     dw.initialize();
 
     for (const c of cases) {
       const ignored = isIgnored(c.caseIdentifier);
       for (const scenario of c.scenarios) {
-        const testFn = ignored ? it.skip : it;
-        const label = ignored ? `${scenario.name} [skip: ${ignoreReason(c.caseIdentifier)}]` : scenario.name;
+        const expectedFailure = ACCEPTED_BASELINE_MISMATCHES[scenario.name];
+        const testFn = ignored ? it.skip : expectedFailure ? it.fails : it;
+        const label = ignored
+          ? `${scenario.name} [skip: ${ignoreReason(c.caseIdentifier)}]`
+          : expectedFailure
+            ? `${scenario.name} [xfail: ${expectedFailure}]`
+            : scenario.name;
         testFn(label, () => {
           const script = readFileSync(join(c.dir, MAIN_TRANSFORM), "utf-8");
 
