@@ -18,9 +18,11 @@ from compare import compare_output
 from ignore_list import (
     EXCLUDED_CASES,
     Exclusion,
+    STRUCTURAL_MODULE_CASES,
     UNSUPPORTED_DW_MODULE_RESOLUTION,
     exclusion_for,
     validate_exclusions,
+    validate_structural_module_cases,
 )
 from conftest import pytest_terminal_summary
 
@@ -117,6 +119,35 @@ def test_tck_summary_counts_xfails_as_visible_expected_mismatches():
 
     assert "active-exclusions=0" in output[-1]
     assert "xfail=1" in output[-1]
+    assert "accounted=1" in output[-1]
+
+
+def test_tck_summary_counts_strict_xpass_once_as_a_failure():
+    output = []
+    terminalreporter = SimpleNamespace(
+        stats={
+            "failed": [
+                SimpleNamespace(
+                    when="call",
+                    nodeid="tests/tck/test_conformance.py::test_tck_scenario[runtime/repaired:out.json]",
+                    outcome="failed",
+                    wasxfail="accepted mismatch",
+                )
+            ]
+        },
+        write_line=output.append,
+    )
+    config = SimpleNamespace(
+        _tck_discovery=(DISCOVERY, SCENARIOS, [], set()),
+        _tck_selected_identifiers={"runtime/repaired:out.json"},
+    )
+
+    pytest_terminal_summary(terminalreporter, 0, config)
+
+    assert "failed=1" in output[-1]
+    assert "xfail=0" in output[-1]
+    assert "accounted=1" in output[-1]
+    assert "unaccounted=0" in output[-1]
 
 
 @pytest.mark.parametrize("scenario", tck_params())
@@ -243,6 +274,49 @@ def test_discover_cases_loads_transform_input_output_and_scenarios(tmp_path: Pat
     assert scenarios[0].expected == b'{"answer": 42}'
 
 
+def test_discover_cases_ignores_files_that_only_resemble_inputs_and_outputs(tmp_path: Path):
+    """Catches broad prefix matching that changes the runnable TCK inventory."""
+    write_case(
+        tmp_path,
+        "exact-file-patterns-out.json",
+        {
+            "transform.dwl": "%dw 2.0\noutput application/json\n---\nin0",
+            "in0.json": '{"answer": 42}',
+            "input1.json": '{"wrong": true}',
+            "out.json": '{"answer": 42}',
+            "output.json": '{"wrong": true}',
+        },
+    )
+
+    discovery = discover_cases(tmp_path)
+
+    assert len(discovery.cases) == 1
+    scenarios = discovery.cases[0].scenarios
+    assert [scenario.identifier for scenario in scenarios] == [
+        "runtime/exact-file-patterns-out.json:out.json"
+    ]
+    assert set(scenarios[0].inputs) == {"in0"}
+
+
+def test_discover_cases_structurally_skips_adjacent_dwl_modules(tmp_path: Path):
+    """Catches discovery that mistakes a multi-DWL case for one runnable transform."""
+    write_case(
+        tmp_path,
+        "local-module-out.json",
+        {
+            "transform.dwl": "%dw 2.0\noutput application/json\n---\ninclude::value",
+            "include.dwl": "%dw 2.0\nvar value = 42",
+            "out.json": "42",
+        },
+    )
+
+    discovery = discover_cases(tmp_path)
+
+    assert discovery.cases == []
+    assert discovery.structural_skips == 1
+    assert discovery.structural_case_identifiers == ["runtime/local-module-out.json"]
+
+
 @pytest.mark.parametrize(
     ("extension", "actual", "expected"),
     [
@@ -298,6 +372,25 @@ def test_compare_output_rejects_different_namespace_prefixes():
     )
 
     assert not result.match
+
+
+def test_compare_output_preserves_interleaved_xml_child_order():
+    """Catches XML normalization that groups children by tag and loses ordering."""
+    result = compare_output(
+        "xml",
+        b"<root><a>1</a><b>2</b><a>3</a></root>",
+        b"<root><a>1</a><a>3</a><b>2</b></root>",
+    )
+
+    assert not result.match
+
+
+def test_compare_output_reports_unknown_charset():
+    """Catches unsupported sidecar encodings escaping as uncaught lookup errors."""
+    result = compare_output("json", b"{}", b"{}", "not-a-real-charset")
+
+    assert not result.match
+    assert "unknown output charset" in result.detail
 
 
 def test_exclusion_registry_requires_category_and_reason():
@@ -362,7 +455,7 @@ def test_only_declared_case_identifiers_are_excluded():
     exclusion = exclusion_for("runtime/import-lib-out.json")
     assert exclusion.case_identifier == "runtime/import-lib-out.json"
     assert exclusion.category == "unsupported-dw-module-resolution"
-    assert len(EXCLUDED_CASES) == 39
+    assert len(EXCLUDED_CASES) == 37
 
 
 def test_exclusion_registry_uses_the_inventory_categories():
@@ -372,7 +465,7 @@ def test_exclusion_registry_uses_the_inventory_categories():
         categories[exclusion.category] = categories.get(exclusion.category, 0) + 1
 
     assert categories == {
-        "unavailable-classpath-test-resource": 4,
+        "unavailable-classpath-test-resource": 2,
         "unavailable-java-module": 11,
         "unsupported-dw-module-resolution": 24,
     }
@@ -408,6 +501,33 @@ def test_exclusion_registry_rejects_unreachable_active_entries():
     assert errors == ["runtime/not-discovered: not a discovered runnable case"]
 
 
+def test_structural_module_registry_rejects_entries_that_are_not_structural_skips():
+    """Catches stale structural-module entries after a case becomes runnable."""
+    errors = validate_structural_module_cases(
+        {"runtime/local-module", "runtime/not-structural"},
+        ["runtime/local-module"],
+    )
+
+    assert errors == ["runtime/not-structural: not a structural skip"]
+
+
+def test_structural_module_registry_rejects_unregistered_structural_modules():
+    """Catches adjacent-module cases omitted from the audited inventory."""
+    errors = validate_structural_module_cases(
+        {"runtime/registered"},
+        ["runtime/registered", "runtime/missing"],
+    )
+
+    assert errors == ["runtime/missing: structural module case is not registered"]
+
+
+def test_structural_module_registry_matches_staged_structural_cases():
+    assert validate_structural_module_cases(
+        STRUCTURAL_MODULE_CASES,
+        DISCOVERY.structural_module_case_identifiers,
+    ) == []
+
+
 def test_tck_summary_ignores_collection_nodes():
     """Catches pytest collection nodes being counted as test reports."""
     output = []
@@ -439,6 +559,100 @@ def test_tck_summary_ignores_collection_nodes():
     pytest_terminal_summary(terminalreporter, 0, config)
 
     assert output[-1] == (
-        "TCK totals: selected=731, structural-skips=191, structural-module-cases=0, executed=2, "
-        "active-exclusions=1, passed=1, failed=1, xfail=0"
+        "TCK totals: selected=729, structural-skips=193, structural-module-cases=0, executed=2, "
+        "active-exclusions=1, passed=1, failed=1, xfail=0, accounted=3, unaccounted=726"
     )
+
+
+def test_tck_session_fails_when_a_complete_run_leaves_scenarios_unaccounted():
+    terminalreporter = SimpleNamespace(stats={"passed": []})
+    config = SimpleNamespace(
+        _tck_discovery=(DISCOVERY, SCENARIOS, [], set()),
+        option=SimpleNamespace(keyword=""),
+        pluginmanager=SimpleNamespace(get_plugin=lambda name: terminalreporter),
+    )
+    session = SimpleNamespace(config=config, exitstatus=0)
+
+    from conftest import pytest_sessionfinish
+
+    pytest_sessionfinish(session, 0)
+
+    assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
+
+
+def test_tck_session_fails_when_duplicate_report_hides_missing_scenario():
+    first = SCENARIOS[0].identifier
+    reports = [
+        SimpleNamespace(
+            when="call",
+            nodeid=f"tests/tck/test_conformance.py::test_tck_scenario[{first}]",
+            outcome="passed",
+        )
+        for _scenario in SCENARIOS
+    ]
+    terminalreporter = SimpleNamespace(stats={"passed": reports})
+    config = SimpleNamespace(
+        _tck_discovery=(DISCOVERY, SCENARIOS, [], set()),
+        _tck_selected_identifiers={scenario.identifier for scenario in SCENARIOS},
+        option=SimpleNamespace(keyword=""),
+        pluginmanager=SimpleNamespace(get_plugin=lambda name: terminalreporter),
+    )
+    session = SimpleNamespace(config=config, exitstatus=0)
+
+    from conftest import pytest_sessionfinish
+
+    pytest_sessionfinish(session, 0)
+
+    assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
+
+
+def test_tck_session_allows_intentionally_filtered_runs():
+    terminalreporter = SimpleNamespace(stats={"passed": []})
+    config = SimpleNamespace(
+        _tck_discovery=(DISCOVERY, SCENARIOS, [], set()),
+        option=SimpleNamespace(keyword="one-scenario"),
+        pluginmanager=SimpleNamespace(get_plugin=lambda name: terminalreporter),
+    )
+    session = SimpleNamespace(config=config, exitstatus=0)
+
+    from conftest import pytest_sessionfinish
+
+    pytest_sessionfinish(session, 0)
+
+    assert session.exitstatus == 0
+
+
+def test_tck_summary_uses_collected_scenario_selection():
+    output = []
+    terminalreporter = SimpleNamespace(stats={}, write_line=output.append)
+    config = SimpleNamespace(
+        _tck_discovery=(DISCOVERY, SCENARIOS, [], set()),
+        _tck_selected_identifiers=set(),
+    )
+
+    pytest_terminal_summary(terminalreporter, 0, config)
+
+    assert "selected=0" in output[-1]
+    assert "unaccounted=0" in output[-1]
+
+
+def test_tck_collection_records_only_selected_scenarios():
+    from conftest import pytest_collection_finish
+
+    selected = SCENARIOS[0].identifier
+    config = SimpleNamespace(_tck_discovery=(DISCOVERY, SCENARIOS, [], set()))
+    session = SimpleNamespace(
+        config=config,
+        items=[
+            SimpleNamespace(
+                nodeid=f"tests/tck/test_conformance.py::test_tck_scenario[{selected}]"
+            ),
+            SimpleNamespace(
+                nodeid="tests/tck/test_conformance.py::test_compare_output_reports_unknown_charset"
+            ),
+        ],
+    )
+
+    pytest_collection_finish(session)
+
+    assert config._tck_selected_identifiers == {selected}

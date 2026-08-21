@@ -2,5 +2,6 @@ python/src/dataweave/native/
 python/src/dataweave_native.egg-info/
 python/dist/
 python/build/
+python/.coverage
 
 node_modules/

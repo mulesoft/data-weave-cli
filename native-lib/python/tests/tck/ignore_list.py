@@ -33,6 +33,10 @@ STRUCTURAL_MODULE_CASES = frozenset(
         "runtime/location-out.json",
         "runtime/locationString-out.json",
         "runtime/logwith_function-out.json",
+        "runtime/read-function-by-id-out.json",
+        "runtime/read-function-out.json",
+        "runtime/runtime_evalUrl-out.json",
+        "runtime/runtime_runUrl-out.json",
         "runtime/type_selector_materialize-out.json",
         "runtime/weave_multiple_namespace-out.dwl",
     )
@@ -233,16 +237,6 @@ EXCLUDED_CASES: Dict[str, Exclusion] = {
         UNAVAILABLE_CLASSPATH_TEST_RESOURCE,
         "readUrl cannot find classpath://dw-binary/in0.bin",
     ),
-    "runtime/read-function-by-id-out.json": _exclusion(
-        "runtime/read-function-by-id-out.json",
-        UNAVAILABLE_CLASSPATH_TEST_RESOURCE,
-        "readUrl cannot find classpath://read-function-by-id/include.dwl",
-    ),
-    "runtime/read-function-out.json": _exclusion(
-        "runtime/read-function-out.json",
-        UNAVAILABLE_CLASSPATH_TEST_RESOURCE,
-        "readUrl cannot find classpath://read-function/include.dwl",
-    ),
     "runtime/read_lines-out.json": _exclusion(
         "runtime/read_lines-out.json",
         UNAVAILABLE_CLASSPATH_TEST_RESOURCE,
@@ -281,6 +275,24 @@ def validate_exclusions(
         for identifier in entries:
             if identifier not in discovered:
                 errors.append(f"{identifier}: not a discovered runnable case")
+    return errors
+
+
+def validate_structural_module_cases(
+    entries: Iterable[str], structural_case_identifiers: Iterable[str]
+) -> List[str]:
+    registry = set(entries)
+    structural_skips = set(structural_case_identifiers)
+    errors = [
+        f"{identifier}: not a structural skip"
+        for identifier in sorted(registry)
+        if identifier not in structural_skips
+    ]
+    errors.extend(
+        f"{identifier}: structural module case is not registered"
+        for identifier in sorted(structural_skips)
+        if identifier not in registry
+    )
     return errors
 
 
