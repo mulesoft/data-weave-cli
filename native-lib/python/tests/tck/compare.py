@@ -27,6 +27,8 @@ def compare_output(
     try:
         actual_text = actual.decode(encoding)
         expected_text = expected.decode(encoding)
+    except LookupError as error:
+        return CompareResult(False, f"unknown output charset {encoding}: {error}")
     except UnicodeDecodeError as error:
         return CompareResult(False, f"cannot decode output as {encoding}: {error}")
     if extension == "json":
