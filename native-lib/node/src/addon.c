@@ -110,15 +110,6 @@ typedef struct engine_bridge {
     // otherwise a resolver-backed engine's ScriptRuntime is left registered with
     // a CallbackWeaveResourceResolver whose ctx points at the freed bridge (UAF).
     bool deferred_registry_remove;
-    // True when bridge_env_cleanup deferred an ABANDONED-env finalize because
-    // in_flight > 0. Unlike deferred_registry_remove (which the destroyEngine
-    // path also sets), this is set ONLY by the env-cleanup hook, and tells the
-    // draining op (bridge_end_op) to ALSO release this engine's initialize()
-    // reference (round-12 #2) -- exactly one release per abandoned engine. The
-    // destroyEngine deferral never sets it (that path is paired with an explicit
-    // ffi.cleanup() in JS, which releases the ref itself; setting it would
-    // double-release).
-    bool deferred_ref_release;
     struct engine_bridge* next;
 } engine_bridge_t;
 static engine_bridge_t* g_bridges = NULL;  // linked list, guarded by g_mutex
@@ -188,12 +179,6 @@ typedef struct teardown_waiter {
     struct teardown_waiter* next;
 } teardown_waiter_t;
 static teardown_waiter_t* g_teardown_waiters = NULL;  // linked list, guarded by g_mutex
-
-// Forward declaration: defined near release_isolate_ref_locked (after
-// cleanup_thread_fn/teardown_waiter_thread_fn, which it spawns), but needed by
-// bridge_env_cleanup/bridge_end_op above that point. See the definition for
-// full documentation.
-static void isolate_ref_release_core_locked(void);
 
 // Returns true if the buffer is now tracked (or there was nothing to track).
 // Returns false only when a buffer was supplied but the tracking node could
@@ -380,20 +365,17 @@ static void bridge_env_cleanup(void* arg) {
         // ScriptRuntime is left registered with a resolver ctx pointing at the
         // freed bridge. Set the deferred-registry-removal flag here.
         b->deferred_registry_remove = true;
-        // round-12 (#2): the draining op must ALSO release this abandoned
-        // engine's initialize() reference (see engine_bridge_t.deferred_ref_release).
-        b->deferred_ref_release = true;
         uv_mutex_unlock(&g_mutex);
         return;
     }
-    // in_flight == 0: finalize now. Release the abandoned engine's init
-    // reference under the lock first (round-12 #2), THEN unlock and finalize.
-    // The order matters: isolate_ref_release_core_locked may tear the isolate
-    // down (or start the waiter), and bridge_finalize_registry inside finalize
-    // checks teardown state under g_mutex, so a torn-down/TEARING_DOWN isolate
-    // makes the registry removal a correct no-op (the Java registry died with
-    // the isolate).
-    isolate_ref_release_core_locked();
+    // in_flight == 0: finalize now. The abandoned engine's init reference is
+    // NOT released here (round-13 #5) -- it is released by the env-death hook
+    // (env_init_cleanup) when this env dies, which owns the whole per-env
+    // balance. There is nothing left to do under the lock before unlocking in
+    // this branch. bridge_finalize_registry inside finalize checks teardown
+    // state under g_mutex, so a torn-down/TEARING_DOWN isolate makes the
+    // registry removal a correct no-op (the Java registry died with the
+    // isolate).
     uv_mutex_unlock(&g_mutex);
 
     // We are inside Node's invocation of this hook, so we must not (and need not)
@@ -452,13 +434,6 @@ static void bridge_end_op(engine_bridge_t* b, bool env_still_alive) {
     b->in_flight--;
     bool finalize = (b->destroy_pending && b->in_flight == 0);
     bool remove_registry = finalize && b->deferred_registry_remove;
-    bool release_ref = finalize && b->deferred_ref_release;
-    // round-12 (#2): if the env-cleanup hook deferred this abandoned engine's
-    // finalize, release its initialize() reference here, under the same lock, as
-    // the last op drains. Do it BEFORE unlocking so the teardown decision is made
-    // atomically with the in_flight==0 observation. destroyEngine's deferral does
-    // NOT set deferred_ref_release (its JS caller releases via ffi.cleanup()).
-    if (release_ref) isolate_ref_release_core_locked();
     uv_mutex_unlock(&g_mutex);
     // remove_registry is true when either destroyEngine (round-9 #1) or the env
     // cleanup hook (round-10 #1) deferred the registry removal while this op was
@@ -1836,9 +1811,10 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
     // an env cleanup hook (mirroring napi_create_engine_with_resolver), because
     // without one a Worker that creates a resolver-less engine and exits without
     // destroyEngine() would strand this record, the Java registry entry, and the
-    // native-lib reference. Round-12 (#2) closed the last of those: the hook now
-    // reclaims all three -- the record and registry entry via bridge_finalize,
-    // and the native-lib initialize() reference via isolate_ref_release_core_locked.
+    // native-lib reference. Round-12 (#2) closed the record/registry gap via
+    // bridge_finalize; round-13 (#5) moved ownership of the native-lib
+    // initialize() reference to the env itself (env_init_rec), released by the
+    // env-death hook env_init_cleanup, not per-engine.
     // owner is recorded for symmetry but is NOT used to restrict destruction based
     // on resolver state (see the owner guard in napi_destroy_engine, which now
     // fires for any record).
@@ -1864,9 +1840,11 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
     // engines and blocking isolate teardown across Worker churn. bridge_env_cleanup
     // + bridge_finalize already handle a resolver-less record (resolver_js == NULL):
     // skip the napi_ref delete, still unlink, remove the registry entry (round-10
-    // do_registry_remove=true), and free. Round-12 (#2) closed the reference leak:
-    // the hook now also releases the native-lib initialize() reference (directly,
-    // or via bridge_end_op if an op is draining), so all three are reclaimed.
+    // do_registry_remove=true), and free. Round-13 (#5) moved ownership of the
+    // native-lib initialize() reference to the env itself (env_init_rec): this
+    // per-engine hook no longer touches g_ref_count -- the reference is released
+    // by the env-death hook env_init_cleanup (or by cleanup()), so an abandoned
+    // env releases exactly one reference regardless of how many engines it made.
     // destroyEngine removes this hook before an early free so Node never invokes
     // it on freed memory.
     napi_status hook_st = napi_add_env_cleanup_hook(env, bridge_env_cleanup, rec);
@@ -2379,7 +2357,9 @@ static napi_value already_resolved_promise(napi_env env) {
 // the reached-zero teardown/waiter logic runs exactly once (a serial loop would
 // re-enter the decision on an already-zero count). Used by env_init_cleanup
 // (round-13 #5) to release all of a dead env's references from one decision
-// point, and by the single-release callers via isolate_ref_release_core_locked.
+// point. (Previously also used by a single-release wrapper,
+// isolate_ref_release_core_locked, retired in round-13 #5 once the per-engine
+// finalize path stopped releasing init references directly.)
 static void isolate_ref_release_n_locked(int n) {
   if (n <= 0) return;
   if (g_ref_count >= n) g_ref_count -= n; else g_ref_count = 0;
@@ -2428,14 +2408,18 @@ static void isolate_ref_release_n_locked(int n) {
 
 // Env-death hook for a per-env init record (round-13 #5). Registered once per
 // env by initialize()'s first acquire (env_init_acquire_and_hook). Node runs
-// env-cleanup hooks LIFO, and this hook is registered BEFORE any engine's
-// bridge_env_cleanup for the same env, so it runs AFTER every engine bridge has
-// finalized -- each engine's Java registry entry is removed and napi_ref
-// deleted while the isolate is still alive, and only then does this hook
-// release the isolate reference(s). Releases exactly the references this env
-// still holds (n), from a single env-scoped decision point: because
-// g_ref_count == sum of init_refs, releasing this env's n reaches zero ONLY if
-// no other env holds a reference, so an abandoned env can never tear the
+// env-cleanup hooks LIFO. In the normal initialize()-then-createEngine() order
+// this hook is registered BEFORE any engine's bridge_env_cleanup for the same
+// env, so it runs AFTER every engine bridge has finalized on a live isolate.
+// The pathological raw-ffi order (createEngine() on this env -- succeeding
+// because another env already initialized -- THEN initialize() here) can
+// register this hook after an engine hook, so it may run first; that is still
+// safe, because bridge_finalize_registry re-checks teardown state under g_mutex
+// (registry removal no-ops on a torn-down isolate) and the napi_ref delete runs
+// with env_still_alive=true on this env's own live thread. Releases exactly the
+// references this env still holds (n), from a single env-scoped decision point:
+// because g_ref_count == sum of init_refs, releasing this env's n reaches zero
+// ONLY if no other env holds a reference, so an abandoned env can never tear the
 // isolate down under a live env. Runs on the dying env's own thread with the
 // env alive; does only g_mutex-guarded integer/list work + free (no env-affine
 // napi calls).
@@ -2467,8 +2451,8 @@ static void env_init_cleanup(void* arg) {
 //   - a teardown already pending (TEARDOWN_NONE != state) -> nothing to do; the
 //                          existing waiter will tear down; this release just
 //                          drops the count.
-// Used by the abandoned-env path (bridge_env_cleanup / bridge_end_op, round-12
-// #2), which has no live JS caller to hand a promise to.
+// Used by env_init_cleanup (round-13 #5), the env-death hook, which has no
+// live JS caller to hand a promise to.
 //
 // Deliberately does NOT call (or get called by) release_isolate_ref_locked
 // below: that promise-bearing sibling needs per-caller promise plumbing this
@@ -2476,34 +2460,20 @@ static void env_init_cleanup(void* arg) {
 // thread-affinity hazard). They share the last-release *policy* only; see
 // release_isolate_ref_locked's header comment for the promise-bearing twin.
 //
-// Assumes the sanctioned 1:1 pairing of one initialize() reference to one
-// engine bridge, exactly as the product-facing DataWeave class enforces (one
-// initialize() call per engine, released together by one cleanup()). Nothing
-// in this file enforces that pairing for a raw-ffi caller: creating multiple
-// engines under a single initialize() registers one env-cleanup hook per
-// engine, and each abandoned engine's hook would call this function -- so an
-// out-of-contract multi-engine-per-initialize() caller could over-release
-// g_ref_count under a cross-env teardown race.
-//
-// Retained as a thin wrapper over isolate_ref_release_n_locked(1) for any
-// remaining single-release caller.
-static void isolate_ref_release_core_locked(void) {
-  isolate_ref_release_n_locked(1);
-}
+// The isolate reference is now owned per env (env_init_rec), not per engine
+// bridge (round-13 #5): initialize()'s acquire sites and env_init_cleanup are
+// the only callers that mutate g_ref_count via this function, alongside
+// release_isolate_ref_locked below for the explicit cleanup() path. The
+// per-engine finalize path (bridge_env_cleanup / bridge_end_op) no longer
+// touches g_ref_count at all, so a raw multi-engine-per-initialize() caller's
+// abandoned env fires exactly one release for the whole balance it holds,
+// regardless of how many engines it created.
 
 // Releases ONE initialization reference on the shared isolate. Caller MUST
 // hold g_mutex; this function UNLOCKS g_mutex before returning (the sync and
 // waiter teardown paths both require dropping the lock). Returns the napi
 // promise to hand back to the JS caller. This is napi_cleanup's original
-// Case 1..5 body, extracted verbatim so the abandoned-env path (round-12 #2)
-// can share the exact same "reached zero -> tear down now vs. defer to the
-// waiter" decision without duplicating it.
-//
-// Deliberately does NOT call (or get called by) isolate_ref_release_core_locked
-// above: this promise-bearing version needs to bind a napi_deferred/waiter to
-// `env` for Cases 3/5, which the promise-less core intentionally cannot do
-// (there is no live JS caller in the abandoned-env path). They share the
-// last-release policy only, not the promise mechanics.
+// Case 1..5 body.
 static napi_value release_isolate_ref_locked(napi_env env) {
   // Case 1/2: not the last release (or nothing was ever initialized). Decrement
   // only if positive -- a second cleanup() call while g_ref_count is already at
