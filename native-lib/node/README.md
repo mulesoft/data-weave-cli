@@ -240,6 +240,7 @@ DataWeave scripts can import external modules using the `resolveModule` option. 
 ```typescript
 import { DataWeave, composeResolvers, modulesFromDirectory, modulesFromJars } from 'dataweave-native';
 
+// Inside an async function (uses `await` for modulesFromJars and cleanup()).
 const dw = new DataWeave({
   resolveModule: composeResolvers(
     modulesFromDirectory('./my-modules'),
@@ -247,17 +248,21 @@ const dw = new DataWeave({
   )
 });
 dw.initialize();
+try {
+  const result = dw.run(`
+    %dw 2.0
+    import org::company::utils
+    output application/json
+    ---
+    utils::doSomething()
+  `);
 
-const result = dw.run(`
-  %dw 2.0
-  import org::company::utils
-  output application/json
-  ---
-  utils::doSomething()
-`);
-
-if (result.success) {
-  console.log(result.getString());
+  if (result.success) {
+    console.log(result.getString());
+  }
+} finally {
+  // Release the engine and resolver closure when done.
+  await dw.cleanup();
 }
 ```
 

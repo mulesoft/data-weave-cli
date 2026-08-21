@@ -7,21 +7,27 @@ DataWeave scripts can import external modules using the `resolveModule` option. 
 ```typescript
 import { DataWeave, modulesFromMap } from 'dataweave-native';
 
+// Inside an async function so `await dw.cleanup()` is available.
 const dw = new DataWeave({
   resolveModule: modulesFromMap({
     'org/company/lib.dwl': '%dw 2.0\nfun greet(n) = "Hello " ++ n',
   }),
 });
 dw.initialize();
-
-const result = dw.run(`
-  %dw 2.0
-  import org::company::lib
-  output application/json
-  ---
-  lib::greet("World")
-`);
-console.log(result.getString());  // "Hello World"
+try {
+  const result = dw.run(`
+    %dw 2.0
+    import org::company::lib
+    output application/json
+    ---
+    lib::greet("World")
+  `);
+  console.log(result.getString());  // "Hello World"
+} finally {
+  // Release the engine and the resolver closure; an uncleaned instance retains
+  // both (see the lifecycle notes below).
+  await dw.cleanup();
+}
 ```
 
 **Important:** The module-level convenience functions (`run()`, `runStreaming()`, `runTransform()` exported directly from `dataweave-native`) operate on a lazily-initialized singleton that takes no constructor options and therefore cannot be configured with `resolveModule` — you **must** construct your own `DataWeave` instance to use external modules, as shown above.
