@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { parseCase, extensionOf, MAIN_TRANSFORM } from "../../tests/tck/case-loader";
+import { parseCase, extensionOf, hasAdjacentDwlModule, MAIN_TRANSFORM } from "../../tests/tck/case-loader";
 
 /** Asserts parseCase skipped the case, returning the reason for further checks. */
 function expectSkipped(caseName: string, files: string[]): string {
-  const r = parseCase(caseName, files);
+  const r = parseCase("runtime", caseName, files);
   expect(r.kind).toBe("skipped");
   return r.kind === "skipped" ? r.reason : "";
 }
@@ -20,34 +20,40 @@ describe("extensionOf", () => {
 
 describe("parseCase — happy paths", () => {
   it("parses a single-input single-output case", () => {
-    const r = parseCase("as-operator-out.json", [MAIN_TRANSFORM, "in0.json", "out.json"]);
+    const r = parseCase("runtime", "as-operator-out.json", [MAIN_TRANSFORM, "in0.json", "out.json"]);
     expect(r.kind).toBe("scenarios");
     if (r.kind !== "scenarios") return;
     expect(r.scenarios).toHaveLength(1);
     const s = r.scenarios[0];
-    expect(s.name).toBe("as-operator-out.json");
+    expect(s.name).toBe("runtime/as-operator-out.json:out.json");
+    expect(s.caseIdentifier).toBe("runtime/as-operator-out.json");
     expect(s.inputs).toEqual([{ name: "in0", fileName: "in0.json", mimeType: "application/json" }]);
     expect(s.outputMime).toBe("application/json");
     expect(s.outputExtension).toBe("json");
   });
 
   it("binds multiple inputs by base name, sorted", () => {
-    const r = parseCase("multi-out.json", [MAIN_TRANSFORM, "in1.xml", "in0.json", "out.json"]);
+    const r = parseCase("runtime", "multi-out.json", [MAIN_TRANSFORM, "in1.xml", "in0.json", "out.json"]);
     if (r.kind !== "scenarios") throw new Error("expected scenarios");
-    expect(r.scenarios[0].name).toBe("multi-out.json");
+    expect(r.scenarios[0].name).toBe("runtime/multi-out.json:out.json");
     expect(r.scenarios[0].inputs.map((i) => i.name)).toEqual(["in0", "in1"]);
     expect(r.scenarios[0].inputs.map((i) => i.mimeType)).toEqual(["application/json", "application/xml"]);
   });
 
   it("names the scenario after the case directory", () => {
-    const r = parseCase("literal-out.json", [MAIN_TRANSFORM, "out.json"]);
+    const r = parseCase("runtime", "literal-out.json", [MAIN_TRANSFORM, "out.json"]);
     if (r.kind !== "scenarios") throw new Error("expected scenarios");
-    expect(r.scenarios[0].name).toBe("literal-out.json");
+    expect(r.scenarios[0].name).toBe("runtime/literal-out.json:out.json");
     expect(r.scenarios[0].inputs).toEqual([]);
   });
 });
 
 describe("parseCase — structural skips", () => {
+  it("identifies adjacent DWL modules without treating inputs as modules", () => {
+    expect(hasAdjacentDwlModule([MAIN_TRANSFORM, "include.dwl", "in0.dwl", "out.dwl"])).toBe(true);
+    expect(hasAdjacentDwlModule([MAIN_TRANSFORM, "in0.dwl", "out.dwl"])).toBe(false);
+  });
+
   it("skips _wip cases", () => {
     expect(expectSkipped("feature_wip", [MAIN_TRANSFORM, "out.json"])).toMatch(/wip/i);
   });
@@ -92,7 +98,7 @@ describe("parseCase — unsupported formats", () => {
   });
 
   it("drops unsupported output scenarios, keeping supported ones", () => {
-    const r = parseCase("mix", [MAIN_TRANSFORM, "in0.json", "out.json", "out.yaml"]);
+    const r = parseCase("runtime", "mix", [MAIN_TRANSFORM, "in0.json", "out.json", "out.yaml"]);
     if (r.kind !== "scenarios") throw new Error("expected scenarios");
     expect(r.scenarios.map((s) => s.outputExtension)).toEqual(["json"]);
   });

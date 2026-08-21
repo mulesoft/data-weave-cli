@@ -10,16 +10,24 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { DataWeave, modulesFromDirectory } from "../../src/index";
-import { parseCase, MAIN_TRANSFORM, type TckScenario } from "./case-loader";
+import { hasAdjacentDwlModule, parseCase, MAIN_TRANSFORM, type TckScenario } from "./case-loader";
 import { compareOutput } from "./compare";
-import { isIgnored, ignoreReason } from "./ignore-list";
+import {
+  IGNORED_CASES,
+  STRUCTURAL_MODULE_CASES,
+  isIgnored,
+  ignoreReason,
+  validateIgnorePolicy,
+  validateInventoryPolicy,
+  validateStructuralModulePolicy,
+} from "./ignore-list";
 
 const SUITES_DIR = join(__dirname, "suites");
 const FIXTURES_DIR = join(__dirname, "fixtures");
 
 /** A discovered case: its directory and the scenarios parsed from it. */
 interface DiscoveredCase {
-  caseName: string;
+  caseIdentifier: string;
   dir: string;
   scenarios: TckScenario[];
 }
@@ -35,22 +43,30 @@ function listDirs(parent: string): string[] {
 }
 
 /** Walks every staged suite and returns the runnable cases (skips logged by the caller). */
-function discoverCases(): { cases: DiscoveredCase[]; skipped: number } {
+function discoverCases(): {
+  cases: DiscoveredCase[];
+  skipped: number;
+  structuralModuleCases: Set<string>;
+} {
   const cases: DiscoveredCase[] = [];
+  const structuralModuleCases = new Set<string>();
   let skipped = 0;
   for (const suite of listDirs(SUITES_DIR)) {
     const suiteDir = join(SUITES_DIR, suite);
     for (const caseName of listDirs(suiteDir)) {
       const dir = join(suiteDir, caseName);
-      const parsed = parseCase(caseName, readdirSync(dir));
+      const fileNames = readdirSync(dir);
+      const caseIdentifier = `${suite}/${caseName}`;
+      const parsed = parseCase(suite, caseName, fileNames);
       if (parsed.kind === "skipped") {
         skipped++;
+        if (hasAdjacentDwlModule(fileNames)) structuralModuleCases.add(caseIdentifier);
         continue;
       }
-      cases.push({ caseName, dir, scenarios: parsed.scenarios });
+      cases.push({ caseIdentifier, dir, scenarios: parsed.scenarios });
     }
   }
-  return { cases, skipped };
+  return { cases, skipped, structuralModuleCases };
 }
 
 if (!existsSync(SUITES_DIR)) {
@@ -60,7 +76,16 @@ if (!existsSync(SUITES_DIR)) {
     it("skipped", () => {});
   });
 } else {
-  const { cases, skipped } = discoverCases();
+  const { cases, skipped, structuralModuleCases } = discoverCases();
+  const runnableCases = new Set(cases.map((item) => item.caseIdentifier));
+  const policyErrors = [
+    ...validateInventoryPolicy(cases.length, skipped),
+    ...validateIgnorePolicy(IGNORED_CASES, runnableCases),
+    ...validateStructuralModulePolicy(STRUCTURAL_MODULE_CASES, structuralModuleCases),
+  ];
+  if (policyErrors.length > 0) {
+    throw new Error(`Invalid TCK policy:\n${policyErrors.join("\n")}`);
+  }
 
   // One shared runtime for the whole lane. Modules imported by a handful of
   // TCK cases (org::mule::weave::v2::libs::lib) live only in the private
@@ -70,14 +95,17 @@ if (!existsSync(SUITES_DIR)) {
 
   describe("TCK conformance", () => {
     // eslint-disable-next-line no-console
-    console.log(`TCK: ${cases.length} runnable cases, ${skipped} structurally skipped`);
+    console.log(
+      `TCK: ${cases.length} runnable cases, ${skipped} structurally skipped, `
+      + `${structuralModuleCases.size} structural module cases, ${Object.keys(IGNORED_CASES).length} exclusions`
+    );
     dw.initialize();
 
     for (const c of cases) {
-      const ignored = isIgnored(c.caseName);
+      const ignored = isIgnored(c.caseIdentifier);
       for (const scenario of c.scenarios) {
         const testFn = ignored ? it.skip : it;
-        const label = ignored ? `${scenario.name} [skip: ${ignoreReason(c.caseName)}]` : scenario.name;
+        const label = ignored ? `${scenario.name} [skip: ${ignoreReason(c.caseIdentifier)}]` : scenario.name;
         testFn(label, () => {
           const script = readFileSync(join(c.dir, MAIN_TRANSFORM), "utf-8");
 
