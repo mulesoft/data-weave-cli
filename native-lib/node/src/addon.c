@@ -2479,6 +2479,18 @@ static napi_value release_isolate_ref_locked(napi_env env) {
   // only if positive -- a second cleanup() call while g_ref_count is already at
   // 0 (e.g. one already dropped it while teardown is pending) must not go
   // negative.
+  // Round-13 (#5): an env may release only a reference IT owns. If this env has
+  // no outstanding init reference (a cleanup() with no matching initialize() on
+  // this env, or a double-cleanup()), do NOT touch g_ref_count -- releasing here
+  // would steal another env's reference and could tear the isolate down under a
+  // live user. No-op: resolve immediately. (g_ref_count == sum of init_refs, so
+  // this env's zero balance means it contributes nothing to release.)
+  env_init_rec_t* self = env_init_rec_find_locked(env);
+  if (self == NULL || self->init_refs == 0) {
+    uv_mutex_unlock(&g_mutex);
+    return already_resolved_promise(env);
+  }
+  self->init_refs--;
   if (g_ref_count > 0) {
     g_ref_count--;
   }
@@ -2584,10 +2596,15 @@ static napi_value release_isolate_ref_locked(napi_env env) {
     napi_release_threadsafe_function(waiter->tsfn, napi_tsfn_release);
     free(waiter);
 
-    // The isolate never hit zero refs -- it is still live and un-torn-down,
-    // so the process must not believe otherwise. g_initialized/g_isolate stay
-    // untouched (still valid).
-    g_ref_count = 1;
+    // Best-effort degradation: the isolate stays live (g_initialized/g_isolate
+    // untouched) but no waiter will drain it. Restore g_ref_count to the true
+    // remaining ownership (Σ init_refs) rather than a hardcoded 1: this env just
+    // decremented its own init_refs above, and reaching Case 5 means g_ref_count
+    // hit 0, so the sum is 0 (or whatever surviving envs still own). Hardcoding 1
+    // here would strand a reference no env owns -- unreleasable by any cleanup()
+    // or env-death hook -- and would break the invariant g_ref_count == Σ
+    // init_refs. A later initialize() will re-acquire on the surviving isolate.
+    g_ref_count = env_init_refs_total_locked();
 
     uv_mutex_unlock(&g_mutex);
     return promise;
