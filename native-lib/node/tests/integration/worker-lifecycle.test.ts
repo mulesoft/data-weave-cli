@@ -73,12 +73,22 @@ function runWorker(opts: {
       eval: true,
       workerData: { addonPath: ADDON_PATH, libPath: LIB_PATH, mode: opts.mode, cleanup: opts.cleanup, script: opts.script },
     });
-    let msg: any;
+    let msg: { ok: boolean; output?: string; error?: string } | undefined;
     w.once("message", (m) => { msg = m; });
     w.once("error", reject);
+    // Resolve only on a CLEAN exit that posted a result. A Worker can post a
+    // success message and THEN exit nonzero (e.g. an env-cleanup-hook failure
+    // during teardown) -- resolving on the message alone would hide that. So
+    // wait for exit: reject every nonzero code, and treat a zero exit with no
+    // posted message as its own diagnosable failure (round-14 #5).
     w.once("exit", (code) => {
-      if (code !== 0 && !msg) reject(new Error("Worker exited " + code));
-      else resolve(msg);
+      if (code !== 0) {
+        reject(new Error("Worker exited with code " + code + (msg ? "" : " and posted no message")));
+      } else if (msg === undefined) {
+        reject(new Error("Worker exited 0 without posting a result"));
+      } else {
+        resolve(msg);
+      }
     });
   });
 }
