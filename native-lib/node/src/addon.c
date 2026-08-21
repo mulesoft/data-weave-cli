@@ -2717,6 +2717,12 @@ static napi_value release_isolate_ref_locked(napi_env env) {
       g_isolate = NULL;
       g_initialized = 0;
       g_ref_count = 0;
+    } else if (g_isolate != NULL && g_ref_count == 0) {
+      // cleanup_thread_fn spawn/attach failed: the isolate is still live with
+      // zero owners. Arm the retry signal so a later op-completion drain (or a
+      // fresh initialize() adoption) tears it down instead of stranding it —
+      // mirrors the twin arm in isolate_ref_release_n_locked.
+      g_teardown_needed = true;
     }
     uv_mutex_unlock(&g_mutex);
     return already_resolved_promise(env);
