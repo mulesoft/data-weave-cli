@@ -2329,8 +2329,11 @@ static void cleanup_thread_fn(void* arg) {
     // or it becomes unreachable and can never be torn down.
     return;
   }
-  fn_tear_down_isolate(local_thread);
-  *out_torn_down = 1;
+  // Check the teardown return code (0 == success). On nonzero the isolate is
+  // still live: leave *out_torn_down at 0 so the caller retains
+  // g_isolate/g_initialized/g_ref_count and (per its own logic) arms the retry,
+  // rather than orphaning a live isolate (review #6 #3).
+  *out_torn_down = (fn_tear_down_isolate(local_thread) == 0) ? 1 : 0;
 }
 
 // Spawned only when napi_cleanup finds g_active_ops > 0 on the last release
@@ -2357,15 +2360,18 @@ static void teardown_waiter_thread_fn(void* arg) {
   // Perform teardown exactly as the unchanged fast path does: attach a local
   // thread to the isolate (g_thread from graal_create_isolate's bootstrap
   // thread is invalid here -- see cleanup_thread_fn's comment), then tear
-  // down. Ignore the return code, matching today's behavior. Skipped entirely
+  // down. Honor the return code (0 == success); a nonzero teardown leaves the
+  // isolate live (review #6 #3). Skipped entirely
   // when an initialize() call adopted the live isolate instead (see
   // napi_initialize's TEARDOWN_PENDING_WAIT branch).
   bool torn_down = false;
   if (!cancelled && fn_tear_down_isolate && fn_attach_thread && g_isolate) {
     void* local_thread = NULL;
     if (fn_attach_thread(g_isolate, &local_thread) == 0 && local_thread != NULL) {
-      fn_tear_down_isolate(local_thread);
-      torn_down = true;
+      // Check the teardown return code (0 == success). On nonzero the isolate is
+      // still live -- leave torn_down false so the post-teardown block below
+      // retains the isolate globals and arms the retry (review #6 #3).
+      torn_down = (fn_tear_down_isolate(local_thread) == 0);
     }
     // else: attach failed -- the isolate is still alive. Do NOT clear g_isolate,
     // or it becomes unreachable and can never be torn down.
@@ -2382,11 +2388,19 @@ static void teardown_waiter_thread_fn(void* arg) {
     g_isolate = NULL;
     g_initialized = 0;
     g_ref_count = 0;
+  } else if (!cancelled && g_isolate != NULL && g_ref_count == 0) {
+    // Teardown did not happen (attach failed, or graal_tear_down_isolate
+    // returned nonzero -- review #6 #3) and this async-waiter path IS the last
+    // release: g_ref_count is already 0 with no owner and no pending waiter.
+    // Arm the retry signal so a later op-completion drain or a fresh
+    // initialize() retries teardown -- otherwise the live isolate is stranded
+    // with nothing to reclaim it (review #6 #4). Mirrors the twin arm in
+    // isolate_ref_release_n_locked's waiter-spawn-failure path.
+    g_teardown_needed = true;
   }
   // If cancelled: g_isolate/g_initialized/g_ref_count are left exactly as the
   // adopting initialize() set them (it already did g_ref_count++ on the live
-  // isolate). On the attach-failure path (!cancelled && !torn_down) the isolate
-  // also stays live and g_initialized stays 1, retried on the next last release.
+  // isolate).
   g_teardown_state = TEARDOWN_NONE;
   g_teardown_cancelled = false;
   // Release any initialize() call blocked waiting for teardown to finish
