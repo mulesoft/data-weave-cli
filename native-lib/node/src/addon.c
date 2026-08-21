@@ -165,6 +165,16 @@ static teardown_state_t g_teardown_state = TEARDOWN_NONE;
 // Set by an adopting initialize() to tell the waiter thread to abort its
 // queued teardown and leave the live isolate intact. Read/reset by the waiter.
 static bool g_teardown_cancelled = false;
+// Round-14 (#2/#3): set under g_mutex when a reached-zero teardown could NOT be
+// carried out (teardown-waiter alloc/spawn failed, or cleanup_thread_fn attach
+// failed) and the isolate was therefore left LIVE with g_ref_count == 0 and no
+// pending teardown. This is a RETRY SIGNAL, not an ownership reference:
+// g_ref_count stays 0, so the invariant g_ref_count == sum(init_refs) is
+// unaffected. It is cleared when the isolate is (a) actually torn down by a
+// retry, or (b) adopted by a later initialize() (a new owner wants it kept).
+// While set with g_active_ops > 0, the op-completion drain point retries the
+// teardown once ops reach 0 (retry_stranded_teardown_locked).
+static bool g_teardown_needed = false;
 static uv_cond_t g_teardown_cond;
 
 // One node per cleanup() call that arrived while a teardown was already
@@ -564,6 +574,11 @@ static bool env_init_acquire_and_hook(napi_env env) {
 // recovery) and further down by isolate_ref_release_n_locked.
 static void cleanup_thread_fn(void* arg);
 
+// Forward declaration: retries a stranded teardown (round-14 #2/#3). Defined
+// further below; used by the streaming/transform op-completion drain points,
+// which run earlier in this file than the definition.
+static void retry_stranded_teardown_locked(void);
+
 static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
@@ -605,6 +620,7 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
       }
       g_teardown_cancelled = true;
       g_ref_count++;
+      g_teardown_needed = false;  // round-14: a new owner wants the isolate kept
       uv_cond_broadcast(&g_teardown_cond);
       uv_mutex_unlock(&g_mutex);
       return NULL;
@@ -624,6 +640,7 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
       return NULL;
     }
     g_ref_count++;
+    g_teardown_needed = false;  // round-14: a new owner wants the isolate kept
     uv_mutex_unlock(&g_mutex);
     return NULL;
   }
@@ -698,6 +715,13 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   }
   g_initialized = 1;
   g_ref_count++;
+  // Round-14: defensive clear. A brand-new isolate can never carry a stale
+  // stranded-teardown signal for itself (a new graal_create_isolate only runs
+  // when g_isolate == NULL, so this path cannot reuse a surviving stranded
+  // isolate) -- but clear it here anyway at the single create-path success
+  // point so no later drain retries a teardown against the isolate this
+  // initialize() just created and now owns.
+  g_teardown_needed = false;
   uv_mutex_unlock(&g_mutex);
   return NULL;
 }
@@ -939,6 +963,9 @@ static void streaming_thread_fn(void* arg) {
   uv_mutex_lock(&g_mutex);
   g_active_ops--;
   uv_cond_broadcast(&g_teardown_cond);
+  // Round-14 (#2/#3): if a prior last-release could not tear the isolate down
+  // and left it stranded (g_teardown_needed), retry now that this op has drained.
+  retry_stranded_teardown_locked();
   uv_mutex_unlock(&g_mutex);
 
   // Round-9 (#2): if even the sentinel struct cannot be allocated, we cannot
@@ -1434,6 +1461,8 @@ static void transform_thread_fn(void* arg) {
   uv_mutex_lock(&g_mutex);
   g_active_ops--;
   uv_cond_broadcast(&g_teardown_cond);
+  // Round-14 (#2/#3): retry a stranded teardown now that this op has drained.
+  retry_stranded_teardown_locked();
   uv_mutex_unlock(&g_mutex);
 
   // Round-9 (#2): sentinel malloc NULL -> skip enqueue and run the same native
@@ -2456,6 +2485,40 @@ static napi_value already_resolved_promise(napi_env env) {
 // point. (Previously also used by a single-release wrapper,
 // isolate_ref_release_core_locked, retired in round-13 #5 once the per-engine
 // finalize path stopped releasing init references directly.)
+// Round-14 (#2/#3): retry a teardown that a prior last-release could not carry
+// out. Caller holds g_mutex and this KEEPS it held. No-op unless a stranded
+// live isolate is waiting (g_teardown_needed) with no owners and no teardown in
+// progress and ops drained. Makes the reached-zero teardown decision at most
+// once per call (same synchronous cleanup_thread_fn path as Case 4); on repeated
+// failure it leaves g_teardown_needed set to retry on the next drain. Spawns+joins
+// cleanup_thread_fn while holding g_mutex, exactly as the Case-4 /
+// isolate_ref_release_n_locked g_active_ops==0 branch does; cleanup_thread_fn
+// takes no lock and makes no napi call, so this is deadlock-free and thread-safe
+// from any drain site.
+static void retry_stranded_teardown_locked(void) {
+  if (!g_teardown_needed) return;
+  if (g_ref_count > 0) { g_teardown_needed = false; return; }  // adopted -> keep
+  if (g_teardown_state != TEARDOWN_NONE) return;               // a teardown drives
+  if (g_active_ops > 0) return;                                // wait for drain
+  if (g_isolate == NULL) { g_teardown_needed = false; return; } // nothing to do
+  uv_thread_t tid;
+  uv_thread_options_t opts;
+  opts.flags = UV_THREAD_HAS_STACK_SIZE;
+  opts.stack_size = 2 * 1024 * 1024;
+  int torn_down = 0;
+  int spawn_rc = uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, &torn_down);
+  if (spawn_rc == 0) uv_thread_join(&tid);
+  if (torn_down) {
+    g_thread = NULL;
+    g_isolate = NULL;
+    g_initialized = 0;
+    g_ref_count = 0;
+    g_teardown_needed = false;
+  }
+  // else: spawn/attach failed again -- leave g_teardown_needed set so the next
+  // drain (or a later initialize() adoption) retries.
+}
+
 static void isolate_ref_release_n_locked(int n) {
   if (n <= 0) return;
   if (g_ref_count >= n) g_ref_count -= n; else g_ref_count = 0;
@@ -2477,6 +2540,12 @@ static void isolate_ref_release_n_locked(int n) {
       g_isolate = NULL;
       g_initialized = 0;
       g_ref_count = 0;
+    } else if (g_isolate != NULL && g_ref_count == 0) {
+      // Sync teardown failed (spawn or cleanup_thread_fn attach) with the isolate
+      // still live and no owners: arm the retry signal (round-14 #3). g_active_ops
+      // is already 0 here, but a later op could still re-pin; the flag is cleared
+      // on adoption and retried on drain.
+      g_teardown_needed = true;
     }
     return;
   }
@@ -2491,14 +2560,14 @@ static void isolate_ref_release_n_locked(int n) {
   waiter_opts.stack_size = 2 * 1024 * 1024;
   int spawn_rc = uv_thread_create_ex(&waiter_tid, &waiter_opts, teardown_waiter_thread_fn, NULL);
   if (spawn_rc != 0) {
-    // Deferred teardown could not be spawned: the isolate stays live but no
-    // waiter will drain it (best-effort degradation, matching the original
-    // intent). Restore g_ref_count to the true remaining ownership so the
-    // invariant g_ref_count == sum of init_refs holds -- NOT a hardcoded 1,
-    // which would resurrect a reference no env owns (wrong for the n>1
-    // env-death caller, which has already freed its record before calling).
+    // Best-effort degradation: the waiter thread never started, so nothing will
+    // drain the isolate. Restore g_ref_count to the true remaining ownership
+    // (Σ init_refs, = 0 here) to keep the invariant, and ARM the retry signal so
+    // the next op-completion drain retries teardown -- otherwise this live
+    // isolate has zero owners and nothing would ever tear it down (round-14 #3).
     g_teardown_state = TEARDOWN_NONE;
     g_ref_count = env_init_refs_total_locked();
+    if (g_isolate != NULL && g_ref_count == 0) g_teardown_needed = true;
   }
 }
 
@@ -2664,7 +2733,12 @@ static napi_value release_isolate_ref_locked(napi_env env) {
   napi_value promise;
   teardown_waiter_t* waiter = teardown_waiter_create(env, &promise);
   if (waiter == NULL) {
+    // The last reference was already dropped (g_ref_count == 0) but we cannot
+    // build the waiter to drain the isolate. Arm the retry signal so the op
+    // drain retries teardown -- without it this live isolate would have zero
+    // owners and nothing to tear it down (round-14 #2).
     g_teardown_state = TEARDOWN_NONE;
+    if (g_isolate != NULL && g_ref_count == 0) g_teardown_needed = true;
     uv_mutex_unlock(&g_mutex);
     return NULL;  // teardown_waiter_create already threw
   }
@@ -2705,6 +2779,9 @@ static napi_value release_isolate_ref_locked(napi_env env) {
     // or env-death hook -- and would break the invariant g_ref_count == Σ
     // init_refs. A later initialize() will re-acquire on the surviving isolate.
     g_ref_count = env_init_refs_total_locked();
+    // Arm the retry signal: the isolate stays live with no owners and no waiter,
+    // so the op-completion drain must retry teardown (round-14 #2).
+    if (g_isolate != NULL && g_ref_count == 0) g_teardown_needed = true;
 
     uv_mutex_unlock(&g_mutex);
     return promise;
