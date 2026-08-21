@@ -67,17 +67,20 @@ describe("TCK ignore policy", () => {
       {
         "runtime/overlap:out.json": "known mismatch",
         "runtime/blank:out.json": " ",
+        "runtime/xfail:out.json": "known mismatch",
         "runtime/stale:out.json": "stale mismatch",
       },
-      ["runtime/overlap", "runtime/reenabled", "runtime/reenabled"],
-      new Set(["runtime/overlap:out.json", "runtime/blank:out.json"]),
+      ["runtime/overlap", "runtime/reenabled", "runtime/reenabled", "runtime/xfail"],
+      new Set(["runtime/overlap:out.json", "runtime/blank:out.json", "runtime/xfail:out.json"]),
     )).toEqual([
       "runtime/blank:out.json: missing expected-failure reason",
+      "runtime/overlap: case is both re-enabled and expected to fail",
       "runtime/overlap: case is both skipped and re-enabled",
       "runtime/overlap:out.json: case is both skipped and expected to fail",
       "runtime/reenabled: duplicate re-enabled case",
       "runtime/reenabled: not a discovered runnable case",
       "runtime/stale:out.json: not a discovered runnable scenario",
+      "runtime/xfail: case is both re-enabled and expected to fail",
     ]);
   });
 

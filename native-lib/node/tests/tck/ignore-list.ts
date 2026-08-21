@@ -274,6 +274,12 @@ export function validateReconciledPolicy(
   errors.push(...[...reenabledCounts]
     .filter(([, count]) => count > 1)
     .map(([identifier]) => `${identifier}: duplicate re-enabled case`));
+  const expectedFailureCases = new Set(
+    Object.keys(expectedFailures).map((identifier) => identifier.slice(0, identifier.lastIndexOf(":")))
+  );
+  errors.push(...[...reenabledCounts.keys()]
+    .filter((identifier) => expectedFailureCases.has(identifier))
+    .map((identifier) => `${identifier}: case is both re-enabled and expected to fail`));
   for (const [identifier, reason] of Object.entries(expectedFailures)) {
     if (!reason.trim()) errors.push(`${identifier}: missing expected-failure reason`);
     if (runnableScenarios && !runnableScenarios.has(identifier)) {
