@@ -150,15 +150,31 @@ export class DataWeave {
     // during the async teardown window are rejected deterministically rather
     // than seeing a stale "ready" state with a null engineHandle (round-6 #1/#3).
     this.state = "cleaning-up";
+    let destroyError: unknown;
     try {
       if (this.engineHandle !== null) {
-        ffi.destroyEngine(this.engineHandle);
-        this.engineHandle = null;
+        try {
+          ffi.destroyEngine(this.engineHandle);
+        } catch (e) {
+          // Round-14 (#6): a throwing destroyEngine() (e.g. wrong-thread
+          // destruction) must NOT skip ffi.cleanup() -- that would strand this
+          // env's native init reference and block isolate teardown. Capture the
+          // primary error, clear the handle so a retry does not double-destroy,
+          // and fall through to release the reference below.
+          destroyError = e;
+        } finally {
+          this.engineHandle = null;
+        }
       }
       await ffi.cleanup();
     } finally {
       this.state = "uninitialized";
     }
+    // Surface the primary destruction error after the reference was released. If
+    // ffi.cleanup() itself rejected, its error already propagated from the await
+    // (the more actionable reference-release failure wins; the destroy error is
+    // then suppressed).
+    if (destroyError !== undefined) throw destroyError;
   }
 
   /**

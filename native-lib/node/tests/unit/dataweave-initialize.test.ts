@@ -224,4 +224,31 @@ describe("DataWeave.initialize() native ref-count safety", () => {
       else process.env.DATAWEAVE_NATIVE_LIB = prevEnvLib;
     }
   });
+
+  it("still calls ffi.cleanup() (releasing the native init reference) when destroyEngine() throws", async () => {
+    // Real path: wrong-thread destroyEngine() throws synchronously. If cleanup()
+    // skipped ffi.cleanup() on that throw, the native init reference for this env
+    // would leak and block isolate teardown. cleanup() must release it anyway and
+    // still surface the primary destruction error.
+    vi.mocked(ffi.initialize).mockImplementation(() => {});
+    vi.mocked(ffi.createEngine).mockReturnValue(7);
+    vi.mocked(ffi.destroyEngine).mockImplementation(() => {
+      throw new Error("wrong-thread destroy boom");
+    });
+    vi.mocked(ffi.cleanup).mockResolvedValue(undefined);
+
+    const dw = new DataWeave("/fake/lib");
+    dw.initialize();
+
+    await expect(dw.cleanup()).rejects.toThrow("wrong-thread destroy boom");
+
+    // The native init reference was still released despite the destroy throw.
+    expect(ffi.cleanup).toHaveBeenCalledTimes(1);
+
+    // The instance is not stranded "ready": a later initialize() works.
+    vi.mocked(ffi.destroyEngine).mockReset();
+    vi.mocked(ffi.createEngine).mockReturnValue(9);
+    dw.initialize();
+    expect(ffi.createEngine).toHaveBeenLastCalledWith();
+  });
 });
