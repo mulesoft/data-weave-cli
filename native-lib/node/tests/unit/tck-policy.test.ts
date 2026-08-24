@@ -44,9 +44,10 @@ describe("TCK ignore policy", () => {
   });
 
   it("reconciles exclusions into capability skips and strict xfails", () => {
-    expect(Object.keys(CAPABILITY_EXCLUSIONS)).toHaveLength(31);
+    expect(Object.keys(CAPABILITY_EXCLUSIONS)).toHaveLength(32);
     expect(Object.keys(ACCEPTED_BASELINE_MISMATCHES)).toHaveLength(21);
-    expect(REENABLED_CASES).toHaveLength(7);
+    expect(REENABLED_CASES).toHaveLength(6);
+    expect(CAPABILITY_EXCLUSIONS).toHaveProperty("runtime/big_intersection-out.json");
     expect(IGNORED_CASES).toBe(CAPABILITY_EXCLUSIONS);
     expect(validateReconciledPolicy(
       CAPABILITY_EXCLUSIONS,
