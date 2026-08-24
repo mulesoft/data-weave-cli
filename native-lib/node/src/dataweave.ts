@@ -130,12 +130,15 @@ export class DataWeave {
    * Releases the native runtime. Idempotent — a no-op if not initialized. After
    * cleanup the instance can be re-initialized via {@link DataWeave.initialize}.
    *
-   * Resolves once the underlying native isolate has actually finished tearing
-   * down. If a streaming/transform operation on this or any other instance is
-   * still in flight when the last reference is released, native teardown
-   * waits for it to drain before resolving — awaiting this rather than
-   * firing-and-forgetting avoids racing a subsequent {@link initialize} against
-   * an isolate that is still tearing down.
+   * Resolution depends on whether this call releases the FINAL shared native
+   * reference in the process. When it does, it resolves once the underlying
+   * native isolate has actually finished tearing down; if a streaming/transform
+   * operation on this or any other instance is still in flight at that point,
+   * native teardown waits for it to drain before resolving — awaiting this
+   * rather than firing-and-forgetting avoids racing a subsequent
+   * {@link initialize} against an isolate that is still tearing down. When other
+   * initialized instances remain, it resolves as soon as this instance's engine
+   * is released, leaving the shared isolate live for them.
    */
   async cleanup(): Promise<void> {
     // Coalesce first: doCleanup() flips `state` to "cleaning-up" synchronously

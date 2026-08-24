@@ -228,7 +228,7 @@ try {
 
 **Methods:**
 - `initialize()`: Initialize the native library
-- `cleanup(): Promise<void>`: Release native resources; resolves once native teardown finishes
+- `cleanup(): Promise<void>`: Release this instance's native resources. When it releases the last initialized instance in the process, it resolves once the shared isolate has finished tearing down (draining any in-flight streaming/transform op first); otherwise it resolves as soon as this instance is released, leaving the isolate live for other instances.
 - `run(script, inputs?, opts?)`: Same as module-level `run()`
 - `runStreaming(script, inputs?)`: Same as module-level `runStreaming()`
 - `runTransform(script, input, opts?)`: Same as module-level `runTransform()`
