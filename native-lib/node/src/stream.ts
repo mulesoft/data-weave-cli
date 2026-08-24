@@ -37,6 +37,7 @@ export async function* streamFromNative(
   };
 
   let startError: unknown;
+  let startRejected = false;
   const wakeAll = () => {
     while (pendingResolves.length > 0) {
       const resolve = pendingResolves.shift();
@@ -47,13 +48,14 @@ export async function* streamFromNative(
   // Handle BOTH settlement branches. Without the rejection handler, a rejected
   // start() leaves `done` false forever: a consumer parked in next() below is
   // never woken and the generator hangs, and the rejection is unhandled
-  // (review #6 #2). On rejection we record the error, mark completion, and wake
-  // every waiter; the error is re-thrown after draining any chunks that arrived
+  // (review #6 #2). On rejection we record the error, flip startRejected, mark
+  // completion, and wake every waiter; the error is re-thrown (by settlement
+  // state, not by value -- see below) after draining any chunks that arrived
   // before the rejection. Because we handle rejection here, metaPromise itself
   // always fulfills -- `await metaPromise` below never throws.
   const metaPromise = start(chunkCb).then(
     (raw) => { metaRaw = raw; done = true; wakeAll(); },
-    (err) => { startError = err; done = true; wakeAll(); }
+    (err) => { startError = err; startRejected = true; done = true; wakeAll(); }
   );
 
   while (true) {
@@ -71,6 +73,9 @@ export async function* streamFromNative(
   }
 
   await metaPromise;
-  if (startError !== undefined) throw startError;
+  // Track rejection by settlement STATE, not by the rejected value: Promise.reject(undefined)
+  // is valid JS, so a value sentinel (startError !== undefined) would swallow it as an empty
+  // result. startRejected is only ever set in the rejection handler above (review #7 #6).
+  if (startRejected) throw startError;
   return parseStreamingResult(metaRaw ?? "");
 }

@@ -127,4 +127,17 @@ describe("streamFromNative", () => {
     // ...then the drained generator surfaces the start error.
     await expect(gen.next()).rejects.toThrow("late boom");
   });
+
+  it("propagates a native start() rejection of undefined instead of returning empty metadata", async () => {
+    // Promise.reject(undefined) is valid JS. The old value-sentinel
+    // (startError !== undefined) treated it as 'never rejected' and returned the
+    // normal empty-metadata result; a settlement-state flag must propagate it (review #7 #6).
+    const gen = streamFromNative(() => Promise.reject(undefined));
+    await expect(
+      (async () => {
+        // Drain fully: iterate to completion so the post-drain re-throw runs.
+        for await (const _ of gen) { /* no chunks */ }
+      })()
+    ).rejects.toBeUndefined();
+  });
 });
