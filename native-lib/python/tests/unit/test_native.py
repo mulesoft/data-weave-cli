@@ -1,9 +1,36 @@
 from pathlib import Path
+import ctypes
 
 import pytest
 
 import dataweave
 from dataweave import native
+
+
+class Function:
+    pass
+
+
+class CallableFunction(Function):
+    def __init__(self, callback):
+        self.callback = callback
+
+    def __call__(self, *args):
+        return self.callback(*args)
+
+
+class FakeLibrary:
+    run_script = Function()
+    free_cstring = Function()
+
+    def __init__(self, *, resolver_export=False):
+        self.tear_down_threads = []
+        self.graal_create_isolate = CallableFunction(lambda _params, _isolate, _thread: 0)
+        self.graal_tear_down_isolate = CallableFunction(
+            lambda thread: self.tear_down_threads.append(thread) or 0
+        )
+        if resolver_export:
+            self.run_script_with_resolver = Function()
 
 
 @pytest.mark.unit
@@ -68,32 +95,7 @@ def test_decode_and_free_preserves_decode_failure_when_free_also_fails(monkeypat
 
 @pytest.mark.unit
 def test_native_runtime_registers_abi_and_cleans_up_idempotently(monkeypatch):
-    class Function:
-        pass
-
-    class FakeLibrary:
-        run_script = Function()
-        free_cstring = Function()
-        graal_attach_thread = Function()
-        graal_detach_thread = Function()
-
-        def __init__(self):
-            self.tear_down_threads = []
-            self.graal_create_isolate = Function()
-            self.graal_create_isolate.__call__ = lambda _params, _isolate, _thread: 0
-            self.graal_tear_down_isolate = Function()
-            self.graal_tear_down_isolate.__call__ = lambda thread: self.tear_down_threads.append(thread) or 0
-
-    class CallableFunction(Function):
-        def __init__(self, callback):
-            self.callback = callback
-
-        def __call__(self, *args):
-            return self.callback(*args)
-
     library = FakeLibrary()
-    library.graal_create_isolate = CallableFunction(lambda _params, _isolate, _thread: 0)
-    library.graal_tear_down_isolate = CallableFunction(lambda thread: library.tear_down_threads.append(thread) or 0)
 
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
     runtime = native.NativeRuntime("/tmp/dwlib")
@@ -105,6 +107,240 @@ def test_native_runtime_registers_abi_and_cleans_up_idempotently(monkeypatch):
     assert library.free_cstring.argtypes[1] is native.ctypes.c_void_p
     assert len(library.tear_down_threads) == 1
     assert runtime.initialized is False
+
+
+@pytest.mark.unit
+def test_native_runtime_registers_optional_module_resolver_export(monkeypatch):
+    library = FakeLibrary(resolver_export=True)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    assert runtime.has_module_resolver is True
+    assert library.run_script_with_resolver.argtypes == [
+        native.GraalIsolateThreadPointer,
+        native.ctypes.c_char_p,
+        native.ctypes.c_char_p,
+        dataweave.RESOLVE_MODULE_CALLBACK,
+    ]
+    assert library.run_script_with_resolver.restype is native.ctypes.c_void_p
+
+
+@pytest.mark.unit
+def test_native_runtime_initializes_without_optional_module_resolver_export(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    assert runtime.has_module_resolver is False
+
+
+@pytest.mark.unit
+def test_run_script_with_resolver_adapts_path_and_retains_source_buffer(monkeypatch):
+    observed = []
+    resolver_paths = []
+    library = FakeLibrary(resolver_export=True)
+
+    def invoke(_thread, _script, _inputs, callback):
+        address = callback(None, b"/org/test/lib.dwl")
+        observed.append(ctypes.string_at(address).decode("utf-8"))
+        assert library.runtime._resolver_buffers
+        return 0
+
+    library.run_script_with_resolver = CallableFunction(invoke)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    library.runtime = runtime
+    runtime.initialize()
+    stale_buffer = ctypes.create_string_buffer(b"stale")
+    runtime._resolver_buffers.append(stale_buffer)
+
+    resolver = lambda path: resolver_paths.append(path) or "module source"
+    result = runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
+
+    assert result == 0
+    assert resolver_paths == ["org/test/lib.dwl"]
+    assert observed == ["module source"]
+    assert runtime._resolver_buffers == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("module_path", "resolver"),
+    [
+        (b"/missing.dwl", lambda _path: None),
+        (b"/invalid.dwl", lambda _path: 42),
+        (b"\xff", lambda _path: "unreachable"),
+    ],
+)
+def test_resolver_callback_returns_null_for_unresolved_or_invalid_values(
+    monkeypatch, module_path, resolver
+):
+    addresses = []
+    library = FakeLibrary(resolver_export=True)
+    library.run_script_with_resolver = CallableFunction(
+        lambda _thread, _script, _inputs, callback: addresses.append(
+            callback(None, module_path)
+        ) or 0
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
+
+    assert addresses == [None]
+    assert runtime._resolver_buffers == []
+
+
+@pytest.mark.unit
+def test_resolver_callback_contains_exceptions_and_hides_details_by_default(
+    monkeypatch, capsys
+):
+    addresses = []
+    library = FakeLibrary(resolver_export=True)
+    library.run_script_with_resolver = CallableFunction(
+        lambda _thread, _script, _inputs, callback: addresses.append(
+            callback(None, b"/org/test/lib.dwl")
+        ) or 0
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    monkeypatch.delenv("DATAWEAVE_RESOLVER_DEBUG", raising=False)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    def resolver(_path):
+        raise RuntimeError("secret /private/path")
+
+    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
+
+    captured = capsys.readouterr()
+    assert addresses == [None]
+    assert "DataWeave module resolver callback failed." in captured.err
+    assert "secret" not in captured.err
+    assert "/private/path" not in captured.err
+
+
+@pytest.mark.unit
+def test_resolver_callback_prints_exception_details_in_debug_mode(
+    monkeypatch, capsys
+):
+    library = FakeLibrary(resolver_export=True)
+    library.run_script_with_resolver = CallableFunction(
+        lambda _thread, _script, _inputs, callback: callback(
+            None, b"/org/test/lib.dwl"
+        ) or 0
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    monkeypatch.setenv("DATAWEAVE_RESOLVER_DEBUG", "1")
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    def resolver(_path):
+        raise RuntimeError("secret /private/path")
+
+    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
+
+    captured = capsys.readouterr()
+    assert "RuntimeError: secret /private/path" in captured.err
+
+
+@pytest.mark.unit
+def test_run_script_with_resolver_clears_buffers_when_native_call_fails(monkeypatch):
+    library = FakeLibrary(resolver_export=True)
+
+    def invoke(_thread, _script, _inputs, callback):
+        assert callback(None, b"/org/test/lib.dwl")
+        raise RuntimeError("native failure")
+
+    library.run_script_with_resolver = CallableFunction(invoke)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    with pytest.raises(RuntimeError, match="native failure"):
+        runtime.run_script_with_resolver(
+            "thread", b"script", b"{}", lambda _path: "module source"
+        )
+
+    assert runtime._resolver_buffers == []
+
+
+@pytest.mark.unit
+def test_run_script_with_resolver_rejects_missing_native_export(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    with pytest.raises(
+        dataweave.DataWeaveError,
+        match=r"Native library does not support module resolver API \(run_script_with_resolver not found\)\.",
+    ):
+        runtime.run_script_with_resolver(
+            "thread", b"script", b"{}", lambda _path: "module source"
+        )
+
+
+@pytest.mark.unit
+def test_native_runtime_retains_one_resolver_callback_until_teardown(monkeypatch):
+    retained_during_teardown = []
+    library = FakeLibrary(resolver_export=True)
+    library.run_script_with_resolver = CallableFunction(
+        lambda _thread, _script, _inputs, _callback: 0
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda _thread: retained_during_teardown.append(
+            runtime._module_resolver_callback is not None
+        ) or 0
+    )
+    runtime.initialize()
+    resolver = lambda _path: "module source"
+
+    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
+    callback = runtime._module_resolver_callback
+    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
+
+    assert runtime._module_resolver_callback is callback
+    with pytest.raises(dataweave.DataWeaveError):
+        runtime.run_script_with_resolver(
+            "thread", b"script", b"{}", lambda _path: "other source"
+        )
+
+    runtime.cleanup()
+
+    assert retained_during_teardown == [True]
+    assert runtime._module_resolver_callback is None
+    assert runtime._module_resolver is None
+
+
+@pytest.mark.unit
+def test_cleanup_retains_resolver_state_when_isolate_teardown_fails(monkeypatch):
+    library = FakeLibrary(resolver_export=True)
+    library.run_script_with_resolver = CallableFunction(
+        lambda _thread, _script, _inputs, _callback: 0
+    )
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 7)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    resolver = lambda _path: "module source"
+    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
+    callback = runtime._module_resolver_callback
+
+    with pytest.raises(
+        dataweave.DataWeaveError,
+        match="Failed to tear down GraalVM isolate. Error code: 7",
+    ):
+        runtime.cleanup()
+
+    assert runtime._module_resolver is resolver
+    assert runtime._module_resolver_callback is callback
 
 
 @pytest.mark.unit

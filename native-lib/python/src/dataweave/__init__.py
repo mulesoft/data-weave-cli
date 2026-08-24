@@ -9,6 +9,7 @@ from .encoding import parse_native_encoded_response as _parse_native_encoded_res
 from .encoding import parse_streaming_result as _parse_streaming_result
 from .models import (
     READ_CALLBACK,
+    RESOLVE_MODULE_CALLBACK,
     WRITE_CALLBACK,
     DataWeaveError,
     DataWeaveLibraryNotFoundError,
@@ -75,7 +76,7 @@ def cleanup() -> None:
 __all__ = [
     "DataWeave", "DataWeaveError", "DataWeaveLibraryNotFoundError", "DataWeaveScriptError",
     "ExecutionResult", "InputValue", "ReadCallback", "Stream", "StreamingResult", "WriteCallback",
-    "READ_CALLBACK", "WRITE_CALLBACK", "run", "run_callback", "run_input_output_callback",
+    "READ_CALLBACK", "RESOLVE_MODULE_CALLBACK", "WRITE_CALLBACK", "run", "run_callback", "run_input_output_callback",
     "run_streaming", "run_transform", "cleanup", "ModuleResolver", "compose_resolvers",
     "modules_from_directory", "modules_from_jars", "modules_from_map",
 ]
