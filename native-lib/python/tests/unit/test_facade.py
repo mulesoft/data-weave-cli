@@ -32,6 +32,21 @@ def test_facade_preserves_fixed_legacy_public_exports():
 
 
 @pytest.mark.unit
+def test_facade_exports_module_resolver_factories():
+    resolver_exports = [
+        "ModuleResolver",
+        "compose_resolvers",
+        "modules_from_directory",
+        "modules_from_jars",
+        "modules_from_map",
+    ]
+
+    for name in resolver_exports:
+        assert name in dataweave.__all__
+        getattr(dataweave, name)
+
+
+@pytest.mark.unit
 def test_global_facade_initializes_once_and_cleanup_allows_recreation(monkeypatch):
     created = []
     registered = []

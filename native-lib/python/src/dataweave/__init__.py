@@ -22,6 +22,13 @@ from .models import (
 )
 from .native import candidate_library_paths as _candidate_library_paths
 from .native import find_library as _find_library
+from .resolver import (
+    ModuleResolver,
+    compose_resolvers,
+    modules_from_directory,
+    modules_from_jars,
+    modules_from_map,
+)
 from .runtime import DataWeave
 
 
@@ -69,5 +76,6 @@ __all__ = [
     "DataWeave", "DataWeaveError", "DataWeaveLibraryNotFoundError", "DataWeaveScriptError",
     "ExecutionResult", "InputValue", "ReadCallback", "Stream", "StreamingResult", "WriteCallback",
     "READ_CALLBACK", "WRITE_CALLBACK", "run", "run_callback", "run_input_output_callback",
-    "run_streaming", "run_transform", "cleanup",
+    "run_streaming", "run_transform", "cleanup", "ModuleResolver", "compose_resolvers",
+    "modules_from_directory", "modules_from_jars", "modules_from_map",
 ]
