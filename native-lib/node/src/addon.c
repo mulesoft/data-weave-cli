@@ -713,13 +713,21 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
       g_thread = NULL;
       g_isolate = NULL;
       g_initialized = 0;
+    } else {
+      // Spawn failed, or cleanup_thread_fn's attach/teardown to the isolate
+      // failed. The isolate is genuinely still alive with g_initialized == 0.
+      // Without a retry signal the next initialize() would reach the wait loop's
+      // `g_isolate != NULL && !g_initialized` condition with TEARDOWN_NONE (so no
+      // adoption branch) and block on uv_cond_wait forever -- nothing left to
+      // broadcast (review #7 #2). Arm the stranded-teardown retry so the
+      // retry_stranded_teardown_locked() at the top of the next napi_initialize
+      // reclaims the isolate (teardown succeeds -> fresh build; repeated failure
+      // -> the live isolate is adopted by the fast path). g_ref_count is still 0
+      // here, so g_teardown_needed (a retry SIGNAL, not a reference) keeps the
+      // invariant g_ref_count == sum(init_refs) intact. Mirrors the twin arm in
+      // teardown_waiter_thread_fn and isolate_ref_release_n_locked.
+      g_teardown_needed = true;
     }
-    // else: spawn failed, or cleanup_thread_fn's attach to the isolate failed.
-    // The isolate is genuinely still alive -- leave g_isolate/g_thread as-is
-    // rather than orphaning it. This re-arms the same trap on a subsequent
-    // initialize(), but that is the pre-existing best-effort degradation
-    // policy already accepted for cleanup_thread_fn's attach-failure path
-    // elsewhere in this file; we don't invent new behavior for it here.
     uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "Failed to allocate/register env init record");
     return NULL;
