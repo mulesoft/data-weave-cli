@@ -56,6 +56,26 @@ def test_python_artifact_owns_test_dependencies_and_tck_junit_upload():
 
 
 @pytest.mark.unit
+def test_python_readme_documents_module_resolver_contract():
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+
+    for public_name in (
+        "ModuleResolver",
+        "modules_from_map",
+        "modules_from_directory",
+        "modules_from_jars",
+        "compose_resolvers",
+        "resolve_module",
+        "DATAWEAVE_RESOLVER_DEBUG",
+    ):
+        assert f"`{public_name}`" in readme
+
+    assert "synchronous" in readme
+    assert "explicit `DataWeave` instance" in readme
+    assert "built-in modules" in readme
+
+
+@pytest.mark.unit
 def test_master_tck_stages_the_shared_corpus_once_before_python_and_node():
     root = Path(__file__).resolve().parents[4]
     gradle = (root / "native-lib/build.gradle").read_text()

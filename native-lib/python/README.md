@@ -123,6 +123,93 @@ with dataweave.DataWeave() as dw:
     print(r2.get_string())  # "42"
 ```
 
+### External DataWeave Modules
+
+Custom module resolution is available to synchronous `DataWeave.run()` calls on
+an explicit `DataWeave` instance. Resolver keys use `/` separators and include
+the `.dwl` suffix; for example, the DataWeave import `org::company::lib` requests
+the separator-less module key `org/company/lib.dwl`.
+
+```python
+from dataweave import DataWeave, modules_from_map
+
+resolver = modules_from_map({
+    "org/company/lib.dwl": '%dw 2.0\nfun greet(name) = "Hello " ++ name',
+})
+
+with DataWeave(resolve_module=resolver) as dw:
+    result = dw.run("""
+        %dw 2.0
+        import org::company::lib
+        output application/json
+        ---
+        lib::greet("World")
+    """)
+
+assert result.get_string() == '"Hello World"'
+```
+
+The `ModuleResolver` contract is a synchronous callable from a module key to
+the module source string or `None`. Resolver configuration is explicit-instance
+only: the module-level `dataweave.run()` singleton does not accept
+`resolve_module`. `run_streaming()`, `run_transform()`, and the low-level
+callback streaming API also do not use custom resolvers and can import only
+built-in modules.
+
+Use `modules_from_directory()` for a source tree:
+
+```python
+from dataweave import DataWeave, modules_from_directory
+
+with DataWeave(resolve_module=modules_from_directory("modules")) as dw:
+    result = dw.run(script)
+```
+
+Use `modules_from_jars()` to load `.dwl` entries from one or more JAR or ZIP
+archives. Later archives replace duplicate module keys from earlier archives:
+
+```python
+from dataweave import DataWeave, modules_from_jars
+
+resolver = modules_from_jars(["base-modules.jar", "application-modules.jar"])
+with DataWeave(resolve_module=resolver) as dw:
+    result = dw.run(script)
+```
+
+Use `compose_resolvers()` for ordered fallback. The first resolver returning a
+source wins:
+
+```python
+from dataweave import (
+    DataWeave,
+    compose_resolvers,
+    modules_from_directory,
+    modules_from_jars,
+    modules_from_map,
+)
+
+resolver = compose_resolvers(
+    modules_from_map({"org/company/config.dwl": config_source}),
+    modules_from_directory("modules"),
+    modules_from_jars(["dependencies.jar"]),
+)
+with DataWeave(resolve_module=resolver) as dw:
+    result = dw.run(script)
+```
+
+Resolvers execute arbitrary Python with the application's process permissions.
+Use only trusted resolver functions and trusted module sources. By default,
+callback failures write a fixed, content-free diagnostic to stderr so module
+source, credentials, and local paths are not exposed. Set
+`DATAWEAVE_RESOLVER_DEBUG=1` only in a trusted debugging environment to include
+the exception type, message, and traceback.
+
+Each explicit Python `DataWeave` instance owns a dedicated Graal isolate. Its
+first resolver-backed run installs that instance's resolver; later runs reuse
+it. The instance retains the resolver callback for the isolate's lifetime and
+tears down the isolate before releasing callback references during `cleanup()`.
+Different live instances can therefore use different resolvers.
+
 ### Error Handling
 
 **Option A: Use `raise_on_error=True` (recommended)**
@@ -296,13 +383,22 @@ To stage and run the Python conformance suite, use:
 ```
 
 `pythonTck` is intentionally separate from normal testing and runs only in the
-master-only CI lane. It reuses the corpus staged for Node TCK. It excludes
-only binding/environment capability gaps, such as unavailable module resolution,
-Java modules, and classpath test resources. Accepted runtime/output baseline
-mismatches are strict xfails: a new mismatch fails the lane and a repaired
-baseline mismatch XPASSes and also fails. The deferred-writer TCK scenario runs
-in a subprocess because that runtime's isolate teardown may block; the main TCK
-session runtime is always cleaned up.
+master-only CI lane. It reuses the corpus and shared module fixture staged for
+Node TCK. The fixture resolver recovered six import scenarios. The
+`runtime/module-singleton-out.json` exclusion remains because the shared fixture
+does not contain its three singleton modules. All 17 cases that bundle adjacent
+`.dwl` files beside `transform.dwl` remain structural skips rather than active
+exclusions.
+
+The observed conformance accounting is 729 selected scenarios, 193 structural
+skips, 17 structural module cases, 679 executed passes, 31 active exclusions,
+19 strict xfails, 0 failures, and 0 unaccounted scenarios. Active exclusions
+cover only directly observed binding or environment capability gaps, including
+unavailable modules, Java modules, and classpath test resources. Accepted
+runtime/output baseline mismatches are strict xfails: a new mismatch fails the
+lane and a repaired baseline mismatch XPASSes and also fails. The deferred-writer
+TCK scenario runs in a subprocess because that runtime's isolate teardown may
+block; the main TCK session runtime is always cleaned up.
 
 ## Running Examples
 
@@ -352,9 +448,10 @@ Low-level callback API for advanced use cases.
 
 ### `DataWeave` Class
 
-#### `DataWeave(lib_path=None)`
+#### `DataWeave(lib_path=None, *, resolve_module=None)`
 
-Context manager for explicit lifecycle control.
+Context manager for explicit lifecycle control. `resolve_module` accepts a
+synchronous `ModuleResolver` for `run()` calls.
 
 **Methods:**
 - `run(...)` - Same as module-level `run()`
@@ -367,6 +464,17 @@ Context manager for explicit lifecycle control.
 with DataWeave() as dw:
     result = dw.run("2 + 2")
 ```
+
+### Module Resolvers
+
+- `ModuleResolver` - Synchronous callable receiving a module key and returning
+  source text or `None`
+- `modules_from_map` - Copy a mapping and resolve exact module keys
+- `modules_from_directory` - Resolve UTF-8 `.dwl` files beneath a
+  traversal-protected directory root
+- `modules_from_jars` - Load `.dwl` entries from JAR or ZIP archives
+  in caller order
+- `compose_resolvers` - Return the first non-`None` resolver result
 
 ### `ExecutionResult`
 
@@ -522,6 +630,8 @@ if not stream.metadata.success:
 - `DW_HOME` - DataWeave home directory (default: `~/.dw`)
 - `DW_DEFAULT_INPUT_MIMETYPE` - Default input MIME type (default: `application/json`)
 - `DW_DEFAULT_OUTPUT_MIMETYPE` - Default output MIME type (default: `application/json`)
+- `DATAWEAVE_RESOLVER_DEBUG` - Set to `1` to include resolver exception details
+  in callback diagnostics; use only in trusted debugging environments
 
 ## See Also
 
