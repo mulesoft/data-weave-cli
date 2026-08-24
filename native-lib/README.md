@@ -458,14 +458,17 @@ import { DataWeave } from "dataweave-native";
 
 const dw = new DataWeave();
 dw.initialize();
+try {
+  const r1 = dw.run("2 + 2");
+  const r2 = dw.run("x + y", { x: 10, y: 32 });
 
-const r1 = dw.run("2 + 2");
-const r2 = dw.run("x + y", { x: 10, y: 32 });
-
-console.log(r1.getString()); // "4"
-console.log(r2.getString()); // "42"
-
-dw.cleanup();
+  console.log(r1.getString()); // "4"
+  console.log(r2.getString()); // "42"
+} finally {
+  // cleanup() returns a Promise; await it so an in-flight streaming/transform op
+  // drains and a subsequent initialize() does not race a still-tearing-down isolate.
+  await dw.cleanup();
+}
 ```
 
 ### 5) Error handling
@@ -643,11 +646,18 @@ for await (const chunk of gen) {
 
 ### 9) Cleanup
 
-The module registers a `process.on('exit')` handler to clean up automatically. For explicit control:
+The module registers two process hooks to clean up automatically: `beforeExit`
+(async — it awaits cleanup so an in-flight streaming/transform op drains before
+the process exits normally) and `exit` (a synchronous best-effort fallback for
+`process.exit()` and uncaught exceptions, which cannot await the drain). Neither
+hook fires on `SIGTERM`/`SIGINT`/`SIGKILL`, so install your own signal handler
+that awaits `cleanup()` if you need a graceful drain on termination. For explicit
+control:
 
 ```typescript
 import { cleanup } from "dataweave-native";
 
-// When done with all DataWeave operations
-cleanup();
+// When done with all DataWeave operations. cleanup() returns a Promise; await it
+// so any in-flight streaming/transform op drains before the isolate tears down.
+await cleanup();
 ```
