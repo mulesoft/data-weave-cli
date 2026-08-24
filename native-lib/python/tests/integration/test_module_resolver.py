@@ -117,20 +117,34 @@ def test_cleanup_of_one_instance_preserves_another_instances_resolver():
     second = dataweave.DataWeave(resolve_module=dataweave.modules_from_map({
         "org/test/lib.dwl": "%dw 2.0\nfun answer() = 42",
     }))
-    first.initialize()
-    second.initialize()
+    first_initialized = False
+    second_initialized = False
     try:
-        assert first.run(IMPORT_LIB_SCRIPT).get_string() == "41"
-        assert second.run(IMPORT_LIB_SCRIPT).get_string() == "42"
+        first.initialize()
+        first_initialized = True
+        second.initialize()
+        second_initialized = True
+
+        first_result = first.run(IMPORT_LIB_SCRIPT)
+        second_result = second.run(IMPORT_LIB_SCRIPT)
+        assert first_result.success is True
+        assert first_result.get_string() == "41"
+        assert second_result.success is True
+        assert second_result.get_string() == "42"
 
         first.cleanup()
+        first_initialized = False
 
         result = second.run(IMPORT_LIB_SCRIPT)
         assert result.success is True
         assert result.get_string() == "42"
     finally:
-        first.cleanup()
-        second.cleanup()
+        try:
+            if first_initialized:
+                first.cleanup()
+        finally:
+            if second_initialized:
+                second.cleanup()
 
 
 @pytest.mark.integration
