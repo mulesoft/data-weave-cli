@@ -249,6 +249,66 @@ def test_resolver_callback_prints_exception_details_in_debug_mode(
 
 
 @pytest.mark.unit
+def test_resolver_callback_contains_base_exceptions(monkeypatch, capsys):
+    class ResolverExit(BaseException):
+        pass
+
+    addresses = []
+    library = FakeLibrary(resolver_export=True)
+    library.run_script_with_resolver = CallableFunction(
+        lambda _thread, _script, _inputs, callback: addresses.append(
+            callback(None, b"/org/test/lib.dwl")
+        ) or 0
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    monkeypatch.delenv("DATAWEAVE_RESOLVER_DEBUG", raising=False)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    def resolver(_path):
+        raise ResolverExit("secret /private/path")
+
+    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
+
+    captured = capsys.readouterr()
+    assert addresses == [None]
+    assert "DataWeave module resolver callback failed." in captured.err
+    assert "secret" not in captured.err
+    assert "/private/path" not in captured.err
+
+
+@pytest.mark.unit
+def test_resolver_callback_contains_diagnostic_writer_failures(monkeypatch):
+    addresses = []
+    library = FakeLibrary(resolver_export=True)
+    library.run_script_with_resolver = CallableFunction(
+        lambda _thread, _script, _inputs, callback: addresses.append(
+            callback(None, b"/org/test/lib.dwl")
+        ) or 0
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    monkeypatch.delenv("DATAWEAVE_RESOLVER_DEBUG", raising=False)
+    monkeypatch.setattr(
+        native.sys,
+        "stderr",
+        type(
+            "FailingStderr",
+            (),
+            {"write": lambda _self, _value: (_ for _ in ()).throw(SystemExit(9))},
+        )(),
+    )
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    def resolver(_path):
+        raise KeyboardInterrupt("secret /private/path")
+
+    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
+
+    assert addresses == [None]
+
+
+@pytest.mark.unit
 def test_run_script_with_resolver_clears_buffers_when_native_call_fails(monkeypatch):
     library = FakeLibrary(resolver_export=True)
 
@@ -320,15 +380,20 @@ def test_native_runtime_retains_one_resolver_callback_until_teardown(monkeypatch
 
 
 @pytest.mark.unit
-def test_cleanup_retains_resolver_state_when_isolate_teardown_fails(monkeypatch):
+def test_cleanup_failure_preserves_runtime_state_for_successful_retry(monkeypatch):
     library = FakeLibrary(resolver_export=True)
     library.run_script_with_resolver = CallableFunction(
         lambda _thread, _script, _inputs, _callback: 0
     )
-    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 7)
+    tear_down_results = iter((7, 0))
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda _thread: next(tear_down_results)
+    )
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
     runtime = native.NativeRuntime("/tmp/dwlib")
     runtime.initialize()
+    isolate = runtime.isolate
+    thread = runtime.thread
     resolver = lambda _path: "module source"
     runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
     callback = runtime._module_resolver_callback
@@ -339,8 +404,22 @@ def test_cleanup_retains_resolver_state_when_isolate_teardown_fails(monkeypatch)
     ):
         runtime.cleanup()
 
+    assert runtime.initialized is True
+    assert runtime.lib is library
+    assert runtime.isolate is isolate
+    assert runtime.thread is thread
+    assert runtime.has_module_resolver is True
     assert runtime._module_resolver is resolver
     assert runtime._module_resolver_callback is callback
+
+    runtime.cleanup()
+
+    assert runtime.initialized is False
+    assert runtime.lib is None
+    assert runtime.isolate is None
+    assert runtime.thread is None
+    assert runtime._module_resolver is None
+    assert runtime._module_resolver_callback is None
 
 
 @pytest.mark.unit
@@ -484,9 +563,10 @@ def test_cleanup_surfaces_native_teardown_error_code(monkeypatch):
     with pytest.raises(dataweave.DataWeaveError, match="Failed to tear down GraalVM isolate. Error code: 7"):
         runtime.cleanup()
 
-    assert runtime.lib is None
-    assert runtime.thread is None
-    assert runtime.isolate is None
+    assert runtime.initialized is True
+    assert runtime.lib is not None
+    assert runtime.thread is not None
+    assert runtime.isolate is not None
 
 
 @pytest.mark.unit

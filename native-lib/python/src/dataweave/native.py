@@ -219,11 +219,14 @@ class NativeRuntime:
                 buffer = ctypes.create_string_buffer(source.encode("utf-8"))
                 self._resolver_buffers.append(buffer)
                 return ctypes.addressof(buffer)
-            except Exception:
-                if os.environ.get("DATAWEAVE_RESOLVER_DEBUG") == "1":
-                    traceback.print_exc()
-                else:
-                    print("DataWeave module resolver callback failed.", file=sys.stderr)
+            except BaseException:
+                try:
+                    if os.environ.get("DATAWEAVE_RESOLVER_DEBUG") == "1":
+                        traceback.print_exc()
+                    else:
+                        print("DataWeave module resolver callback failed.", file=sys.stderr)
+                except BaseException:
+                    pass
                 return None
 
         return RESOLVE_MODULE_CALLBACK(resolve)
@@ -239,12 +242,8 @@ class NativeRuntime:
     def cleanup(self) -> None:
         if not self.initialized:
             return
-        isolate_torn_down = False
-        try:
-            self._tear_down_isolate()
-            isolate_torn_down = True
-        finally:
-            self._reset(reset_resolver=isolate_torn_down)
+        self._tear_down_isolate()
+        self._reset()
 
     def _tear_down_isolate(self, suppress_errors: bool = False) -> None:
         if self.thread is None:
@@ -260,7 +259,7 @@ class NativeRuntime:
             if not suppress_errors:
                 raise DataWeaveError(f"Failed to tear down GraalVM isolate: {error}") from error
 
-    def _reset(self, reset_resolver: bool = True) -> None:
+    def _reset(self) -> None:
         self.initialized = False
         self.thread = None
         self.isolate = None
@@ -268,7 +267,6 @@ class NativeRuntime:
         self.has_callback_streaming = False
         self.has_callback_input_output = False
         self.has_module_resolver = False
-        if reset_resolver:
-            self._module_resolver = None
-            self._module_resolver_callback = None
-            self._resolver_buffers = []
+        self._module_resolver = None
+        self._module_resolver_callback = None
+        self._resolver_buffers = []
