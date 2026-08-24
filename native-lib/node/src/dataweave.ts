@@ -108,10 +108,22 @@ export class DataWeave {
       this.engineHandle = null;
       if (libRefAcquired) {
         this.state = "cleaning-up";
-        // Promise.resolve() normalizes the release: ffi.cleanup() returns
-        // Promise<void>, but wrapping keeps the .finally() chain robust and lets
-        // a rejected release settle through the same path.
-        this.cleanupPromise = Promise.resolve(ffi.cleanup()).finally(() => {
+        // ffi.cleanup() can fail synchronously (throw) as well as asynchronously
+        // (reject a returned promise). Calling it inside a try/catch -- rather
+        // than eagerly as the argument to Promise.resolve(ffi.cleanup()) -- lets
+        // a synchronous throw be caught and normalized into a rejected promise
+        // BEFORE cleanupPromise is assigned, so it still flows through the same
+        // .finally() state reset instead of escaping here and stranding this
+        // instance in "cleaning-up" forever (review #8 #2). Existing callers
+        // still observe ffi.cleanup() invoked synchronously, in the same tick as
+        // this catch block, exactly as before this fix.
+        let releaseResult: Promise<void> | void;
+        try {
+          releaseResult = ffi.cleanup();
+        } catch (cleanupError) {
+          releaseResult = Promise.reject(cleanupError);
+        }
+        this.cleanupPromise = Promise.resolve(releaseResult).finally(() => {
           this.state = "uninitialized";
           this.cleanupPromise = null;
         });

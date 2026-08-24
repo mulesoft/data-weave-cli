@@ -343,4 +343,33 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     dw.initialize();
     expect(ffi.createEngine).toHaveBeenLastCalledWith();
   });
+
+  it("does not strand the instance in cleaning-up when the rollback ffi.cleanup() throws synchronously", async () => {
+    // ffi.cleanup() can fail SYNCHRONOUSLY (throw) rather than returning a
+    // rejected promise. The rollback must still settle its pending state and the
+    // instance must stay re-initializable; the ORIGINAL engine-creation error is
+    // what surfaces synchronously to this caller (review #8 #2).
+    vi.mocked(ffi.initialize).mockImplementation(() => {});
+    vi.mocked(ffi.createEngine).mockImplementationOnce(() => {
+      throw new Error("native engine creation boom");
+    });
+    vi.mocked(ffi.cleanup).mockImplementationOnce(() => {
+      throw new Error("synchronous cleanup boom");
+    });
+
+    const dw = new DataWeave("/fake/lib");
+    // The synchronous throw to THIS caller is the ORIGINAL engine-creation error,
+    // not the cleanup throw.
+    expect(() => dw.initialize()).toThrow(/native engine creation boom/);
+
+    // Let the deferred rollback settle; state must return to "uninitialized" so a
+    // later initialize() is not permanently rejected with "cleanup is in progress".
+    await new Promise<void>((r) => setImmediate(r));
+    vi.mocked(ffi.createEngine).mockReturnValue(11);
+    dw.initialize();
+    expect(ffi.createEngine).toHaveBeenLastCalledWith();
+
+    await dw.cleanup();
+    expect(ffi.destroyEngine).toHaveBeenCalledWith(11);
+  });
 });
