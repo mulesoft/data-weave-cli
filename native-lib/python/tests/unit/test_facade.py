@@ -12,16 +12,16 @@ class FakeNativeRuntime:
         self.thread = "thread"
         self.calls = []
 
-    def run_script(self, *args):
-        self.calls.append(("run_script", args))
-        return "result"
+    def run_script_and_decode(self, *args):
+        self.calls.append(("run_script_and_decode", args))
+        return self._result()
 
-    def run_script_with_resolver(self, *args):
-        self.calls.append(("run_script_with_resolver", args))
-        return "result"
+    def run_script_with_resolver_and_decode(self, *args):
+        self.calls.append(("run_script_with_resolver_and_decode", args))
+        return self._result()
 
     @staticmethod
-    def decode_and_free(_ptr):
+    def _result():
         return '{"success": true, "result": "SGVsbG8=", "binary": false, "mimeType": "text/plain", "charset": "utf-8"}'
 
 
@@ -102,7 +102,7 @@ def test_run_dispatches_to_resolver_aware_native_execution():
     )
     assert instance._native.calls == [
         (
-            "run_script_with_resolver",
+            "run_script_with_resolver_and_decode",
             (
                 "thread",
                 b"payload",
@@ -123,7 +123,7 @@ def test_run_without_resolver_preserves_native_execution_path():
         True, "SGVsbG8=", None, False, "text/plain", "utf-8"
     )
     assert instance._native.calls == [
-        ("run_script", ("thread", b"payload", b"{}"))
+        ("run_script_and_decode", ("thread", b"payload", b"{}"))
     ]
 
 

@@ -1,8 +1,9 @@
 import ctypes
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import sys
-from threading import Lock
+from threading import get_ident, Lock
 import traceback
 from typing import Optional
 
@@ -72,6 +73,7 @@ class NativeRuntime:
         self._resolver_buffers = []
         self._resolver_active = False
         self._resolver_lock = Lock()
+        self._execution_owner = None
 
     def initialize(self) -> None:
         if self.initialized:
@@ -188,31 +190,45 @@ class NativeRuntime:
                     raise
 
     def run_script(self, thread, script: bytes, inputs: bytes):
-        with self._resolver_execution_lock():
+        with self._serialized_native_operation():
             return self.lib.run_script(thread, script, inputs)
 
-    def run_script_with_resolver(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver):
-        with self._resolver_execution_lock():
-            if not self.has_module_resolver:
-                raise DataWeaveError(
-                    "Native library does not support module resolver API "
-                    "(run_script_with_resolver not found)."
-                )
-            if self._module_resolver is None:
-                self._module_resolver = resolver
-                self._module_resolver_callback = self._create_module_resolver_callback(resolver)
-            elif self._module_resolver is not resolver:
-                raise DataWeaveError("Native runtime already has a different module resolver")
+    def run_script_and_decode(self, thread, script: bytes, inputs: bytes) -> str:
+        with self._serialized_native_operation():
+            return self.decode_and_free(self.lib.run_script(thread, script, inputs), thread)
 
+    def run_script_with_resolver(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver):
+        with self._serialized_native_operation():
+            return self._run_script_with_resolver(thread, script, inputs, resolver)
+
+    def run_script_with_resolver_and_decode(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver) -> str:
+        with self._serialized_native_operation():
+            return self.decode_and_free(
+                self._run_script_with_resolver(thread, script, inputs, resolver),
+                thread,
+            )
+
+    def _run_script_with_resolver(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver):
+        if not self.has_module_resolver:
+            raise DataWeaveError(
+                "Native library does not support module resolver API "
+                "(run_script_with_resolver not found)."
+            )
+        if self._module_resolver is None:
+            self._module_resolver = resolver
+            self._module_resolver_callback = self._create_module_resolver_callback(resolver)
+        elif self._module_resolver is not resolver:
+            raise DataWeaveError("Native runtime already has a different module resolver")
+
+        self._resolver_buffers.clear()
+        self._resolver_active = True
+        try:
+            return self.lib.run_script_with_resolver(
+                thread, script, inputs, self._module_resolver_callback
+            )
+        finally:
+            self._resolver_active = False
             self._resolver_buffers.clear()
-            self._resolver_active = True
-            try:
-                return self.lib.run_script_with_resolver(
-                    thread, script, inputs, self._module_resolver_callback
-                )
-            finally:
-                self._resolver_active = False
-                self._resolver_buffers.clear()
 
     def _create_module_resolver_callback(self, resolver: ModuleResolver):
         def resolve(_thread, module_path):
@@ -241,26 +257,51 @@ class NativeRuntime:
         return RESOLVE_MODULE_CALLBACK(resolve)
 
     def run_script_callback(self, thread, script: bytes, inputs: bytes, write_callback):
-        with self._resolver_execution_lock():
+        with self._serialized_native_operation():
             return self.lib.run_script_callback(thread, script, inputs, write_callback, None)
 
+    def run_script_callback_and_decode(self, thread, script: bytes, inputs: bytes, write_callback) -> str:
+        with self._serialized_native_operation():
+            return self.decode_and_free(
+                self.lib.run_script_callback(thread, script, inputs, write_callback, None),
+                thread,
+            )
+
     def run_script_input_output_callback(self, thread, script: bytes, inputs: bytes, input_name: bytes, input_mime_type: bytes, input_charset: Optional[bytes], read_callback, write_callback):
-        with self._resolver_execution_lock():
+        with self._serialized_native_operation():
             return self.lib.run_script_input_output_callback(
                 thread, script, inputs, input_name, input_mime_type, input_charset, read_callback, write_callback, None,
             )
 
+    def run_script_input_output_callback_and_decode(self, thread, script: bytes, inputs: bytes, input_name: bytes, input_mime_type: bytes, input_charset: Optional[bytes], read_callback, write_callback) -> str:
+        with self._serialized_native_operation():
+            return self.decode_and_free(
+                self.lib.run_script_input_output_callback(
+                    thread, script, inputs, input_name, input_mime_type, input_charset, read_callback, write_callback, None,
+                ),
+                thread,
+            )
+
     def cleanup(self) -> None:
-        with self._resolver_execution_lock():
+        with self._serialized_native_operation():
             if not self.initialized:
                 return
             self._tear_down_isolate()
             self._reset()
 
-    def _resolver_execution_lock(self):
+    @contextmanager
+    def _serialized_native_operation(self):
+        owner = get_ident()
+        if getattr(self, "_execution_owner", None) == owner:
+            raise DataWeaveError("Reentrant DataWeave execution is not supported.")
         if not hasattr(self, "_resolver_lock"):
             self._resolver_lock = Lock()
-        return self._resolver_lock
+        with self._resolver_lock:
+            self._execution_owner = owner
+            try:
+                yield
+            finally:
+                self._execution_owner = None
 
     def _tear_down_isolate(self, suppress_errors: bool = False) -> None:
         if self.thread is None:

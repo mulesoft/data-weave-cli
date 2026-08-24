@@ -382,6 +382,70 @@ def test_run_script_with_resolver_serializes_calls_and_buffer_cleanup(monkeypatc
 
 
 @pytest.mark.unit
+def test_native_runtime_reentrant_execution_fails_without_deadlocking(monkeypatch):
+    completed = Event()
+    nested_errors = []
+    library = FakeLibrary()
+
+    def invoke(thread, script, inputs):
+        if script == b"outer":
+            try:
+                library.runtime.run_script(thread, b"nested", inputs)
+            except Exception as error:
+                nested_errors.append(error)
+        return 0
+
+    library.run_script = CallableFunction(invoke)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    library.runtime = runtime
+    runtime.initialize()
+
+    worker = Thread(
+        target=lambda: (runtime.run_script("thread", b"outer", b"{}"), completed.set()),
+        daemon=True,
+    )
+    worker.start()
+
+    assert completed.wait(1), "reentrant native execution deadlocked"
+    assert len(nested_errors) == 1
+    assert isinstance(nested_errors[0], dataweave.DataWeaveError)
+    assert "reentrant" in str(nested_errors[0]).lower()
+
+
+@pytest.mark.unit
+def test_resolver_callback_translates_reentrant_execution_to_null(monkeypatch):
+    completed = Event()
+    callback_results = []
+    library = FakeLibrary(resolver_export=True)
+    library.run_script = CallableFunction(lambda _thread, _script, _inputs: 0)
+    library.run_script_with_resolver = CallableFunction(
+        lambda thread, _script, inputs, callback: callback_results.append(
+            callback(thread, b"/org/test/lib.dwl")
+        ) or 0
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    def resolver(_path):
+        runtime.run_script("thread", b"nested", b"{}")
+        return "unreachable"
+
+    worker = Thread(
+        target=lambda: (
+            runtime.run_script_with_resolver("thread", b"outer", b"{}", resolver),
+            completed.set(),
+        ),
+        daemon=True,
+    )
+    worker.start()
+
+    assert completed.wait(1), "resolver callback re-entry deadlocked"
+    assert callback_results == [None]
+
+
+@pytest.mark.unit
 def test_cleanup_waits_for_resolver_aware_call(monkeypatch):
     run_entered = Event()
     release_run = Event()
@@ -419,6 +483,81 @@ def test_cleanup_waits_for_resolver_aware_call(monkeypatch):
     assert not run_thread.is_alive()
     assert not cleanup_thread.is_alive()
     assert teardown_entered.is_set()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        lambda runtime: runtime.run_script_and_decode("thread", b"script", b"{}"),
+        lambda runtime: runtime.run_script_with_resolver_and_decode(
+            "thread", b"script", b"{}", lambda _path: "module source"
+        ),
+        lambda runtime: runtime.run_script_callback_and_decode(
+            "thread", b"script", b"{}", object()
+        ),
+        lambda runtime: runtime.run_script_input_output_callback_and_decode(
+            "thread",
+            b"script",
+            b"{}",
+            b"payload",
+            b"application/json",
+            None,
+            object(),
+            object(),
+        ),
+    ],
+)
+def test_cleanup_waits_until_native_result_is_decoded_and_freed(monkeypatch, invoke):
+    native_returned = Event()
+    release_decode = Event()
+    freed = Event()
+    teardown_entered = Event()
+    errors = []
+    buffer = ctypes.create_string_buffer(b"result")
+    pointer = ctypes.addressof(buffer)
+    library = FakeLibrary(resolver_export=True)
+    return_pointer = lambda *_args: native_returned.set() or pointer
+    library.run_script = CallableFunction(return_pointer)
+    library.run_script_with_resolver = CallableFunction(return_pointer)
+    library.run_script_callback = CallableFunction(return_pointer)
+    library.run_script_input_output_callback = CallableFunction(return_pointer)
+    library.graal_attach_thread = CallableFunction(lambda _isolate, _thread: 0)
+    library.graal_detach_thread = CallableFunction(lambda _thread: 0)
+    library.free_cstring = CallableFunction(
+        lambda _thread, _ptr: release_decode.wait(1) and freed.set()
+    )
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda _thread: teardown_entered.set() or 0
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    runtime.has_callback_streaming = True
+    runtime.has_callback_input_output = True
+
+    def run():
+        try:
+            invoke(runtime)
+        except Exception as error:
+            errors.append(error)
+
+    run_thread = Thread(target=run)
+    cleanup_thread = Thread(target=runtime.cleanup)
+    run_thread.start()
+    assert native_returned.wait(1)
+    cleanup_thread.start()
+
+    assert not teardown_entered.wait(0.1)
+    release_decode.set()
+    assert freed.wait(1)
+    run_thread.join(1)
+    cleanup_thread.join(1)
+
+    assert not run_thread.is_alive()
+    assert not cleanup_thread.is_alive()
+    assert teardown_entered.is_set()
+    assert errors == []
 
 
 @pytest.mark.unit

@@ -89,15 +89,14 @@ class DataWeave:
             encoded_script = script.encode("utf-8")
             encoded_inputs = self._inputs_json(inputs)
             if self._resolve_module is None:
-                ptr = self._native.run_script(self._native.thread, encoded_script, encoded_inputs)
+                raw = self._native.run_script_and_decode(self._native.thread, encoded_script, encoded_inputs)
             else:
-                ptr = self._native.run_script_with_resolver(
+                raw = self._native.run_script_with_resolver_and_decode(
                     self._native.thread,
                     encoded_script,
                     encoded_inputs,
                     self._resolve_module,
                 )
-            raw = self._native.decode_and_free(ptr)
             result = parse_native_encoded_response(raw)
         except Exception as error:
             raise DataWeaveError(f"Failed to execute script: {error}")
@@ -114,8 +113,7 @@ class DataWeave:
             except Exception:
                 return -1
         try:
-            ptr = self._native.run_script_callback(self._native.thread, script.encode("utf-8"), self._inputs_json(inputs), write_cb)
-            raw = self._native.decode_and_free(ptr)
+            raw = self._native.run_script_callback_and_decode(self._native.thread, script.encode("utf-8"), self._inputs_json(inputs), write_cb)
             return parse_streaming_result(json.loads(raw) if raw else {"success": False, "error": "Empty response"})
         except Exception as error:
             raise DataWeaveError(f"Failed to execute callback streaming: {error}")
@@ -152,7 +150,7 @@ class DataWeave:
             primary_outcome = False
             try:
                 worker_thread = self._native.attach_thread()
-                raw = self._native.decode_and_free(invoke(worker_thread, write_cb), worker_thread)
+                raw = invoke(worker_thread, write_cb)
                 metadata = json.loads(raw) if raw else {"success": False, "error": "Empty response"}
                 primary_outcome = not metadata.get("success", False)
                 publish(metadata)
@@ -204,7 +202,7 @@ class DataWeave:
         self._require_initialized(self._native.has_callback_streaming, "callback streaming API (run_script_callback not found)")
         cancelled = Event()
         encoded_inputs = self._inputs_json(inputs)
-        stream = Stream(self._stream_worker(lambda thread, write_cb: self._native.run_script_callback(thread, script.encode("utf-8"), encoded_inputs, write_cb), cancelled))
+        stream = Stream(self._stream_worker(lambda thread, write_cb: self._native.run_script_callback_and_decode(thread, script.encode("utf-8"), encoded_inputs, write_cb), cancelled))
         stream._on_close = cancelled.set
         stream._cancelled = cancelled
         return stream
@@ -241,7 +239,7 @@ class DataWeave:
         read_cb = self._chunk_reader(input_stream)
         encoded_inputs = self._inputs_json(inputs)
         def invoke(thread, write_cb):
-            return self._native.run_script_input_output_callback(thread, script.encode("utf-8"), encoded_inputs, input_name.encode("utf-8"), input_mime_type.encode("utf-8"), input_charset.encode("utf-8") if input_charset else None, read_cb, write_cb)
+            return self._native.run_script_input_output_callback_and_decode(thread, script.encode("utf-8"), encoded_inputs, input_name.encode("utf-8"), input_mime_type.encode("utf-8"), input_charset.encode("utf-8") if input_charset else None, read_cb, write_cb)
         stream = Stream(self._stream_worker(invoke, cancelled))
         stream._on_close = cancelled.set
         stream._cancelled = cancelled
@@ -268,8 +266,7 @@ class DataWeave:
             except Exception:
                 return -1
         try:
-            ptr = self._native.run_script_input_output_callback(self._native.thread, script.encode("utf-8"), self._inputs_json(inputs), input_name.encode("utf-8"), input_mime_type.encode("utf-8"), input_charset.encode("utf-8") if input_charset else None, read_cb, write_cb)
-            raw = self._native.decode_and_free(ptr)
+            raw = self._native.run_script_input_output_callback_and_decode(self._native.thread, script.encode("utf-8"), self._inputs_json(inputs), input_name.encode("utf-8"), input_mime_type.encode("utf-8"), input_charset.encode("utf-8") if input_charset else None, read_cb, write_cb)
             return parse_streaming_result(json.loads(raw) if raw else {"success": False, "error": "Empty response"})
         except Exception as error:
             raise DataWeaveError(f"Failed to execute callback input/output streaming: {error}")

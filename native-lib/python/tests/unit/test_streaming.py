@@ -103,6 +103,61 @@ def test_run_input_output_callback_converts_read_exception_to_abort_result():
 
 
 @pytest.mark.unit
+def test_write_callback_reentry_is_translated_to_abort_without_deadlocking():
+    completed = Event()
+    outcomes = []
+    native = FakeNative('{"success": false, "error": "write aborted"}', emit=b"chunk")
+    runtime = configured_runtime(native)
+
+    worker = Thread(
+        target=lambda: (
+            outcomes.append(
+                runtime.run_callback(
+                    "outer",
+                    lambda _chunk: runtime.run_callback("nested", lambda _data: 0),
+                )
+            ),
+            completed.set(),
+        ),
+        daemon=True,
+    )
+    worker.start()
+
+    assert completed.wait(1), "write callback re-entry deadlocked"
+    assert native.write_status == -1
+    assert outcomes == [dataweave.StreamingResult(False, "write aborted", None, None, False)]
+
+
+@pytest.mark.unit
+def test_read_callback_reentry_is_translated_to_abort_without_deadlocking():
+    completed = Event()
+    outcomes = []
+    native = FakeNative('{"success": false, "error": "read aborted"}', consume_input=True)
+    runtime = configured_runtime(native)
+
+    worker = Thread(
+        target=lambda: (
+            outcomes.append(
+                runtime.run_input_output_callback(
+                    "outer",
+                    "payload",
+                    "application/json",
+                    lambda _size: runtime.run("nested").get_bytes(),
+                    lambda _data: 0,
+                )
+            ),
+            completed.set(),
+        ),
+        daemon=True,
+    )
+    worker.start()
+
+    assert completed.wait(1), "read callback re-entry deadlocked"
+    assert native.read_status == -1
+    assert outcomes == [dataweave.StreamingResult(False, "read aborted", None, None, False)]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "invoke",
     [
