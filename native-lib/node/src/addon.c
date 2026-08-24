@@ -2343,8 +2343,17 @@ static void cleanup_thread_fn(void* arg) {
   // Check the teardown return code (0 == success). On nonzero the isolate is
   // still live: leave *out_torn_down at 0 so the caller retains
   // g_isolate/g_initialized/g_ref_count and (per its own logic) arms the retry,
-  // rather than orphaning a live isolate (review #6 #3).
-  *out_torn_down = (fn_tear_down_isolate(local_thread) == 0) ? 1 : 0;
+  // rather than orphaning a live isolate (review #6 #3). On that failure the
+  // isolate was NOT destroyed, so this thread is still attached to it -- detach
+  // before the helper thread exits, or the live isolate keeps a phantom
+  // attached thread that can make a later retry teardown block or fail (review
+  // #7 #1). On success the isolate is gone: do NOT detach (would be a UAF).
+  if (fn_tear_down_isolate(local_thread) == 0) {
+    *out_torn_down = 1;
+  } else {
+    fn_detach_thread(local_thread);
+    *out_torn_down = 0;
+  }
 }
 
 // Spawned only when napi_cleanup finds g_active_ops > 0 on the last release
@@ -2381,8 +2390,17 @@ static void teardown_waiter_thread_fn(void* arg) {
     if (fn_attach_thread(g_isolate, &local_thread) == 0 && local_thread != NULL) {
       // Check the teardown return code (0 == success). On nonzero the isolate is
       // still live -- leave torn_down false so the post-teardown block below
-      // retains the isolate globals and arms the retry (review #6 #3).
-      torn_down = (fn_tear_down_isolate(local_thread) == 0);
+      // retains the isolate globals and arms the retry (review #6 #3). On that
+      // failure the isolate was NOT destroyed, so this thread is still attached
+      // to it -- detach before exiting or the live isolate keeps a phantom
+      // attached thread that can block/fail a later retry teardown (review #7
+      // #1). On success the isolate is gone: do NOT detach (would be a UAF).
+      if (fn_tear_down_isolate(local_thread) == 0) {
+        torn_down = true;
+      } else {
+        fn_detach_thread(local_thread);
+        torn_down = false;
+      }
     }
     // else: attach failed -- the isolate is still alive. Do NOT clear g_isolate,
     // or it becomes unreachable and can never be torn down.
