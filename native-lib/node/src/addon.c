@@ -606,6 +606,24 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   // malfunction). No-ops cheaply when nothing is stranded (flag clear -> return).
   retry_stranded_teardown_locked();
 
+  // After the retry above, a PERSISTENTLY failing teardown leaves the isolate
+  // live but unusable: g_isolate != NULL, g_initialized == 0, and
+  // g_teardown_state == TEARDOWN_NONE (no teardown thread exists). The wait loop
+  // below would treat `g_isolate != NULL && !g_initialized` as "a teardown is in
+  // flight" and block on uv_cond_wait -- but nothing remains to broadcast
+  // g_teardown_cond, so it would hang forever holding g_mutex and freeze every
+  // future initialize()/cleanup() (review #8 #1). This state is not recoverable
+  // by waiting; fail deterministically instead. g_teardown_needed stays armed so
+  // a later op-completion drain can still reclaim the isolate; we neither clear
+  // it nor touch g_ref_count (still 0 == sum(init_refs), invariant intact).
+  if (g_isolate != NULL && !g_initialized && g_teardown_state == TEARDOWN_NONE) {
+    uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL,
+                     "DataWeave native runtime is stranded: a prior isolate "
+                     "teardown failed and could not be reclaimed");
+    return NULL;
+  }
+
   // If a teardown from a prior cleanup() is still draining (the isolate is
   // being torn down on the waiter thread from Task 2), do not race a fresh
   // graal_create_isolate against it -- wait until the isolate is fully gone
