@@ -137,13 +137,17 @@ const generator = runStreaming(
   '%dw 2.0\noutput application/json\n---\n[1, 2, 3, 4, 5]'
 );
 
-for await (const chunk of generator) {
-  console.log('Chunk:', chunk.toString());
+// Iterate manually with next() to capture the terminal return value. A
+// `for await` loop consumes the generator's return value internally, so a later
+// generator.return() would yield { value: undefined } -- drive next() yourself
+// and read the metadata off the terminal { done: true, value: StreamingResult }.
+let meta;
+while (true) {
+  const { value, done } = await generator.next();
+  if (done) { meta = value; break; }
+  console.log('Chunk:', value.toString());
 }
-
-// Generator return value contains metadata:
-const meta = await generator.return();
-console.log('MIME type:', meta.value.mimeType);
+console.log('MIME type:', meta.mimeType);
 ```
 
 **Parameters:**
@@ -436,12 +440,17 @@ try {
 ```javascript
 try {
   const generator = runStreaming('invalid syntax');
-  for await (const chunk of generator) {
-    // Process chunks
+  // Drive next() manually so the terminal { done: true, value: StreamingResult }
+  // is captured; a `for await` loop would consume it and a later
+  // generator.return() would give { value: undefined }.
+  let meta;
+  while (true) {
+    const { value, done } = await generator.next();
+    if (done) { meta = value; break; }
+    // Process chunk `value`
   }
-  const meta = await generator.return();
-  if (!meta.value.success) {
-    console.error('Streaming error:', meta.value.error);
+  if (!meta.success) {
+    console.error('Streaming error:', meta.error);
   }
 } catch (err) {
   console.error('Native error:', err);
