@@ -1,4 +1,4 @@
-export type TckOutcome = "passed" | "failed" | "skipped";
+export type TckOutcome = "passed" | "failed" | "skipped" | "xfailed";
 
 export interface TckResult {
   identifier: string;
@@ -10,6 +10,7 @@ export interface TckSummary {
   passed: number;
   failed: number;
   skipped: number;
+  xfailed: number;
   accounted: number;
   unaccounted: number;
 }
@@ -21,12 +22,14 @@ export function accountTckResults(
   const passed = results.filter((result) => result.outcome === "passed").length;
   const failed = results.filter((result) => result.outcome === "failed").length;
   const skipped = results.filter((result) => result.outcome === "skipped").length;
-  const accounted = passed + failed + skipped;
+  const xfailed = results.filter((result) => result.outcome === "xfailed").length;
+  const accounted = passed + failed + skipped + xfailed;
   return {
     selected: selected.size,
     passed,
     failed,
     skipped,
+    xfailed,
     accounted,
     unaccounted: selected.size - accounted,
   };

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  ACCEPTED_BASELINE_MISMATCHES,
+  CAPABILITY_EXCLUSIONS,
   IGNORED_CASES,
+  REENABLED_CASES,
   STRUCTURAL_MODULE_CASES,
   validateIgnorePolicy,
   validateInventoryPolicy,
+  validateReconciledPolicy,
   validateStructuralModulePolicy,
 } from "../../tests/tck/ignore-list";
 
@@ -39,8 +43,45 @@ describe("TCK ignore policy", () => {
     ]);
   });
 
-  it("preserves the current 59 exclusions", () => {
-    expect(Object.keys(IGNORED_CASES)).toHaveLength(59);
+  it("reconciles exclusions into capability skips and strict xfails", () => {
+    expect(Object.keys(CAPABILITY_EXCLUSIONS)).toHaveLength(31);
+    expect(Object.keys(ACCEPTED_BASELINE_MISMATCHES)).toHaveLength(21);
+    expect(REENABLED_CASES).toHaveLength(7);
+    expect(IGNORED_CASES).toBe(CAPABILITY_EXCLUSIONS);
+    expect(validateReconciledPolicy(
+      CAPABILITY_EXCLUSIONS,
+      ACCEPTED_BASELINE_MISMATCHES,
+      REENABLED_CASES,
+    )).toEqual([]);
+  });
+
+  it("rejects overlapping or incomplete reconciled policy entries", () => {
+    expect(validateReconciledPolicy(
+      {
+        "runtime/overlap": {
+          caseIdentifier: "runtime/overlap",
+          category: "unavailable-java-module",
+          reason: "missing Java module",
+        },
+      },
+      {
+        "runtime/overlap:out.json": "known mismatch",
+        "runtime/blank:out.json": " ",
+        "runtime/xfail:out.json": "known mismatch",
+        "runtime/stale:out.json": "stale mismatch",
+      },
+      ["runtime/overlap", "runtime/reenabled", "runtime/reenabled", "runtime/xfail"],
+      new Set(["runtime/overlap:out.json", "runtime/blank:out.json", "runtime/xfail:out.json"]),
+    )).toEqual([
+      "runtime/blank:out.json: missing expected-failure reason",
+      "runtime/overlap: case is both re-enabled and expected to fail",
+      "runtime/overlap: case is both skipped and re-enabled",
+      "runtime/overlap:out.json: case is both skipped and expected to fail",
+      "runtime/reenabled: duplicate re-enabled case",
+      "runtime/reenabled: not a discovered runnable case",
+      "runtime/stale:out.json: not a discovered runnable scenario",
+      "runtime/xfail: case is both re-enabled and expected to fail",
+    ]);
   });
 
   it("rejects drift in the staged suite inventory", () => {

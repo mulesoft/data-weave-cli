@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { accountTckResults, validateTckAccounting } from "../../tests/tck/accounting";
-import { matchesTestNamePattern } from "../../tests/tck/reporter";
+import { matchesTestNamePattern, TckAccountingReporter } from "../../tests/tck/reporter";
 
 describe("TCK result accounting", () => {
   it("reports each selected outcome exactly once", () => {
@@ -18,7 +18,23 @@ describe("TCK result accounting", () => {
       passed: 1,
       failed: 1,
       skipped: 1,
+      xfailed: 0,
       accounted: 3,
+      unaccounted: 0,
+    });
+  });
+
+  it("reports expected failures separately from ordinary failures", () => {
+    expect(accountTckResults(
+      new Set(["runtime/xfail:out.json"]),
+      [{ identifier: "runtime/xfail:out.json", outcome: "xfailed" }],
+    )).toEqual({
+      selected: 1,
+      passed: 0,
+      failed: 0,
+      skipped: 0,
+      xfailed: 1,
+      accounted: 1,
       unaccounted: 0,
     });
   });
@@ -51,5 +67,20 @@ describe("TCK result accounting", () => {
     expect(matchesTestNamePattern("runtime/selected:out.json [skip: unsupported]", pattern)).toBe(true);
     expect(matchesTestNamePattern("runtime/other:out.json [skip: unsupported]", pattern)).toBe(false);
     expect(matchesTestNamePattern("runtime/other:out.json [skip: unsupported]", undefined)).toBe(true);
+  });
+
+  it("clears accumulated accounting state before a watch rerun", () => {
+    const reporter = new TckAccountingReporter();
+    const state = reporter as unknown as {
+      selected: Set<string>;
+      results: Array<{ identifier: string; outcome: "passed" }>;
+    };
+    state.selected.add("runtime/first:out.json");
+    state.results.push({ identifier: "runtime/first:out.json", outcome: "passed" });
+
+    reporter.onTestRunStart?.([]);
+
+    expect(state.selected.size).toBe(0);
+    expect(state.results).toEqual([]);
   });
 });
