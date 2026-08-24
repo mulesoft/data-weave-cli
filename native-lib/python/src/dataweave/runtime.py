@@ -17,6 +17,7 @@ from .models import (
     WriteCallback,
 )
 from .native import NativeRuntime
+from .resolver import ModuleResolver
 
 
 _OUTPUT_QUEUE_MAXSIZE = 512
@@ -27,8 +28,14 @@ _WORKER_JOIN_TIMEOUT_SECONDS = 0.1
 class DataWeave:
     """High-level execution API backed by a :class:`NativeRuntime`."""
 
-    def __init__(self, lib_path: Optional[str] = None):
+    def __init__(
+        self,
+        lib_path: Optional[str] = None,
+        *,
+        resolve_module: Optional[ModuleResolver] = None,
+    ):
         self._native = NativeRuntime(lib_path)
+        self._resolve_module = resolve_module
         self._stream_workers = set()
         self._stream_workers_lock = Lock()
         self._cleaning_up = False
@@ -79,7 +86,18 @@ class DataWeave:
     def run(self, script: str, inputs: Optional[Dict[str, Any]] = None, raise_on_error: bool = False) -> ExecutionResult:
         self._require_initialized(True, "script execution")
         try:
-            raw = self._native.decode_and_free(self._native.run_script(self._native.thread, script.encode("utf-8"), self._inputs_json(inputs)))
+            encoded_script = script.encode("utf-8")
+            encoded_inputs = self._inputs_json(inputs)
+            if self._resolve_module is None:
+                ptr = self._native.run_script(self._native.thread, encoded_script, encoded_inputs)
+            else:
+                ptr = self._native.run_script_with_resolver(
+                    self._native.thread,
+                    encoded_script,
+                    encoded_inputs,
+                    self._resolve_module,
+                )
+            raw = self._native.decode_and_free(ptr)
             result = parse_native_encoded_response(raw)
         except Exception as error:
             raise DataWeaveError(f"Failed to execute script: {error}")

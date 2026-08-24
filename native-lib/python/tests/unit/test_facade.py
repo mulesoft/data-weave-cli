@@ -1,6 +1,35 @@
+import inspect
+
 import pytest
 
 import dataweave
+from dataweave import runtime
+
+
+class FakeNativeRuntime:
+    def __init__(self):
+        self.initialized = True
+        self.thread = "thread"
+        self.calls = []
+
+    def run_script(self, *args):
+        self.calls.append(("run_script", args))
+        return "result"
+
+    def run_script_with_resolver(self, *args):
+        self.calls.append(("run_script_with_resolver", args))
+        return "result"
+
+    @staticmethod
+    def decode_and_free(_ptr):
+        return '{"success": true, "result": "SGVsbG8=", "binary": false, "mimeType": "text/plain", "charset": "utf-8"}'
+
+
+def configured_runtime(resolve_module=None):
+    instance = dataweave.DataWeave.__new__(dataweave.DataWeave)
+    instance._native = FakeNativeRuntime()
+    instance._resolve_module = resolve_module
+    return instance
 
 
 @pytest.mark.unit
@@ -35,6 +64,7 @@ def test_facade_preserves_fixed_legacy_public_exports():
 def test_facade_exports_module_resolver_factories():
     resolver_exports = [
         "ModuleResolver",
+        "RESOLVE_MODULE_CALLBACK",
         "compose_resolvers",
         "modules_from_directory",
         "modules_from_jars",
@@ -44,6 +74,62 @@ def test_facade_exports_module_resolver_factories():
     for name in resolver_exports:
         assert name in dataweave.__all__
         getattr(dataweave, name)
+
+
+@pytest.mark.unit
+def test_dataweave_constructor_stores_keyword_only_module_resolver(monkeypatch):
+    resolver = lambda _path: "source"
+    native_runtime = FakeNativeRuntime()
+    monkeypatch.setattr(runtime, "NativeRuntime", lambda _lib_path: native_runtime)
+
+    instance = dataweave.DataWeave(resolve_module=resolver)
+
+    assert instance._resolve_module is resolver
+    assert inspect.signature(dataweave.DataWeave).parameters[
+        "resolve_module"
+    ].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+@pytest.mark.unit
+def test_run_dispatches_to_resolver_aware_native_execution():
+    resolver = lambda _path: "source"
+    instance = configured_runtime(resolver)
+
+    result = instance.run("payload", {"value": 1})
+
+    assert result == dataweave.ExecutionResult(
+        True, "SGVsbG8=", None, False, "text/plain", "utf-8"
+    )
+    assert instance._native.calls == [
+        (
+            "run_script_with_resolver",
+            (
+                "thread",
+                b"payload",
+                b'{"value": {"content": "MQ==", "mimeType": "application/json", "charset": "utf-8"}}',
+                resolver,
+            ),
+        )
+    ]
+
+
+@pytest.mark.unit
+def test_run_without_resolver_preserves_native_execution_path():
+    instance = configured_runtime()
+
+    result = instance.run("payload")
+
+    assert result == dataweave.ExecutionResult(
+        True, "SGVsbG8=", None, False, "text/plain", "utf-8"
+    )
+    assert instance._native.calls == [
+        ("run_script", ("thread", b"payload", b"{}"))
+    ]
+
+
+@pytest.mark.unit
+def test_module_level_run_does_not_accept_module_resolver():
+    assert "resolve_module" not in inspect.signature(dataweave.run).parameters
 
 
 @pytest.mark.unit
