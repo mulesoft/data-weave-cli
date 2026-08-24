@@ -60,7 +60,12 @@ EXCLUDED_CASES: Dict[str, Exclusion] = {
     "runtime/module-singleton-out.json": _exclusion(
         "runtime/module-singleton-out.json",
         UNSUPPORTED_DW_MODULE_RESOLUTION,
-        "shared fixture lacks org::mule::weave::v2::libs::singleton::{libA,libB,libSource}",
+        "runtime cannot resolve org::mule::weave::v2::libs::singleton::libA; "
+        "runtime cannot resolve org::mule::weave::v2::libs::singleton::libB; "
+        "runtime cannot resolve org::mule::weave::v2::libs::singleton::libSource; "
+        "shared fixture lacks org::mule::weave::v2::libs::singleton::libA; "
+        "shared fixture lacks org::mule::weave::v2::libs::singleton::libB; "
+        "shared fixture lacks org::mule::weave::v2::libs::singleton::libSource",
     ),
     "runtime/is-empty-using-empty-stream-out.json": _exclusion(
         "runtime/is-empty-using-empty-stream-out.json",

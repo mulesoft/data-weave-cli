@@ -168,13 +168,17 @@ def clean_dataweave_runtime(request):
     dataweave.cleanup()
 
 
+def _tck_runtime():
+    fixtures_dir = Path(__file__).resolve().parents[2] / "node" / "tests" / "tck" / "fixtures"
+    return dataweave.DataWeave(
+        resolve_module=dataweave.modules_from_directory(fixtures_dir),
+    )
+
+
 @pytest.fixture(scope="session")
 def tck_runtime():
     """Own one isolate for the TCK session and release it after the lane."""
-    fixtures_dir = Path(__file__).resolve().parents[2] / "node" / "tests" / "tck" / "fixtures"
-    runtime = dataweave.DataWeave(
-        resolve_module=dataweave.modules_from_directory(fixtures_dir),
-    )
+    runtime = _tck_runtime()
     runtime.initialize()
     try:
         yield runtime

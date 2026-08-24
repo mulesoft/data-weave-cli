@@ -82,26 +82,36 @@ RECOVERED_MODULE_CASES = {
 @pytest.mark.unit
 def test_tck_runtime_uses_shared_module_fixture_resolver(monkeypatch):
     fixtures_dir = Path(__file__).resolve().parents[3] / "node" / "tests" / "tck" / "fixtures"
-    captured = {}
+    captured = {"fixture_directories": []}
+    resolver = lambda _path: "module source"
 
     class FakeRuntime:
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-        def initialize(self):
-            pass
-
-        def cleanup(self):
-            pass
-
     monkeypatch.setattr(conftest.dataweave, "DataWeave", FakeRuntime)
+    monkeypatch.setattr(
+        conftest.dataweave,
+        "modules_from_directory",
+        lambda directory: captured["fixture_directories"].append(directory) or resolver,
+    )
 
-    runtime_fixture = conftest.tck_runtime.__wrapped__()
-    next(runtime_fixture)
-    runtime_fixture.close()
+    runtime = conftest._tck_runtime()
 
     assert (fixtures_dir / "org" / "mule" / "weave" / "v2" / "libs" / "lib.dwl").is_file()
-    assert captured["resolve_module"] is not None
+    assert captured["fixture_directories"] == [fixtures_dir]
+    assert captured["resolve_module"] is resolver
+    assert isinstance(runtime, FakeRuntime)
+
+
+@pytest.mark.unit
+def test_module_singleton_exclusion_preserves_direct_runtime_evidence():
+    reason = EXCLUDED_CASES["runtime/module-singleton-out.json"].reason
+
+    for module in ("libA", "libB", "libSource"):
+        path = f"org::mule::weave::v2::libs::singleton::{module}"
+        assert f"runtime cannot resolve {path}" in reason
+        assert f"shared fixture lacks {path}" in reason
 
 
 def tck_params():
