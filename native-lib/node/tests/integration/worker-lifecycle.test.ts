@@ -289,13 +289,22 @@ describe("worker_threads engine lifecycle (round 12 #9)", () => {
       // failure keeps propagating). When the body SUCCEEDED, a cleanup failure
       // is itself a real lifecycle regression and must fail the test rather than
       // be silently discarded (review #7 #7).
+      let destroyErr: unknown;
       try {
         if (hMain !== null) ffi.destroyEngine(hMain);
+      } catch (e) {
+        // Capture but do not early-exit: the global init reference must still be
+        // released below, or it contaminates sibling integration tests (review #8
+        // #3), matching the production cleanup path that releases even when
+        // destroyEngine() throws.
+        destroyErr = e;
+      } finally {
         await ffi.cleanup();
-      } catch (cleanupErr) {
-        if (bodySucceeded) throw cleanupErr;
-        // else: the body is already throwing -- let that original error propagate.
       }
+      // Surface a balancing-cleanup failure only when the body succeeded (an
+      // already-throwing body keeps its more actionable original error) -- same
+      // policy as review #7 #7, now covering the destroyEngine() throw too.
+      if (destroyErr !== undefined && bodySucceeded) throw destroyErr;
     }
   }, 20000);
 });
