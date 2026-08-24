@@ -85,7 +85,13 @@ def modules_from_jars(
                     if entry.is_dir() or not entry.filename.endswith(".dwl"):
                         continue
                     modules[entry.filename] = jar.read(entry).decode("utf-8")
-        except (OSError, BadZipFile, UnicodeDecodeError) as error:
+        except (
+            OSError,
+            BadZipFile,
+            UnicodeDecodeError,
+            RuntimeError,
+            NotImplementedError,
+        ) as error:
             raise ValueError(
                 f"Failed to load DataWeave modules from JAR {jar_path!s}: {error}"
             ) from error

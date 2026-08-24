@@ -1,3 +1,5 @@
+import io
+from threading import Event, Thread
 from zipfile import ZipFile
 
 import pytest
@@ -10,6 +12,15 @@ import org::test::lib
 output application/json
 ---
 lib::answer()
+"""
+
+
+def _import_script(module_name):
+    return f"""%dw 2.0
+import org::test::{module_name}
+output application/json
+---
+{module_name}::answer()
 """
 
 
@@ -169,3 +180,100 @@ sizeOf(fromBase64("aGk="))
     assert metadata.success is True
     assert output.decode(metadata.charset or "utf-8") == "2"
     assert calls == []
+
+
+@pytest.mark.integration
+def test_resolver_is_inactive_for_resolver_less_apis_after_synchronous_install(
+    collect_stream,
+):
+    calls = []
+
+    def resolver(module_path):
+        calls.append(module_path)
+        return "%dw 2.0\nfun answer() = 42"
+
+    with dataweave.DataWeave(resolve_module=resolver) as dw:
+        installed = dw.run(IMPORT_LIB_SCRIPT)
+        calls_after_install = list(calls)
+
+        _output, streaming = collect_stream(dw.run_streaming(_import_script("streaming")))
+        _output, transform = collect_stream(
+            dw.run_transform(
+                _import_script("transform"),
+                [b"null"],
+                input_mime_type="application/json",
+            )
+        )
+
+        callback_chunks = []
+        callback = dw.run_callback(
+            _import_script("callback"),
+            lambda chunk: callback_chunks.append(chunk) or 0,
+        )
+
+        source = io.BytesIO(b"null")
+        input_output_chunks = []
+        input_output = dw.run_input_output_callback(
+            _import_script("inputOutput"),
+            input_name="payload",
+            input_mime_type="application/json",
+            read_callback=source.read,
+            write_callback=lambda chunk: input_output_chunks.append(chunk) or 0,
+        )
+
+    assert installed.success is True
+    assert calls_after_install
+    assert streaming.success is False
+    assert transform.success is False
+    assert callback.success is False
+    assert input_output.success is False
+    assert callback_chunks == []
+    assert input_output_chunks == []
+    assert calls == calls_after_install
+
+
+@pytest.mark.integration
+def test_overlapping_resolver_aware_runs_are_serialized():
+    first_resolver_call = Event()
+    release_first = Event()
+    second_resolver_call = Event()
+    results = []
+    errors = []
+    calls = 0
+
+    def resolver(_module_path):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_resolver_call.set()
+            if not release_first.wait(2):
+                raise RuntimeError("first resolver call was not released")
+        else:
+            second_resolver_call.set()
+        return "%dw 2.0\nfun answer() = 42"
+
+    with dataweave.DataWeave(resolve_module=resolver) as dw:
+        def run():
+            try:
+                results.append(dw.run(IMPORT_LIB_SCRIPT))
+            except Exception as error:
+                errors.append(error)
+
+        first = Thread(target=run)
+        second = Thread(target=run)
+        first.start()
+        assert first_resolver_call.wait(2)
+        second.start()
+
+        assert not second_resolver_call.wait(0.1)
+        release_first.set()
+        first.join(2)
+        second.join(2)
+
+        assert not first.is_alive()
+        assert not second.is_alive()
+
+    assert errors == []
+    assert len(results) == 2
+    assert all(result.success for result in results)
+    assert second_resolver_call.is_set()

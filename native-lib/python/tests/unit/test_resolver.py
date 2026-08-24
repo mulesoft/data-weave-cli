@@ -2,6 +2,7 @@ from zipfile import ZipFile
 
 import pytest
 
+import dataweave.resolver as resolver_module
 from dataweave import (
     compose_resolvers,
     modules_from_directory,
@@ -153,3 +154,43 @@ def test_modules_from_jars_names_malformed_archive(tmp_path):
 
     with pytest.raises(Exception, match="malformed[.]jar"):
         modules_from_jars([malformed])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("error", [RuntimeError("read failed"), NotImplementedError("unsupported")])
+def test_modules_from_jars_names_archive_when_entry_read_fails(
+    monkeypatch, tmp_path, error
+):
+    archive = tmp_path / "modules.jar"
+
+    class Entry:
+        filename = "org/test/lib.dwl"
+
+        @staticmethod
+        def is_dir():
+            return False
+
+    class FailingZipFile:
+        def __init__(self, path):
+            assert path == archive
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def infolist():
+            return [Entry()]
+
+        @staticmethod
+        def read(_entry):
+            raise error
+
+    monkeypatch.setattr(resolver_module, "ZipFile", FailingZipFile)
+
+    with pytest.raises(ValueError, match="modules[.]jar") as raised:
+        modules_from_jars([archive])
+
+    assert raised.value.__cause__ is error

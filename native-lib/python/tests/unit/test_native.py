@@ -1,5 +1,6 @@
 from pathlib import Path
 import ctypes
+from threading import Event, Thread
 
 import pytest
 
@@ -327,6 +328,97 @@ def test_run_script_with_resolver_clears_buffers_when_native_call_fails(monkeypa
         )
 
     assert runtime._resolver_buffers == []
+
+
+@pytest.mark.unit
+def test_run_script_with_resolver_serializes_calls_and_buffer_cleanup(monkeypatch):
+    first_entered = Event()
+    release_first = Event()
+    second_entered = Event()
+    errors = []
+    library = FakeLibrary(resolver_export=True)
+
+    def invoke(_thread, script, _inputs, callback):
+        address = callback(None, b"/org/test/lib.dwl")
+        if script == b"first":
+            first_entered.set()
+            if not release_first.wait(1):
+                raise AssertionError("first invocation was not released")
+            assert ctypes.string_at(address) == b"module source"
+            assert len(library.runtime._resolver_buffers) == 1
+        else:
+            second_entered.set()
+        return 0
+
+    library.run_script_with_resolver = CallableFunction(invoke)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    library.runtime = runtime
+    runtime.initialize()
+    resolver = lambda _path: "module source"
+
+    def run(script):
+        try:
+            runtime.run_script_with_resolver("thread", script, b"{}", resolver)
+        except Exception as error:
+            errors.append(error)
+
+    first = Thread(target=run, args=(b"first",))
+    second = Thread(target=run, args=(b"second",))
+    first.start()
+    assert first_entered.wait(1)
+    second.start()
+
+    assert not second_entered.wait(0.1)
+    release_first.set()
+    first.join(1)
+    second.join(1)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert second_entered.is_set()
+    assert errors == []
+    assert runtime._resolver_buffers == []
+
+
+@pytest.mark.unit
+def test_cleanup_waits_for_resolver_aware_call(monkeypatch):
+    run_entered = Event()
+    release_run = Event()
+    teardown_entered = Event()
+    library = FakeLibrary(resolver_export=True)
+
+    def invoke(_thread, _script, _inputs, callback):
+        assert callback(None, b"/org/test/lib.dwl")
+        run_entered.set()
+        assert release_run.wait(1)
+        return 0
+
+    library.run_script_with_resolver = CallableFunction(invoke)
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda _thread: teardown_entered.set() or 0
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    run_thread = Thread(
+        target=runtime.run_script_with_resolver,
+        args=("thread", b"script", b"{}", lambda _path: "module source"),
+    )
+    cleanup_thread = Thread(target=runtime.cleanup)
+    run_thread.start()
+    assert run_entered.wait(1)
+    cleanup_thread.start()
+
+    assert not teardown_entered.wait(0.1)
+    release_run.set()
+    run_thread.join(1)
+    cleanup_thread.join(1)
+
+    assert not run_thread.is_alive()
+    assert not cleanup_thread.is_alive()
+    assert teardown_entered.is_set()
 
 
 @pytest.mark.unit
