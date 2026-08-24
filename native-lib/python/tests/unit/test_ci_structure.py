@@ -18,6 +18,24 @@ def named_step_if(document: str, name: str) -> str:
     return guard.group("guard")
 
 
+def assert_resolver_restrictions(document: str) -> None:
+    normalized = " ".join(document.split())
+    assert (
+        "The `ModuleResolver` contract is a synchronous callable from a module "
+        "key to the module source string or `None`."
+    ) in normalized
+    assert (
+        "Custom resolver configuration is available only on an explicit "
+        "`DataWeave` instance; the module-level `dataweave.run()` singleton "
+        "does not accept `resolve_module`."
+    ) in normalized
+    assert (
+        "`run_streaming()`, `run_transform()`, and the low-level callback "
+        "streaming API do not use custom resolvers and can import only built-in "
+        "modules."
+    ) in normalized
+
+
 @pytest.mark.unit
 def test_python_artifact_runs_python_test_before_building_wheel():
     action = (Path(__file__).resolve().parents[4] / ".github/actions/python/action.yml").read_text()
@@ -70,9 +88,37 @@ def test_python_readme_documents_module_resolver_contract():
     ):
         assert f"`{public_name}`" in readme
 
-    assert "synchronous" in readme
-    assert "explicit `DataWeave` instance" in readme
-    assert "built-in modules" in readme
+    assert_resolver_restrictions(readme)
+    normalized = " ".join(readme.split())
+    assert "without a leading slash or separator" in normalized
+    assert "Each initialized explicit Python `DataWeave` instance owns a dedicated Graal isolate." in normalized
+    assert "retains the resolver callback until successful isolate teardown" in normalized
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "contract,negated",
+    (
+        (
+            "The `ModuleResolver` contract is a synchronous callable",
+            "The `ModuleResolver` contract is an asynchronous callable",
+        ),
+        (
+            "singleton does not accept `resolve_module`",
+            "singleton does accept `resolve_module`",
+        ),
+        (
+            "streaming API do not use custom resolvers and can import only built-in modules",
+            "streaming API do use custom resolvers and can import external modules",
+        ),
+    ),
+)
+def test_python_readme_resolver_restrictions_reject_negation(contract, negated):
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    mutated = " ".join(readme.split()).replace(contract, negated)
+
+    with pytest.raises(AssertionError):
+        assert_resolver_restrictions(mutated)
 
 
 @pytest.mark.unit

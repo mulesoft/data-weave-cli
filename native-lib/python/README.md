@@ -128,7 +128,7 @@ with dataweave.DataWeave() as dw:
 Custom module resolution is available to synchronous `DataWeave.run()` calls on
 an explicit `DataWeave` instance. Resolver keys use `/` separators and include
 the `.dwl` suffix; for example, the DataWeave import `org::company::lib` requests
-the separator-less module key `org/company/lib.dwl`.
+the module key `org/company/lib.dwl` without a leading slash or separator.
 
 ```python
 from dataweave import DataWeave, modules_from_map
@@ -150,11 +150,11 @@ assert result.get_string() == '"Hello World"'
 ```
 
 The `ModuleResolver` contract is a synchronous callable from a module key to
-the module source string or `None`. Resolver configuration is explicit-instance
-only: the module-level `dataweave.run()` singleton does not accept
-`resolve_module`. `run_streaming()`, `run_transform()`, and the low-level
-callback streaming API also do not use custom resolvers and can import only
-built-in modules.
+the module source string or `None`. Custom resolver configuration is available
+only on an explicit `DataWeave` instance; the module-level `dataweave.run()`
+singleton does not accept `resolve_module`. `run_streaming()`,
+`run_transform()`, and the low-level callback streaming API do not use custom
+resolvers and can import only built-in modules.
 
 Use `modules_from_directory()` for a source tree:
 
@@ -204,10 +204,10 @@ source, credentials, and local paths are not exposed. Set
 `DATAWEAVE_RESOLVER_DEBUG=1` only in a trusted debugging environment to include
 the exception type, message, and traceback.
 
-Each explicit Python `DataWeave` instance owns a dedicated Graal isolate. Its
-first resolver-backed run installs that instance's resolver; later runs reuse
-it. The instance retains the resolver callback for the isolate's lifetime and
-tears down the isolate before releasing callback references during `cleanup()`.
+Each initialized explicit Python `DataWeave` instance owns a dedicated Graal
+isolate. Its first resolver-backed run installs that instance's resolver; later
+runs reuse it. The instance retains the resolver callback until successful
+isolate teardown, then releases callback references during `cleanup()`.
 Different live instances can therefore use different resolvers.
 
 ### Error Handling
