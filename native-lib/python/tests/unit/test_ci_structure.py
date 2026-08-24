@@ -90,7 +90,8 @@ def test_python_readme_documents_module_resolver_contract():
 
     assert_resolver_restrictions(readme)
     normalized = " ".join(readme.split())
-    assert "without a leading slash or separator" in normalized
+    assert "without a leading path separator" in normalized
+    assert "without a leading slash or separator" not in normalized
     assert "Each initialized explicit Python `DataWeave` instance owns a dedicated Graal isolate." in normalized
     assert "retains the resolver callback until successful isolate teardown" in normalized
 

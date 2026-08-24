@@ -128,7 +128,7 @@ with dataweave.DataWeave() as dw:
 Custom module resolution is available to synchronous `DataWeave.run()` calls on
 an explicit `DataWeave` instance. Resolver keys use `/` separators and include
 the `.dwl` suffix; for example, the DataWeave import `org::company::lib` requests
-the module key `org/company/lib.dwl` without a leading slash or separator.
+the module key `org/company/lib.dwl` without a leading path separator.
 
 ```python
 from dataweave import DataWeave, modules_from_map
