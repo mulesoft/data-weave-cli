@@ -721,11 +721,17 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
       // adoption branch) and block on uv_cond_wait forever -- nothing left to
       // broadcast (review #7 #2). Arm the stranded-teardown retry so the
       // retry_stranded_teardown_locked() at the top of the next napi_initialize
-      // reclaims the isolate (teardown succeeds -> fresh build; repeated failure
-      // -> the live isolate is adopted by the fast path). g_ref_count is still 0
-      // here, so g_teardown_needed (a retry SIGNAL, not a reference) keeps the
-      // invariant g_ref_count == sum(init_refs) intact. Mirrors the twin arm in
-      // teardown_waiter_thread_fn and isolate_ref_release_n_locked.
+      // reclaims the isolate (teardown succeeds -> fresh build). This path leaves
+      // g_initialized == 0, so -- unlike the release-path twin in
+      // isolate_ref_release_n_locked, which leaves g_initialized == 1 and is
+      // adopted by the g_initialized-gated fast path -- recovery here relies on
+      // the retry actually tearing down: it recovers the realistic TRANSIENT
+      // failure, but a truly PERSISTENT graal_tear_down_isolate failure would
+      // re-arm and retry each time and ultimately leave the isolate stranded
+      // until process exit (best-effort degradation, not a wedge of new work).
+      // g_ref_count is still 0 here, so g_teardown_needed (a retry SIGNAL, not a
+      // reference) keeps the invariant g_ref_count == sum(init_refs) intact.
+      // Mirrors the twin arm in teardown_waiter_thread_fn.
       g_teardown_needed = true;
     }
     uv_mutex_unlock(&g_mutex);
