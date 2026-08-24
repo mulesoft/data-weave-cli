@@ -214,6 +214,7 @@ describe("worker_threads engine lifecycle (round 12 #9)", () => {
     const N = 3;
 
     let hMain: number | null = null;
+    let bodySucceeded = false;
     try {
       // 1. Main thread: initialize and keep a live engine.
       ffi.initialize(LIB_PATH);
@@ -279,15 +280,22 @@ describe("worker_threads engine lifecycle (round 12 #9)", () => {
       expect(() =>
         ffi.runScriptEngine(Number.MAX_SAFE_INTEGER, "%dw 2.0\noutput application/json\n---\n1", buildInputsJson({}))
       ).toThrow(/not initialized/i);
+      bodySucceeded = true;
     } finally {
       // Balance global native state even if a Worker/assertion above threw, so
       // this test cannot strand a live isolate + held reference for sibling
-      // integration tests (review #6 #7). Best-effort: do not let a cleanup
-      // error mask the original failure.
+      // integration tests (review #6 #7). Suppress a balancing-cleanup error
+      // ONLY when the body already failed (so the original, more actionable
+      // failure keeps propagating). When the body SUCCEEDED, a cleanup failure
+      // is itself a real lifecycle regression and must fail the test rather than
+      // be silently discarded (review #7 #7).
       try {
         if (hMain !== null) ffi.destroyEngine(hMain);
         await ffi.cleanup();
-      } catch { /* original failure (if any) propagates from the try */ }
+      } catch (cleanupErr) {
+        if (bodySucceeded) throw cleanupErr;
+        // else: the body is already throwing -- let that original error propagate.
+      }
     }
   }, 20000);
 });
