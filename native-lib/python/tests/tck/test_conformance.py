@@ -10,6 +10,7 @@ from typing import Dict, Union
 import pytest
 
 import dataweave
+import conftest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -68,6 +69,39 @@ ACCEPTED_BASELINE_MISMATCHES = {
 }
 
 DEFERRED_WRITER_CASE = "core-modules/deferred-write-should-terminate-out.json:out.json"
+RECOVERED_MODULE_CASES = {
+    "runtime/full-qualified-name-ref-out.json",
+    "runtime/import-component-alias-lib-out.json",
+    "runtime/import-lib-out.json",
+    "runtime/import-lib-with-alias-out.json",
+    "runtime/import-named-lib-out.json",
+    "runtime/import-star-out.json",
+}
+
+
+@pytest.mark.unit
+def test_tck_runtime_uses_shared_module_fixture_resolver(monkeypatch):
+    fixtures_dir = Path(__file__).resolve().parents[3] / "node" / "tests" / "tck" / "fixtures"
+    captured = {}
+
+    class FakeRuntime:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def initialize(self):
+            pass
+
+        def cleanup(self):
+            pass
+
+    monkeypatch.setattr(conftest.dataweave, "DataWeave", FakeRuntime)
+
+    runtime_fixture = conftest.tck_runtime.__wrapped__()
+    next(runtime_fixture)
+    runtime_fixture.close()
+
+    assert (fixtures_dir / "org" / "mule" / "weave" / "v2" / "libs" / "lib.dwl").is_file()
+    assert captured["resolve_module"] is not None
 
 
 def tck_params():
@@ -448,16 +482,16 @@ def test_exclusion_registry_requires_case_identity_supported_category_and_reason
     ]
 
 
+@pytest.mark.unit
 def test_only_declared_case_identifiers_are_excluded():
     """Catches broad exclusion matching that can skip unrelated failures."""
     assert validate_exclusions(EXCLUDED_CASES, SCENARIOS) == []
     assert exclusion_for("unknown-case") is None
-    exclusion = exclusion_for("runtime/import-lib-out.json")
-    assert exclusion.case_identifier == "runtime/import-lib-out.json"
-    assert exclusion.category == "unsupported-dw-module-resolution"
-    assert len(EXCLUDED_CASES) == 37
+    assert RECOVERED_MODULE_CASES.isdisjoint(EXCLUDED_CASES)
+    assert len(EXCLUDED_CASES) == 31
 
 
+@pytest.mark.unit
 def test_exclusion_registry_uses_the_inventory_categories():
     """Catches category collapse that would conceal the unsupported boundary."""
     categories = {}
@@ -467,7 +501,7 @@ def test_exclusion_registry_uses_the_inventory_categories():
     assert categories == {
         "unavailable-classpath-test-resource": 2,
         "unavailable-java-module": 11,
-        "unsupported-dw-module-resolution": 24,
+        "unsupported-dw-module-resolution": 18,
     }
 
 
