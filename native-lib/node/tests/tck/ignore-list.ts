@@ -184,7 +184,6 @@ export const ACCEPTED_BASELINE_MISMATCHES: ExpectedFailurePolicy = {
 };
 
 export const REENABLED_CASES = [
-  "runtime/big_intersection-out.json",
   "runtime/dates_atBeginningOfDay-out.json",
   "runtime/dates_atBeginningOfMonth-out.json",
   "runtime/dates_atBeginningOfWeek-out.json",
