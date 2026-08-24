@@ -93,17 +93,34 @@ export class DataWeave {
         ? ffi.createEngineWithResolver(this.resolveModule)
         : ffi.createEngine();
     } catch (e: unknown) {
-      // If ffi.initialize() already succeeded but engine creation then threw,
-      // we already hold an increment of the native library's ref-counted
-      // handle. this.state stays "uninitialized" below (we're about to throw),
-      // so cleanup()'s early-return guard (`if (this.state !== "ready") return;`)
-      // means nothing else will ever call ffi.cleanup() for this instance --
-      // release the ref-count ourselves here or it leaks for the process
-      // lifetime.
-      if (libRefAcquired) {
-        ffi.cleanup();
-      }
+      // If ffi.initialize() already succeeded but engine creation then threw, we
+      // already hold an increment of the native library's ref-counted handle and
+      // must release it (ffi.cleanup()), or it leaks for the process lifetime.
+      // ffi.cleanup() is async, so model the rollback as PENDING state instead of
+      // firing-and-forgetting it (review #7 #3): (1) an un-awaited rejection must
+      // not become an unhandledRejection, and (2) a concurrent initialize()/run()
+      // must not race a fresh graal_create_isolate against the in-flight release.
+      // Reuse the same cleanupPromise/"cleaning-up" machinery cleanup() uses:
+      // hold state "cleaning-up" until the release settles (so initialize()'s own
+      // "cleaning-up" guard rejects a concurrent retry deterministically, and a
+      // concurrent cleanup() coalesces onto this same promise), then return to
+      // "uninitialized". The synchronous throw to THIS caller is preserved.
       this.engineHandle = null;
+      if (libRefAcquired) {
+        this.state = "cleaning-up";
+        // Promise.resolve() normalizes the release: ffi.cleanup() returns
+        // Promise<void>, but wrapping keeps the .finally() chain robust and lets
+        // a rejected release settle through the same path.
+        this.cleanupPromise = Promise.resolve(ffi.cleanup()).finally(() => {
+          this.state = "uninitialized";
+          this.cleanupPromise = null;
+        });
+        // Never let an un-awaited rollback surface as an unhandledRejection. A
+        // caller that awaits cleanup() (which coalesces onto cleanupPromise)
+        // still observes the rejection; this handler only covers the un-awaited
+        // path.
+        this.cleanupPromise.catch(() => {});
+      }
       throw new DataWeaveError(`Failed to initialize: ${e instanceof Error ? e.message : e}`);
     }
     this.state = "ready";

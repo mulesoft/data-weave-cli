@@ -60,7 +60,7 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     expect(ffi.cleanup).not.toHaveBeenCalled();
   });
 
-  it("leaves engineHandle unset and the instance cleanly re-initializable after a failed attempt", () => {
+  it("leaves engineHandle unset and the instance cleanly re-initializable after the failed attempt's rollback settles", async () => {
     vi.mocked(ffi.initialize).mockImplementation(() => {});
     vi.mocked(ffi.createEngine)
       .mockImplementationOnce(() => {
@@ -73,6 +73,11 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     expect(() => dw.initialize()).toThrow(DataWeaveError);
     expect(ffi.cleanup).toHaveBeenCalledTimes(1);
 
+    // The rollback release is modeled as pending state (review #7 #3): until it
+    // settles the instance is "cleaning-up" and re-init is deliberately rejected
+    // rather than racing the in-flight release. Let the rollback settle first.
+    await new Promise<void>((r) => setImmediate(r));
+
     // A later initialize() call (e.g. once the transient failure clears)
     // must succeed cleanly -- the failed attempt must not have left the
     // instance permanently "half-initialized" (this.initialized stuck true
@@ -81,7 +86,7 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     dw.initialize();
     expect(ffi.createEngine).toHaveBeenCalledTimes(2);
 
-    dw.cleanup();
+    await dw.cleanup();
     expect(ffi.destroyEngine).toHaveBeenCalledWith(42);
     expect(ffi.cleanup).toHaveBeenCalledTimes(1);
   });
@@ -285,5 +290,57 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     );
     const result = dwMod.run("%dw 2.0\noutput application/json\n---\n1");
     expect(result.success).toBe(true);
+  });
+
+  it("gates re-initialization on the in-flight rollback when engine creation fails", async () => {
+    // Engine creation fails after ffi.initialize() succeeded. The rollback
+    // ffi.cleanup() is async; until it settles the instance must be in the
+    // "cleaning-up" state so a concurrent initialize() is rejected deterministically
+    // rather than racing a fresh isolate against the in-flight release (review #7 #3).
+    vi.mocked(ffi.initialize).mockImplementation(() => {});
+    vi.mocked(ffi.createEngine).mockImplementation(() => {
+      throw new Error("native engine creation boom");
+    });
+    let resolveRollback!: () => void;
+    vi.mocked(ffi.cleanup).mockReturnValue(
+      new Promise<void>((resolve) => { resolveRollback = resolve; })
+    );
+
+    const dw = new DataWeave("/fake/lib");
+    expect(() => dw.initialize()).toThrow(DataWeaveError);
+
+    // Rollback is still in flight: a concurrent initialize() must be rejected,
+    // not allowed to race a fresh isolate against the pending native release.
+    expect(() => dw.initialize()).toThrow(/cleanup is in progress/i);
+
+    // Once the rollback settles, the instance is cleanly re-initializable.
+    resolveRollback();
+    await new Promise<void>((r) => setImmediate(r)); // let the .finally run
+    vi.mocked(ffi.createEngine).mockReturnValue(5);
+    dw.initialize();
+    dw.cleanup();
+    expect(ffi.destroyEngine).toHaveBeenCalledWith(5);
+  });
+
+  it("does not emit an unhandled rejection when the rollback ffi.cleanup() rejects", async () => {
+    // The rollback release can itself reject; initialize() must observe it (via
+    // the stored cleanupPromise) so it never becomes an unhandledRejection, while
+    // still surfacing the ORIGINAL engine-creation error synchronously (review #7 #3).
+    vi.mocked(ffi.initialize).mockImplementation(() => {});
+    vi.mocked(ffi.createEngine).mockImplementation(() => {
+      throw new Error("native engine creation boom");
+    });
+    vi.mocked(ffi.cleanup).mockRejectedValueOnce(new Error("rollback release boom"));
+
+    const dw = new DataWeave("/fake/lib");
+    expect(() => dw.initialize()).toThrow(/native engine creation boom/);
+
+    // Give the rejected rollback promise a tick to settle; the .catch() attached
+    // in initialize() must have consumed it (no unhandledRejection), and the
+    // instance must be re-initializable afterward.
+    await new Promise<void>((r) => setImmediate(r));
+    vi.mocked(ffi.createEngine).mockReturnValue(6);
+    dw.initialize();
+    expect(ffi.createEngine).toHaveBeenLastCalledWith();
   });
 });
