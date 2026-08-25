@@ -408,8 +408,11 @@ output application/json
 payload filter $.amount > 1000
 `;
 
-// A synchronous generator is consumed on demand, so input memory stays bounded.
-// An async stream (createReadStream) would be pre-buffered in full first.
+// A synchronous generator is consumed on demand: the transform does not make a
+// second full copy of the input. Note readFileSync still holds the whole file in
+// memory, so this bounds the transform's *added* memory, not total memory -- the
+// native read callback is synchronous, so there is no fully-streaming-from-disk
+// path (an async createReadStream would instead be pre-buffered in full first).
 function* chunked(buf, size = 65536) {
   for (let i = 0; i < buf.length; i += size) yield buf.subarray(i, i + size);
 }
