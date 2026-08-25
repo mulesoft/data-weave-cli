@@ -50,6 +50,20 @@ describe("malformed raw-ffi inputs throw (round 7 #2)", () => {
     ffi.destroyEngine(handle);
   });
 
+  it("runScriptStreamingEngine throws on non-string inputsJson", () => {
+    ffi.initialize(findLibrary());
+    const handle = ffi.createEngine();
+    expect(() =>
+      ffi.runScriptStreamingEngine(
+        handle,
+        "%dw 2.0\noutput application/json\n---\n[1,2,3]",
+        {} as unknown as string,
+        () => {}
+      )
+    ).toThrow();
+    ffi.destroyEngine(handle);
+  });
+
   it("runScriptTransformEngine throws on non-string script", () => {
     ffi.initialize(findLibrary());
     const handle = ffi.createEngine();
@@ -61,6 +75,32 @@ describe("malformed raw-ffi inputs throw (round 7 #2)", () => {
         "payload",
         "application/json",
         null,
+        () => null,
+        () => {}
+      )
+    ).toThrow();
+    ffi.destroyEngine(handle);
+  });
+
+  // The transform entrypoint converts four string args (script already covered
+  // above): inputsJson, inputName, inputMimeType, and a non-null inputCharset.
+  // A dropped napi_get_value_string check on any of them must throw (review #9 #6).
+  it.each([
+    { name: "inputsJson", script: "%dw 2.0\noutput application/json\n---\npayload", inputsJson: {} as unknown as string, inputName: "payload", mimeType: "application/json", charset: null as string | null },
+    { name: "inputName", script: "%dw 2.0\noutput application/json\n---\npayload", inputsJson: "{}", inputName: {} as unknown as string, mimeType: "application/json", charset: null as string | null },
+    { name: "inputMimeType", script: "%dw 2.0\noutput application/json\n---\npayload", inputsJson: "{}", inputName: "payload", mimeType: {} as unknown as string, charset: null as string | null },
+    { name: "non-null inputCharset", script: "%dw 2.0\noutput application/json\n---\npayload", inputsJson: "{}", inputName: "payload", mimeType: "application/json", charset: {} as unknown as string },
+  ])("runScriptTransformEngine throws on non-string $name", ({ script, inputsJson, inputName, mimeType, charset }) => {
+    ffi.initialize(findLibrary());
+    const handle = ffi.createEngine();
+    expect(() =>
+      ffi.runScriptTransformEngine(
+        handle,
+        script,
+        inputsJson,
+        inputName,
+        mimeType,
+        charset,
         () => null,
         () => {}
       )

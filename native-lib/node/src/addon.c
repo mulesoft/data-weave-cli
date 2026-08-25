@@ -1674,8 +1674,16 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
     w->input_charset = malloc(len + 1);
     if (w->input_charset == NULL) TRANSFORM_FAIL("OOM");
     if (napi_get_value_string_utf8(env, argv[5], w->input_charset, len + 1, NULL) != napi_ok) TRANSFORM_FAIL("runScriptTransformEngine: failed to read inputCharset");
-  } else {
+  } else if (type == napi_null || type == napi_undefined) {
+    // inputCharset is nullable: null/undefined mean "no charset". This is the
+    // only non-string form the JS binding ever sends (dataweave.ts normalizes
+    // opts?.charset ?? null).
     w->input_charset = NULL;
+  } else {
+    // Any other type (object, number, boolean, ...) is a caller error, not
+    // "no charset". Fail closed like the four non-nullable string args above
+    // rather than silently coercing to NULL (review #9 #6).
+    TRANSFORM_FAIL("runScriptTransformEngine: inputCharset must be a string, null, or undefined");
   }
   #undef TRANSFORM_FAIL
 
