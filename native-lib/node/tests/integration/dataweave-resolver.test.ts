@@ -236,32 +236,42 @@ describe('DataWeave with resolver', () => {
     // Start the native call without awaiting it, then immediately race
     // cleanup() against it.
     const firstNext = gen.next();
-    dw.cleanup();
+    // Retain the cleanup promise so its rejection cannot escape as an unhandled
+    // rejection and so native teardown is actually awaited before the test ends
+    // (review #9 #3). It is awaited in the finally below.
+    const cleanupPromise = dw.cleanup();
 
-    // The outcome (a settled chunk, the terminal metadata, or a rejection)
-    // doesn't matter -- what matters is that it settles instead of crashing
-    // the process or hanging, and that no unhandled rejection escapes this
-    // test. We explicitly catch here (rather than asserting a specific
-    // resolution) and prove settlement, one way or the other.
-    let settled = false;
     try {
-      await firstNext;
-      settled = true;
-    } catch (err) {
-      settled = true;
-      expect(err).toBeDefined();
-    }
-    expect(settled).toBe(true);
-
-    // Drain whatever remains so no background callback fires after this test
-    // (and this file's process) moves on.
-    try {
-      let result = await gen.next();
-      while (!result.done) {
-        result = await gen.next();
+      // The outcome (a settled chunk, the terminal metadata, or a rejection)
+      // doesn't matter -- what matters is that it settles instead of crashing
+      // the process or hanging, and that no unhandled rejection escapes this
+      // test. We explicitly catch here (rather than asserting a specific
+      // resolution) and prove settlement, one way or the other.
+      let settled = false;
+      try {
+        await firstNext;
+        settled = true;
+      } catch (err) {
+        settled = true;
+        expect(err).toBeDefined();
       }
-    } catch {
-      // Draining after a mid-stream cleanup may itself reject; that's fine.
+      expect(settled).toBe(true);
+
+      // Drain whatever remains so no background callback fires after this test
+      // (and this file's process) moves on.
+      try {
+        let result = await gen.next();
+        while (!result.done) {
+          result = await gen.next();
+        }
+      } catch {
+        // Draining after a mid-stream cleanup may itself reject; that's fine.
+      }
+    } finally {
+      // Always await the retained cleanup so native teardown finishes before the
+      // test returns; a cleanup rejection here surfaces rather than dangling, but
+      // it does not mask a primary assertion failure thrown from the try above.
+      await cleanupPromise;
     }
   });
 
