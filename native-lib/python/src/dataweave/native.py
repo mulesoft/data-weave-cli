@@ -3,7 +3,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import sys
-from threading import get_ident, Lock
+from threading import current_thread, get_ident, Lock
 import traceback
 from typing import Optional
 
@@ -74,7 +74,7 @@ class NativeRuntime:
         self._resolver_active = False
         self._resolver_lock = Lock()
         self._execution_owner = None
-        self._owner_thread_ident = None
+        self._owner_thread = None
 
     def initialize(self) -> None:
         if self.initialized:
@@ -87,7 +87,7 @@ class NativeRuntime:
         try:
             self._create_isolate()
             isolate_created = True
-            self._owner_thread_ident = get_ident()
+            self._owner_thread = current_thread()
             self._setup_functions()
             self.initialized = True
         except Exception:
@@ -198,8 +198,7 @@ class NativeRuntime:
 
     def run_script(self, thread, script: bytes, inputs: bytes):
         with self._serialized_native_operation():
-            with self._current_thread_attachment(thread) as current_thread:
-                return self.lib.run_script(current_thread, script, inputs)
+            return self.lib.run_script(thread, script, inputs)
 
     def run_script_and_decode(self, thread, script: bytes, inputs: bytes) -> str:
         with self._serialized_native_operation():
@@ -211,8 +210,7 @@ class NativeRuntime:
 
     def run_script_with_resolver(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver):
         with self._serialized_native_operation():
-            with self._current_thread_attachment(thread) as current_thread:
-                return self._run_script_with_resolver(current_thread, script, inputs, resolver)
+            return self._run_script_with_resolver(thread, script, inputs, resolver)
 
     def run_script_with_resolver_and_decode(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver) -> str:
         with self._serialized_native_operation():
@@ -272,8 +270,7 @@ class NativeRuntime:
 
     def run_script_callback(self, thread, script: bytes, inputs: bytes, write_callback):
         with self._serialized_native_operation():
-            with self._current_thread_attachment(thread) as current_thread:
-                return self.lib.run_script_callback(current_thread, script, inputs, write_callback, None)
+            return self.lib.run_script_callback(thread, script, inputs, write_callback, None)
 
     def run_script_callback_and_decode(self, thread, script: bytes, inputs: bytes, write_callback) -> str:
         with self._serialized_native_operation():
@@ -285,10 +282,9 @@ class NativeRuntime:
 
     def run_script_input_output_callback(self, thread, script: bytes, inputs: bytes, input_name: bytes, input_mime_type: bytes, input_charset: Optional[bytes], read_callback, write_callback):
         with self._serialized_native_operation():
-            with self._current_thread_attachment(thread) as current_thread:
-                return self.lib.run_script_input_output_callback(
-                    current_thread, script, inputs, input_name, input_mime_type, input_charset, read_callback, write_callback, None,
-                )
+            return self.lib.run_script_input_output_callback(
+                thread, script, inputs, input_name, input_mime_type, input_charset, read_callback, write_callback, None,
+            )
 
     def run_script_input_output_callback_and_decode(self, thread, script: bytes, inputs: bytes, input_name: bytes, input_mime_type: bytes, input_charset: Optional[bytes], read_callback, write_callback) -> str:
         with self._serialized_native_operation():
@@ -304,17 +300,17 @@ class NativeRuntime:
         with self._serialized_native_operation():
             if not self.initialized:
                 return
-            if get_ident() == getattr(self, "_owner_thread_ident", get_ident()):
+            if current_thread() is getattr(self, "_owner_thread", current_thread()):
                 self._tear_down_isolate()
                 self._reset()
                 return
 
-            current_thread = self.attach_thread()
+            attached_thread = self.attach_thread()
             try:
-                self._tear_down_isolate(current_thread)
+                self._tear_down_isolate(attached_thread)
             except Exception:
                 try:
-                    self.detach_thread(current_thread)
+                    self.detach_thread(attached_thread)
                 except Exception:
                     pass
                 raise
@@ -336,21 +332,21 @@ class NativeRuntime:
 
     @contextmanager
     def _current_thread_attachment(self, thread):
-        owner = getattr(self, "_owner_thread_ident", get_ident())
-        if get_ident() == owner or thread is not self.thread:
+        owner = getattr(self, "_owner_thread", current_thread())
+        if current_thread() is owner or thread is not self.thread:
             yield thread
             return
 
-        current_thread = self.attach_thread()
+        attached_thread = self.attach_thread()
         primary_error = None
         try:
-            yield current_thread
+            yield attached_thread
         except BaseException as error:
             primary_error = error
             raise
         finally:
             try:
-                self.detach_thread(current_thread)
+                self.detach_thread(attached_thread)
             except Exception:
                 if primary_error is None:
                     raise
@@ -372,7 +368,7 @@ class NativeRuntime:
 
     def _reset(self) -> None:
         self.initialized = False
-        self._owner_thread_ident = None
+        self._owner_thread = None
         self.thread = None
         self.isolate = None
         self.lib = None

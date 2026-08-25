@@ -1,6 +1,6 @@
 from pathlib import Path
 import ctypes
-from threading import Event, get_ident, Thread
+from threading import current_thread, Event, get_ident, Thread
 
 import pytest
 
@@ -155,7 +155,7 @@ def test_buffered_worker_execution_uses_one_current_thread_attachment_for_run_de
     worker_ident, result = outcomes[0]
     assert worker_ident != owner_ident
     assert result == "result"
-    assert runtime._owner_thread_ident == owner_ident
+    assert runtime._owner_thread is current_thread()
     assert len(library.attach_calls) == 1
     assert library.attach_calls[0][0] == worker_ident
     worker_pointer = ctypes.cast(calls[0][2], ctypes.c_void_p).value
@@ -169,6 +169,52 @@ def test_buffered_worker_execution_uses_one_current_thread_attachment_for_run_de
     )
     assert library.detach_calls[0][0] == worker_ident
     assert ctypes.cast(library.detach_calls[0][1], ctypes.c_void_p).value == worker_pointer
+
+
+@pytest.mark.unit
+def test_distinct_thread_object_attaches_when_python_thread_ident_is_reused(monkeypatch):
+    buffer = ctypes.create_string_buffer(b"result")
+    library = FakeLibrary()
+    library.run_script = CallableFunction(
+        lambda _thread, _script, _inputs: ctypes.addressof(buffer)
+    )
+    library.free_cstring = CallableFunction(lambda _thread, _ptr: None)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    monkeypatch.setattr(native, "get_ident", lambda: 7)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    owner_thread = current_thread()
+    observed_threads = []
+
+    worker = Thread(
+        target=lambda: (
+            observed_threads.append(current_thread()),
+            runtime.run_script_and_decode(runtime.thread, b"script", b"{}"),
+        )
+    )
+    worker.start()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert observed_threads == [worker]
+    assert observed_threads[0] is not owner_thread
+    assert runtime._owner_thread is owner_thread
+    assert len(library.attach_calls) == 1
+    assert len(library.detach_calls) == 1
+
+
+@pytest.mark.unit
+def test_cleanup_clears_owner_thread_reference(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    assert runtime._owner_thread is current_thread()
+
+    runtime.cleanup()
+
+    assert runtime._owner_thread is None
 
 
 @pytest.mark.unit
@@ -216,6 +262,61 @@ def test_buffered_worker_execution_detaches_current_thread_after_failure(monkeyp
     if failure != "detach":
         assert len(library.detach_calls) == 1
         assert library.detach_calls[0][0] == library.attach_calls[0][0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("method_name", "native_name", "extra_args"),
+    [
+        ("run_script", "run_script", ()),
+        (
+            "run_script_with_resolver",
+            "run_script_with_resolver",
+            (lambda _path: "module source",),
+        ),
+        ("run_script_callback", "run_script_callback", (object(),)),
+        (
+            "run_script_input_output_callback",
+            "run_script_input_output_callback",
+            (b"payload", b"application/json", None, object(), object()),
+        ),
+    ],
+)
+def test_raw_pointer_calls_use_supplied_thread_without_automatic_attachment(
+    monkeypatch, method_name, native_name, extra_args
+):
+    observed_threads = []
+    library = FakeLibrary(resolver_export=method_name == "run_script_with_resolver")
+    setattr(
+        library,
+        native_name,
+        CallableFunction(
+            lambda thread, *_args: observed_threads.append(thread) or 123
+        ),
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    runtime.has_callback_streaming = True
+    runtime.has_callback_input_output = True
+    supplied_thread = runtime.thread
+    outcomes = []
+
+    worker = Thread(
+        target=lambda: outcomes.append(
+            getattr(runtime, method_name)(
+                supplied_thread, b"script", b"{}", *extra_args
+            )
+        )
+    )
+    worker.start()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert outcomes == [123]
+    assert observed_threads == [supplied_thread]
+    assert library.attach_calls == []
+    assert library.detach_calls == []
 
 
 def _capture_error(errors, invoke):
