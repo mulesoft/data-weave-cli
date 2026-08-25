@@ -298,13 +298,24 @@ describe("worker_threads engine lifecycle (round 12 #9)", () => {
         // #3), matching the production cleanup path that releases even when
         // destroyEngine() throws.
         destroyErr = e;
-      } finally {
-        await ffi.cleanup();
       }
-      // Surface a balancing-cleanup failure only when the body succeeded (an
-      // already-throwing body keeps its more actionable original error) -- same
-      // policy as review #7 #7, now covering the destroyEngine() throw too.
-      if (destroyErr !== undefined && bodySucceeded) throw destroyErr;
+      let cleanupErr: unknown;
+      try {
+        await ffi.cleanup();
+      } catch (e) {
+        // Always attempt cleanup (never skipped by a destroyEngine throw), but
+        // capture its failure rather than letting it propagate unconditionally --
+        // an already-failing body must keep its original, more actionable error.
+        cleanupErr = e;
+      }
+      // Surface a balancing failure (destroy or cleanup) ONLY when the body
+      // succeeded; when the body already failed, both are suppressed so the
+      // original failure keeps propagating (review #7 #7, extended to the
+      // destroyEngine() throw + cleanup() throw double-fault case).
+      if (bodySucceeded) {
+        if (destroyErr !== undefined) throw destroyErr;
+        if (cleanupErr !== undefined) throw cleanupErr;
+      }
     }
   }, 20000);
 });
