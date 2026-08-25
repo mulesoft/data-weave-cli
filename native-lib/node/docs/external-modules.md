@@ -51,7 +51,7 @@ const dw = new DataWeave({
 });
 dw.initialize();
 try {
-  const result = dw.run('import org::test::lib\n%dw 2.0\n---\nlib::foo()');
+  const result = dw.run('%dw 2.0\nimport org::test::lib\n---\nlib::foo()');
 } finally {
   await dw.cleanup();
 }
@@ -74,7 +74,7 @@ dw.initialize();
 
 try {
   // Resolves "org/test/lib.dwl" → reads "./my-modules/org/test/lib.dwl"
-  const result = dw.run('import org::test::lib\n%dw 2.0\n---\nlib::foo()');
+  const result = dw.run('%dw 2.0\nimport org::test::lib\n---\nlib::foo()');
 } finally {
   await dw.cleanup();
 }
@@ -100,7 +100,7 @@ const dw = new DataWeave({
 });
 dw.initialize();
 try {
-  const result = dw.run('import org::mule::weave::core::Strings\n%dw 2.0\n---\nStrings::capitalize("hello")');
+  const result = dw.run('%dw 2.0\nimport org::mule::weave::core::Strings\n---\nStrings::capitalize("hello")');
 } finally {
   await dw.cleanup();
 }

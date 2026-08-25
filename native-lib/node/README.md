@@ -173,8 +173,10 @@ import { readFileSync } from 'fs';
 
 // The native read callback is synchronous, so an ASYNC input iterable (e.g.
 // fs.createReadStream) is fully pre-buffered into memory before the transform
-// starts. For bounded memory, feed a SYNCHRONOUS iterable, which is consumed
-// on demand -- one chunk at a time. (See "Sync vs async input and memory" below.)
+// starts. A SYNCHRONOUS iterable is instead consumed on demand -- one chunk at a
+// time -- so the transform makes no extra full copy of the input (it does NOT by
+// itself bound total memory: a source like readFileSync still holds the whole
+// input). (See "Sync vs async input and memory" below.)
 function* chunked(buf, size = 65536) {
   for (let i = 0; i < buf.length; i += size) yield buf.subarray(i, i + size);
 }
@@ -197,11 +199,14 @@ for await (const chunk of generator) {
 
 > **Sync vs async input and memory.** The native read callback runs synchronously
 > on the JS thread. **Synchronous** iterables (arrays, generators) are consumed
-> on demand — only one chunk is held at a time, giving constant-memory streaming.
-> **Async** iterables (e.g. `fs.createReadStream()`) are **fully pre-buffered**
-> into memory before the transform starts, because their `.next()` returns a
-> Promise that cannot be awaited inside the synchronous callback. For large inputs,
-> prefer a synchronous generator to keep memory bounded.
+> on demand — the transform holds only one chunk at a time and makes no extra
+> full copy of the input. This bounds the transform's *added* memory, not total
+> memory: if the source itself already holds the whole input (e.g. `readFileSync`),
+> that memory is still resident. **Async** iterables (e.g. `fs.createReadStream()`)
+> are **fully pre-buffered** into memory before the transform starts, because their
+> `.next()` returns a Promise that cannot be awaited inside the synchronous
+> callback. For large inputs, prefer a synchronous generator so the transform adds
+> no second copy.
 
 **Parameters:**
 - `script` (string): DataWeave script
@@ -209,7 +214,7 @@ for await (const chunk of generator) {
 - `opts` (object, optional): Options
   - `inputName` (string): Name of input variable (default: "payload")
   - `mimeType` (string): Input MIME type (default: "application/json")
-  - `charset` (string | null): Input character encoding
+  - `charset` (string, optional): Input character encoding
   - `inputs` (object): Additional input variables
 
 **Yields:** `Buffer` chunks as they're produced
@@ -487,7 +492,7 @@ The Node.js binding uses **N-API** (Node-API) for C addon integration:
 
 - **Thread-safe**: N-API calls are serialized on the Node.js event loop
 - **Async operations**: Streaming operations yield control to the event loop between chunks
-- **No blocking**: Long-running scripts execute on the native side without blocking the event loop
+- **No event-loop blocking for streaming**: `runStreaming`/`runTransform` execute on a background worker and yield to the event loop between chunks. Note the **synchronous** `run()` runs native work directly on the calling JS thread and *does* block it until the script completes — use the streaming methods for long-running work you cannot block on.
 
 **Important:** Do not share a single `DataWeave` instance across Worker threads. Use the module-level functions (which use a global singleton) or create separate instances per thread.
 
