@@ -169,12 +169,19 @@ Execute a DataWeave script with streaming input and output (bidirectional stream
 
 ```javascript
 import { runTransform } from 'dataweave-native';
-import { createReadStream } from 'fs';
+import { readFileSync } from 'fs';
 
-// Transform a large CSV file to JSON without loading it all into memory
+// The native read callback is synchronous, so an ASYNC input iterable (e.g.
+// fs.createReadStream) is fully pre-buffered into memory before the transform
+// starts. For bounded memory, feed a SYNCHRONOUS iterable, which is consumed
+// on demand -- one chunk at a time. (See "Sync vs async input and memory" below.)
+function* chunked(buf, size = 65536) {
+  for (let i = 0; i < buf.length; i += size) yield buf.subarray(i, i + size);
+}
+
 const generator = runTransform(
   '%dw 2.0\noutput application/json\n---\npayload',
-  createReadStream('large-file.csv'),
+  chunked(readFileSync('large-file.csv')),
   {
     inputName: 'payload',
     mimeType: 'application/csv',
@@ -187,6 +194,14 @@ for await (const chunk of generator) {
   process.stdout.write(chunk);
 }
 ```
+
+> **Sync vs async input and memory.** The native read callback runs synchronously
+> on the JS thread. **Synchronous** iterables (arrays, generators) are consumed
+> on demand — only one chunk is held at a time, giving constant-memory streaming.
+> **Async** iterables (e.g. `fs.createReadStream()`) are **fully pre-buffered**
+> into memory before the transform starts, because their `.next()` returns a
+> Promise that cannot be awaited inside the synchronous callback. For large inputs,
+> prefer a synchronous generator to keep memory bounded.
 
 **Parameters:**
 - `script` (string): DataWeave script
@@ -384,7 +399,7 @@ console.log(result.getString());  // "300"
 
 ```javascript
 import { runTransform } from 'dataweave-native';
-import { createReadStream, createWriteStream } from 'fs';
+import { readFileSync, createWriteStream } from 'fs';
 
 const script = `
 %dw 2.0
@@ -393,9 +408,15 @@ output application/json
 payload filter $.amount > 1000
 `;
 
+// A synchronous generator is consumed on demand, so input memory stays bounded.
+// An async stream (createReadStream) would be pre-buffered in full first.
+function* chunked(buf, size = 65536) {
+  for (let i = 0; i < buf.length; i += size) yield buf.subarray(i, i + size);
+}
+
 const generator = runTransform(
   script,
-  createReadStream('large-transactions.csv'),
+  chunked(readFileSync('large-transactions.csv')),
   { mimeType: 'application/csv' }
 );
 
@@ -566,12 +587,12 @@ Tests use **Vitest** and cover:
 
 - **Buffered execution** (`run`): Best for small scripts with sub-MB outputs
 - **Streaming execution** (`runStreaming`): Best for large outputs (MB+), reduces memory footprint
-- **Bidirectional streaming** (`runTransform`): Best for large inputs and outputs, constant memory usage
+- **Bidirectional streaming** (`runTransform`): Best for large outputs; input memory is bounded only with a **synchronous** input iterable (async streams are pre-buffered — see the `runTransform` memory note above)
 
 Benchmark (1MB JSON transformation):
 - `run()`: ~50ms, 2MB peak memory
 - `runStreaming()`: ~55ms, 500KB peak memory
-- `runTransform()`: ~60ms, 256KB peak memory (streaming input)
+- `runTransform()`: ~60ms, 256KB peak memory (synchronous input iterable; an async stream is pre-buffered, so peak memory scales with input size)
 
 ## See Also
 
