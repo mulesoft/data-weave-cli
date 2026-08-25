@@ -465,8 +465,12 @@ try {
   console.log(r1.getString()); // "4"
   console.log(r2.getString()); // "42"
 } finally {
-  // cleanup() returns a Promise; await it so an in-flight streaming/transform op
-  // drains and a subsequent initialize() does not race a still-tearing-down isolate.
+  // cleanup() returns a Promise; await it. When this releases the FINAL shared
+  // native reference in the process, it drains any in-flight streaming/transform
+  // op and completes isolate teardown before resolving (so a subsequent
+  // initialize() does not race a still-tearing-down isolate). When other
+  // initialized instances remain, it resolves as soon as this instance is
+  // released, leaving the shared isolate live for them.
   await dw.cleanup();
 }
 ```
@@ -657,7 +661,9 @@ control:
 ```typescript
 import { cleanup } from "dataweave-native";
 
-// When done with all DataWeave operations. cleanup() returns a Promise; await it
-// so any in-flight streaming/transform op drains before the isolate tears down.
+// When done with all DataWeave operations. cleanup() returns a Promise; await it.
+// Draining in-flight streaming/transform work and tearing down the isolate happen
+// only when this releases the final shared native reference; if other initialized
+// instances remain, it resolves as soon as this instance is released.
 await cleanup();
 ```
