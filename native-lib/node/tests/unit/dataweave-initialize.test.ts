@@ -339,8 +339,12 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     // in initialize() must have consumed it (no unhandledRejection), and the
     // instance must be re-initializable afterward.
     await new Promise<void>((r) => setImmediate(r));
+    // Clear so the assertion below proves the RETRY re-invoked createEngine,
+    // not the earlier failed attempt's stale no-arg call (review #9 #1).
+    vi.mocked(ffi.createEngine).mockClear();
     vi.mocked(ffi.createEngine).mockReturnValue(6);
     dw.initialize();
+    expect(ffi.createEngine).toHaveBeenCalledTimes(1);
     expect(ffi.createEngine).toHaveBeenLastCalledWith();
   });
 
@@ -365,8 +369,12 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     // Let the deferred rollback settle; state must return to "uninitialized" so a
     // later initialize() is not permanently rejected with "cleanup is in progress".
     await new Promise<void>((r) => setImmediate(r));
+    // Clear so the assertion proves the retry actually re-invoked createEngine
+    // rather than passing on the failed attempt's stale call (review #9 #1).
+    vi.mocked(ffi.createEngine).mockClear();
     vi.mocked(ffi.createEngine).mockReturnValue(11);
     dw.initialize();
+    expect(ffi.createEngine).toHaveBeenCalledTimes(1);
     expect(ffi.createEngine).toHaveBeenLastCalledWith();
 
     await dw.cleanup();
