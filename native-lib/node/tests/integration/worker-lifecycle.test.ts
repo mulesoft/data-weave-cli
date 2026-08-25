@@ -152,6 +152,14 @@ describe("worker_threads engine lifecycle (round 12 #9)", () => {
     expect(JSON.parse(Buffer.from(envelope.result, "base64").toString("utf-8"))).toBe(2);
     ffi.destroyEngine(h);
     await ffi.cleanup();
+    // Prove this test INDEPENDENTLY that no abandoned Worker leaked its init
+    // reference: after the main thread balances its own reference to zero, a raw
+    // op must observe "not initialized". A leaked Worker reference would keep
+    // g_ref_count >= 1 here, so the isolate would still be live and this would
+    // NOT throw (review #9 #2).
+    expect(() =>
+      ffi.runScriptEngine(Number.MAX_SAFE_INTEGER, "%dw 2.0\noutput application/json\n---\n1", buildInputsJson({}))
+    ).toThrow(/not initialized/i);
   });
 
   it("Worker.terminate() mid-life leaves the main thread able to initialize and run", async () => {
@@ -200,6 +208,14 @@ describe("worker_threads engine lifecycle (round 12 #9)", () => {
     expect(JSON.parse(Buffer.from(envelope.result, "base64").toString("utf-8"))).toBe(7);
     ffi.destroyEngine(h);
     await ffi.cleanup();
+    // Prove INDEPENDENTLY that the terminated Worker's engine reference was
+    // released: after the main thread balances its own reference, a raw op must
+    // observe "not initialized" (g_ref_count == 0). A leaked reference from the
+    // terminated Worker would leave the isolate live and this would NOT throw
+    // (review #9 #2).
+    expect(() =>
+      ffi.runScriptEngine(Number.MAX_SAFE_INTEGER, "%dw 2.0\noutput application/json\n---\n1", buildInputsJson({}))
+    ).toThrow(/not initialized/i);
   });
 
   it("a Worker that inits once + creates N engines + exits without cleanup() does NOT tear down the isolate under a live main engine (round 13 #5)", async () => {
