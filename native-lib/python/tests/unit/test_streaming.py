@@ -1,6 +1,6 @@
 import ctypes
 from queue import Full, Queue
-from threading import Event, Thread
+from threading import Event, get_ident, Thread
 from time import sleep
 
 import pytest
@@ -74,6 +74,7 @@ def configured_runtime(native):
     native_runtime.lib = native
     native_runtime.isolate = object()
     native_runtime.thread = object()
+    native_runtime._owner_thread_ident = get_ident()
     runtime._native = native_runtime
     return runtime
 

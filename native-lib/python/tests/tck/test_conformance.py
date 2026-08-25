@@ -492,7 +492,6 @@ def test_exclusion_registry_requires_case_identity_supported_category_and_reason
     ]
 
 
-@pytest.mark.unit
 def test_only_declared_case_identifiers_are_excluded():
     """Catches broad exclusion matching that can skip unrelated failures."""
     assert validate_exclusions(EXCLUDED_CASES, SCENARIOS) == []

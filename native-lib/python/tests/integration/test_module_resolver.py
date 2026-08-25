@@ -1,5 +1,9 @@
 import io
-from threading import Event, Thread
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 from zipfile import ZipFile
 
 import pytest
@@ -234,46 +238,83 @@ def test_resolver_is_inactive_for_resolver_less_apis_after_synchronous_install(
 
 @pytest.mark.integration
 def test_overlapping_resolver_aware_runs_are_serialized():
-    first_resolver_call = Event()
-    release_first = Event()
-    second_resolver_call = Event()
-    results = []
-    errors = []
-    calls = 0
+    source_dir = Path(__file__).resolve().parents[2] / "src"
+    code = f"""
+import json
+from threading import Event, Lock, Thread
 
-    def resolver(_module_path):
-        nonlocal calls
+import dataweave
+
+script = {IMPORT_LIB_SCRIPT!r}
+first_resolver_call = Event()
+release_first = Event()
+second_resolver_call = Event()
+results = []
+errors = []
+calls = 0
+calls_lock = Lock()
+
+def resolver(_module_path):
+    global calls
+    with calls_lock:
         calls += 1
-        if calls == 1:
-            first_resolver_call.set()
-            if not release_first.wait(2):
-                raise RuntimeError("first resolver call was not released")
-        else:
-            second_resolver_call.set()
-        return "%dw 2.0\nfun answer() = 42"
+        current_call = calls
+    if current_call == 1:
+        first_resolver_call.set()
+        if not release_first.wait(2):
+            raise RuntimeError("first resolver call was not released")
+    else:
+        second_resolver_call.set()
+    return "%dw 2.0\\nfun answer() = 42"
 
-    with dataweave.DataWeave(resolve_module=resolver) as dw:
-        def run():
-            try:
-                results.append(dw.run(IMPORT_LIB_SCRIPT))
-            except Exception as error:
-                errors.append(error)
+with dataweave.DataWeave(resolve_module=resolver) as dw:
+    def run():
+        try:
+            result = dw.run(script)
+            results.append({{"success": result.success, "value": result.get_string()}})
+        except Exception as error:
+            errors.append(str(error))
 
-        first = Thread(target=run)
-        second = Thread(target=run)
-        first.start()
-        assert first_resolver_call.wait(2)
-        second.start()
+    first = Thread(target=run)
+    second = Thread(target=run)
+    first.start()
+    if not first_resolver_call.wait(2):
+        raise RuntimeError("first resolver was not called")
+    second.start()
+    serialized = not second_resolver_call.wait(0.1)
+    release_first.set()
+    first.join(2)
+    second.join(2)
+    if first.is_alive() or second.is_alive():
+        raise RuntimeError("resolver worker did not finish")
 
-        assert not second_resolver_call.wait(0.1)
-        release_first.set()
-        first.join(2)
-        second.join(2)
+print(json.dumps({{
+    "serialized": serialized,
+    "second_called": second_resolver_call.is_set(),
+    "results": results,
+    "errors": errors,
+}}))
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(source_dir) + os.pathsep + environment.get("PYTHONPATH", "")
 
-        assert not first.is_alive()
-        assert not second.is_alive()
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        check=False,
+        env=environment,
+        text=True,
+        timeout=30,
+    )
 
-    assert errors == []
-    assert len(results) == 2
-    assert all(result.success for result in results)
-    assert second_resolver_call.is_set()
+    assert completed.returncode == 0, completed.stderr
+    response = json.loads(completed.stdout)
+    assert response == {
+        "serialized": True,
+        "second_called": True,
+        "results": [
+            {"success": True, "value": "42"},
+            {"success": True, "value": "42"},
+        ],
+        "errors": [],
+    }

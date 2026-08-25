@@ -145,6 +145,14 @@ def test_tck_metadata_validation_is_not_selected_by_the_pr_python_test_lane():
 
 
 @pytest.mark.unit
+def test_tck_corpus_inventory_policy_is_not_selected_by_the_pr_python_test_lane():
+    root = Path(__file__).resolve().parents[4]
+    conformance = (root / "native-lib/python/tests/tck/test_conformance.py").read_text()
+
+    assert "@pytest.mark.unit\ndef test_only_declared_case_identifiers_are_excluded" not in conformance
+
+
+@pytest.mark.unit
 def test_foundation_skips_python_tests_and_master_aggregates_binding_failures():
     root = Path(__file__).resolve().parents[4]
     foundation = (root / ".github/actions/build-foundation/action.yml").read_text()

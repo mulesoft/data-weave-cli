@@ -1,6 +1,6 @@
 from pathlib import Path
 import ctypes
-from threading import Event, Thread
+from threading import Event, get_ident, Thread
 
 import pytest
 
@@ -25,13 +25,28 @@ class FakeLibrary:
     free_cstring = Function()
 
     def __init__(self, *, resolver_export=False):
+        self.attach_calls = []
+        self.detach_calls = []
         self.tear_down_threads = []
         self.graal_create_isolate = CallableFunction(lambda _params, _isolate, _thread: 0)
+        self.graal_attach_thread = CallableFunction(self._attach_thread)
+        self.graal_detach_thread = CallableFunction(
+            lambda thread: self.detach_calls.append((get_ident(), thread)) or 0
+        )
         self.graal_tear_down_isolate = CallableFunction(
             lambda thread: self.tear_down_threads.append(thread) or 0
         )
         if resolver_export:
             self.run_script_with_resolver = Function()
+
+    def _attach_thread(self, _isolate, thread):
+        worker_thread = native.GraalIsolateThreadPointer()
+        ctypes.cast(
+            thread,
+            ctypes.POINTER(native.GraalIsolateThreadPointer),
+        )[0] = worker_thread
+        self.attach_calls.append((get_ident(), worker_thread))
+        return 0
 
 
 @pytest.mark.unit
@@ -108,6 +123,106 @@ def test_native_runtime_registers_abi_and_cleans_up_idempotently(monkeypatch):
     assert library.free_cstring.argtypes[1] is native.ctypes.c_void_p
     assert len(library.tear_down_threads) == 1
     assert runtime.initialized is False
+
+
+@pytest.mark.unit
+def test_buffered_worker_execution_uses_one_current_thread_attachment_for_run_decode_and_free(monkeypatch):
+    calls = []
+    buffer = ctypes.create_string_buffer(b"result")
+    library = FakeLibrary()
+    library.run_script = CallableFunction(
+        lambda thread, _script, _inputs: calls.append(("run", get_ident(), thread))
+        or ctypes.addressof(buffer)
+    )
+    library.free_cstring = CallableFunction(
+        lambda thread, _ptr: calls.append(("free", get_ident(), thread))
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    owner_ident = get_ident()
+    outcomes = []
+
+    worker = Thread(
+        target=lambda: outcomes.append(
+            (get_ident(), runtime.run_script_and_decode(runtime.thread, b"script", b"{}"))
+        )
+    )
+    worker.start()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    worker_ident, result = outcomes[0]
+    assert worker_ident != owner_ident
+    assert result == "result"
+    assert runtime._owner_thread_ident == owner_ident
+    assert len(library.attach_calls) == 1
+    assert library.attach_calls[0][0] == worker_ident
+    worker_pointer = ctypes.cast(calls[0][2], ctypes.c_void_p).value
+    assert [(name, ident) for name, ident, _thread in calls] == [
+        ("run", worker_ident),
+        ("free", worker_ident),
+    ]
+    assert all(
+        ctypes.cast(thread, ctypes.c_void_p).value == worker_pointer
+        for _name, _ident, thread in calls
+    )
+    assert library.detach_calls[0][0] == worker_ident
+    assert ctypes.cast(library.detach_calls[0][1], ctypes.c_void_p).value == worker_pointer
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["run", "decode", "free", "detach"])
+def test_buffered_worker_execution_detaches_current_thread_after_failure(monkeypatch, failure):
+    buffer = ctypes.create_string_buffer(b"result")
+    library = FakeLibrary()
+
+    def run_script(_thread, _script, _inputs):
+        if failure == "run":
+            raise RuntimeError("run failed")
+        return ctypes.addressof(buffer)
+
+    def free_cstring(_thread, _ptr):
+        if failure == "free":
+            raise RuntimeError("free failed")
+
+    library.run_script = CallableFunction(run_script)
+    library.free_cstring = CallableFunction(free_cstring)
+    if failure == "detach":
+        library.graal_detach_thread = CallableFunction(
+            lambda _thread: (_ for _ in ()).throw(RuntimeError("detach failed"))
+        )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    if failure == "decode":
+        monkeypatch.setattr(native.ctypes, "string_at", lambda _ptr: b"\xff")
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    errors = []
+
+    worker = Thread(
+        target=lambda: _capture_error(
+            errors,
+            lambda: runtime.run_script_and_decode(runtime.thread, b"script", b"{}"),
+        )
+    )
+    worker.start()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    if failure == "detach":
+        assert "detach failed" in str(errors[0])
+    assert len(library.attach_calls) == 1
+    if failure != "detach":
+        assert len(library.detach_calls) == 1
+        assert library.detach_calls[0][0] == library.attach_calls[0][0]
+
+
+def _capture_error(errors, invoke):
+    try:
+        invoke()
+    except Exception as error:
+        errors.append(error)
 
 
 @pytest.mark.unit
@@ -654,6 +769,82 @@ def test_cleanup_failure_preserves_runtime_state_for_successful_retry(monkeypatc
 
 
 @pytest.mark.unit
+def test_cleanup_from_worker_uses_current_thread_for_isolate_teardown(monkeypatch):
+    library = FakeLibrary()
+    teardown_calls = []
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda thread: teardown_calls.append((get_ident(), thread)) or 0
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    owner_ident = get_ident()
+
+    worker = Thread(target=runtime.cleanup)
+    worker.start()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    worker_ident, teardown_thread = teardown_calls[0]
+    assert worker_ident != owner_ident
+    assert library.attach_calls[0][0] == worker_ident
+    assert ctypes.cast(teardown_thread, ctypes.c_void_p).value == ctypes.cast(
+        library.attach_calls[0][1], ctypes.c_void_p
+    ).value
+    assert library.detach_calls == []
+    assert runtime.initialized is False
+
+
+@pytest.mark.unit
+def test_failed_cleanup_from_worker_detaches_and_preserves_state_for_owner_retry(monkeypatch):
+    library = FakeLibrary()
+    tear_down_results = iter((7, 0))
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda _thread: next(tear_down_results)
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    errors = []
+
+    worker = Thread(target=lambda: _capture_error(errors, runtime.cleanup))
+    worker.start()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert runtime.initialized is True
+    assert len(library.attach_calls) == 1
+    assert len(library.detach_calls) == 1
+
+    runtime.cleanup()
+
+    assert runtime.initialized is False
+
+
+@pytest.mark.unit
+def test_failed_worker_cleanup_preserves_teardown_error_when_detach_also_fails(monkeypatch):
+    library = FakeLibrary()
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 7)
+    library.graal_detach_thread = CallableFunction(
+        lambda _thread: (_ for _ in ()).throw(RuntimeError("detach failed"))
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    errors = []
+
+    worker = Thread(target=lambda: _capture_error(errors, runtime.cleanup))
+    worker.start()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert str(errors[0]) == "Failed to tear down GraalVM isolate. Error code: 7"
+    assert runtime.initialized is True
+
+
+@pytest.mark.unit
 def test_native_runtime_wraps_library_load_errors(monkeypatch):
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: (_ for _ in ()).throw(OSError("bad image")))
 
@@ -779,7 +970,7 @@ def test_initialize_rejects_streaming_export_without_thread_lifecycle_symbols(mo
             setattr(library, symbol, Function())
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
 
-    with pytest.raises(dataweave.DataWeaveError, match=f"run_script_callback requires native export {missing_symbol}"):
+    with pytest.raises(dataweave.DataWeaveError, match=f"Native library does not export {missing_symbol}"):
         native.NativeRuntime("/tmp/dwlib").initialize()
 
 
