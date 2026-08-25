@@ -79,6 +79,18 @@ def test_modules_from_directory_keeps_root_after_chdir(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_modules_from_directory_normalizes_parent_segments_in_root(tmp_path):
+    base = tmp_path / "modules"
+    child = base / "child"
+    child.mkdir(parents=True)
+    (base / "lib.dwl").write_text("source", encoding="utf-8")
+
+    resolver = modules_from_directory(child / "..")
+
+    assert resolver("lib.dwl") == "source"
+
+
+@pytest.mark.unit
 def test_modules_from_directory_rejects_lexical_escape(tmp_path):
     base = tmp_path / "modules"
     base.mkdir()

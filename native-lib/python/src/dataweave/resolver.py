@@ -24,7 +24,7 @@ def modules_from_map(modules: Mapping[str, str]) -> ModuleResolver:
 
 def modules_from_directory(base_dir: Union[str, Path]) -> ModuleResolver:
     """Create a resolver that reads modules beneath a directory."""
-    lexical_root = Path(base_dir).absolute()
+    lexical_root = Path(os.path.abspath(base_dir))
     canonical_root = lexical_root.resolve(strict=True)
 
     if not canonical_root.is_dir():
