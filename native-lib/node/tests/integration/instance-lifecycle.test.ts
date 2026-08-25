@@ -9,12 +9,25 @@ import { findLibrary, buildInputsJson } from "../../src/utils";
 // what findings #1 and #3 exploit. Real addon, no mocking.
 describe("instance lifecycle during cleanup (round 6)", () => {
   let dw: DataWeave | undefined;
-  afterEach(async () => {
+  afterEach(async (ctx) => {
     // Whatever state each test leaves it in, drain and release so the shared
     // process-wide isolate is clean for sibling tests.
     if (dw) {
-      try { await dw.cleanup(); } catch { /* already released */ }
+      const inst = dw;
       dw = undefined;
+      let cleanupErr: unknown;
+      try {
+        await inst.cleanup();
+      } catch (e) {
+        cleanupErr = e;
+      }
+      // A cleanup() failure is itself a real lifecycle regression: surface it
+      // when the test body PASSED. Suppress it only when the body already FAILED,
+      // so the original, more actionable assertion failure keeps propagating
+      // (review #9 #4; mirrors the worker-lifecycle balancing pattern).
+      if (cleanupErr !== undefined && ctx.task.result?.state !== "fail") {
+        throw cleanupErr;
+      }
     }
   });
 
