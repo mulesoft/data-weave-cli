@@ -57,35 +57,15 @@ def _exclusion(case_identifier: str, category: str, reason: str) -> Exclusion:
 # Each entry has a full case identifier and direct runtime evidence. Categories
 # describe only an observed, unsupported limitation; they never match patterns.
 EXCLUDED_CASES: Dict[str, Exclusion] = {
-    "runtime/import-component-alias-lib-out.json": _exclusion(
-        "runtime/import-component-alias-lib-out.json",
-        UNSUPPORTED_DW_MODULE_RESOLUTION,
-        "imports a test-only DW module; the Python binding has no module resolver",
-    ),
-    "runtime/import-lib-out.json": _exclusion(
-        "runtime/import-lib-out.json",
-        UNSUPPORTED_DW_MODULE_RESOLUTION,
-        "imports a test-only DW module; the Python binding has no module resolver",
-    ),
-    "runtime/import-lib-with-alias-out.json": _exclusion(
-        "runtime/import-lib-with-alias-out.json",
-        UNSUPPORTED_DW_MODULE_RESOLUTION,
-        "imports a test-only DW module; the Python binding has no module resolver",
-    ),
-    "runtime/import-named-lib-out.json": _exclusion(
-        "runtime/import-named-lib-out.json",
-        UNSUPPORTED_DW_MODULE_RESOLUTION,
-        "imports a test-only DW module; the Python binding has no module resolver",
-    ),
-    "runtime/import-star-out.json": _exclusion(
-        "runtime/import-star-out.json",
-        UNSUPPORTED_DW_MODULE_RESOLUTION,
-        "imports a test-only DW module; the Python binding has no module resolver",
-    ),
     "runtime/module-singleton-out.json": _exclusion(
         "runtime/module-singleton-out.json",
         UNSUPPORTED_DW_MODULE_RESOLUTION,
-        "imports a test-only DW module; the Python binding has no module resolver",
+        "runtime cannot resolve org::mule::weave::v2::libs::singleton::libA; "
+        "runtime cannot resolve org::mule::weave::v2::libs::singleton::libB; "
+        "runtime cannot resolve org::mule::weave::v2::libs::singleton::libSource; "
+        "shared fixture lacks org::mule::weave::v2::libs::singleton::libA; "
+        "shared fixture lacks org::mule::weave::v2::libs::singleton::libB; "
+        "shared fixture lacks org::mule::weave::v2::libs::singleton::libSource",
     ),
     "runtime/is-empty-using-empty-stream-out.json": _exclusion(
         "runtime/is-empty-using-empty-stream-out.json",
@@ -156,11 +136,6 @@ EXCLUDED_CASES: Dict[str, Exclusion] = {
         "core-modules/read-binary-files-out.bin",
         UNSUPPORTED_DW_MODULE_RESOLUTION,
         "cannot resolve dw::core::Assertions before reading the binary fixture",
-    ),
-    "runtime/full-qualified-name-ref-out.json": _exclusion(
-        "runtime/full-qualified-name-ref-out.json",
-        UNSUPPORTED_DW_MODULE_RESOLUTION,
-        "cannot resolve org::mule::weave::v2::libs::lib test modules",
     ),
     "runtime/private_scope_directives-out.xml": _exclusion(
         "runtime/private_scope_directives-out.xml",

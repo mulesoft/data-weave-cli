@@ -1,6 +1,6 @@
 import ctypes
 from queue import Full, Queue
-from threading import Event, Thread
+from threading import current_thread, Event, Thread
 from time import sleep
 
 import pytest
@@ -15,12 +15,14 @@ class FakeNative:
         self.attach_code = attach_code
         self.emit = emit
         self.consume_input = consume_input
+        self.attach_count = 0
         self.detached = []
         self.freed = []
         self._buffers = []
         self.detached_event = Event()
 
     def graal_attach_thread(self, _isolate, _thread):
+        self.attach_count += 1
         return self.attach_code
 
     def graal_detach_thread(self, thread):
@@ -74,6 +76,7 @@ def configured_runtime(native):
     native_runtime.lib = native
     native_runtime.isolate = object()
     native_runtime.thread = object()
+    native_runtime._owner_thread = current_thread()
     runtime._native = native_runtime
     return runtime
 
@@ -103,6 +106,61 @@ def test_run_input_output_callback_converts_read_exception_to_abort_result():
 
 
 @pytest.mark.unit
+def test_write_callback_reentry_is_translated_to_abort_without_deadlocking():
+    completed = Event()
+    outcomes = []
+    native = FakeNative('{"success": false, "error": "write aborted"}', emit=b"chunk")
+    runtime = configured_runtime(native)
+
+    worker = Thread(
+        target=lambda: (
+            outcomes.append(
+                runtime.run_callback(
+                    "outer",
+                    lambda _chunk: runtime.run_callback("nested", lambda _data: 0),
+                )
+            ),
+            completed.set(),
+        ),
+        daemon=True,
+    )
+    worker.start()
+
+    assert completed.wait(1), "write callback re-entry deadlocked"
+    assert native.write_status == -1
+    assert outcomes == [dataweave.StreamingResult(False, "write aborted", None, None, False)]
+
+
+@pytest.mark.unit
+def test_read_callback_reentry_is_translated_to_abort_without_deadlocking():
+    completed = Event()
+    outcomes = []
+    native = FakeNative('{"success": false, "error": "read aborted"}', consume_input=True)
+    runtime = configured_runtime(native)
+
+    worker = Thread(
+        target=lambda: (
+            outcomes.append(
+                runtime.run_input_output_callback(
+                    "outer",
+                    "payload",
+                    "application/json",
+                    lambda _size: runtime.run("nested").get_bytes(),
+                    lambda _data: 0,
+                )
+            ),
+            completed.set(),
+        ),
+        daemon=True,
+    )
+    worker.start()
+
+    assert completed.wait(1), "read callback re-entry deadlocked"
+    assert native.read_status == -1
+    assert outcomes == [dataweave.StreamingResult(False, "read aborted", None, None, False)]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "invoke",
     [
@@ -128,6 +186,17 @@ def test_run_transform_preserves_remainder_of_large_input_chunk():
     assert list(stream) == []
     assert native.read_input == b"abcdefgh"
     assert stream.metadata == dataweave.StreamingResult(True, None, "application/json", "utf-8", False)
+
+
+@pytest.mark.unit
+def test_streaming_explicit_worker_thread_is_not_attached_twice():
+    native = FakeNative('{"success": true}')
+    runtime = configured_runtime(native)
+
+    assert list(runtime.run_streaming("script")) == []
+
+    assert native.attach_count == 1
+    assert len(native.detached) == 1
 
 
 @pytest.mark.unit

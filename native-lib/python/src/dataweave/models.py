@@ -30,6 +30,12 @@ class DataWeaveLibraryNotFoundError(Exception):
 WRITE_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int)
 # int (*ReadCallback)(void *ctx, char *buffer, int bufferSize)
 READ_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int)
+# char *resolve_module(void *isolate_thread, const char *module_path)
+RESOLVE_MODULE_CALLBACK = ctypes.CFUNCTYPE(
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_char_p,
+)
 
 
 WriteCallback = Callable[[bytes], int]

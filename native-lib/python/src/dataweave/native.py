@@ -1,9 +1,14 @@
 import ctypes
+from contextlib import contextmanager
 import os
 from pathlib import Path
+import sys
+from threading import current_thread, get_ident, Lock
+import traceback
 from typing import Optional
 
-from .models import DataWeaveError, DataWeaveLibraryNotFoundError, READ_CALLBACK, WRITE_CALLBACK
+from .models import DataWeaveError, DataWeaveLibraryNotFoundError, READ_CALLBACK, RESOLVE_MODULE_CALLBACK, WRITE_CALLBACK
+from .resolver import ModuleResolver
 
 
 _ENV_NATIVE_LIB = "DATAWEAVE_NATIVE_LIB"
@@ -62,6 +67,14 @@ class NativeRuntime:
         self.initialized = False
         self.has_callback_streaming = False
         self.has_callback_input_output = False
+        self.has_module_resolver = False
+        self._module_resolver = None
+        self._module_resolver_callback = None
+        self._resolver_buffers = []
+        self._resolver_active = False
+        self._resolver_lock = Lock()
+        self._execution_owner = None
+        self._owner_thread = None
 
     def initialize(self) -> None:
         if self.initialized:
@@ -74,6 +87,7 @@ class NativeRuntime:
         try:
             self._create_isolate()
             isolate_created = True
+            self._owner_thread = current_thread()
             self._setup_functions()
             self.initialized = True
         except Exception:
@@ -109,6 +123,16 @@ class NativeRuntime:
         self.lib.free_cstring.restype = None
         self.lib.graal_tear_down_isolate.argtypes = [GraalIsolateThreadPointer]
         self.lib.graal_tear_down_isolate.restype = ctypes.c_int
+        self._setup_thread_lifecycle_functions()
+        if hasattr(self.lib, "run_script_with_resolver"):
+            self.lib.run_script_with_resolver.argtypes = [
+                GraalIsolateThreadPointer,
+                ctypes.c_char_p,
+                ctypes.c_char_p,
+                RESOLVE_MODULE_CALLBACK,
+            ]
+            self.lib.run_script_with_resolver.restype = ctypes.c_void_p
+            self.has_module_resolver = True
         if hasattr(self.lib, "run_script_callback"):
             self._require_streaming_lifecycle_exports("run_script_callback")
             self.lib.run_script_callback.argtypes = [GraalIsolateThreadPointer, ctypes.c_char_p, ctypes.c_char_p, WRITE_CALLBACK, ctypes.c_void_p]
@@ -128,6 +152,10 @@ class NativeRuntime:
         for name in ("free_cstring", "graal_attach_thread", "graal_detach_thread"):
             if not hasattr(self.lib, name):
                 raise DataWeaveError(f"{callback_name} requires native export {name}")
+
+    def _setup_thread_lifecycle_functions(self) -> None:
+        self._require_export("graal_attach_thread")
+        self._require_export("graal_detach_thread")
         self.lib.graal_attach_thread.argtypes = [GraalIsolatePointer, ctypes.POINTER(GraalIsolateThreadPointer)]
         self.lib.graal_attach_thread.restype = ctypes.c_int
         self.lib.graal_detach_thread.argtypes = [GraalIsolateThreadPointer]
@@ -169,29 +197,166 @@ class NativeRuntime:
                     raise
 
     def run_script(self, thread, script: bytes, inputs: bytes):
-        return self.lib.run_script(thread, script, inputs)
+        with self._serialized_native_operation():
+            return self.lib.run_script(thread, script, inputs)
+
+    def run_script_and_decode(self, thread, script: bytes, inputs: bytes) -> str:
+        with self._serialized_native_operation():
+            with self._current_thread_attachment(thread) as current_thread:
+                return self.decode_and_free(
+                    self.lib.run_script(current_thread, script, inputs),
+                    current_thread,
+                )
+
+    def run_script_with_resolver(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver):
+        with self._serialized_native_operation():
+            return self._run_script_with_resolver(thread, script, inputs, resolver)
+
+    def run_script_with_resolver_and_decode(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver) -> str:
+        with self._serialized_native_operation():
+            with self._current_thread_attachment(thread) as current_thread:
+                return self.decode_and_free(
+                    self._run_script_with_resolver(current_thread, script, inputs, resolver),
+                    current_thread,
+                )
+
+    def _run_script_with_resolver(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver):
+        if not self.has_module_resolver:
+            raise DataWeaveError(
+                "Native library does not support module resolver API "
+                "(run_script_with_resolver not found)."
+            )
+        if self._module_resolver is None:
+            self._module_resolver = resolver
+            self._module_resolver_callback = self._create_module_resolver_callback(resolver)
+        elif self._module_resolver is not resolver:
+            raise DataWeaveError("Native runtime already has a different module resolver")
+
+        self._resolver_buffers.clear()
+        self._resolver_active = True
+        try:
+            return self.lib.run_script_with_resolver(
+                thread, script, inputs, self._module_resolver_callback
+            )
+        finally:
+            self._resolver_active = False
+            self._resolver_buffers.clear()
+
+    def _create_module_resolver_callback(self, resolver: ModuleResolver):
+        def resolve(_thread, module_path):
+            try:
+                if not self._resolver_active:
+                    return None
+                path = module_path.decode("utf-8")
+                if path.startswith("/"):
+                    path = path[1:]
+                source = resolver(path)
+                if not isinstance(source, str):
+                    return None
+                buffer = ctypes.create_string_buffer(source.encode("utf-8"))
+                self._resolver_buffers.append(buffer)
+                return ctypes.addressof(buffer)
+            except BaseException:
+                try:
+                    if os.environ.get("DATAWEAVE_RESOLVER_DEBUG") == "1":
+                        traceback.print_exc()
+                    else:
+                        print("DataWeave module resolver callback failed.", file=sys.stderr)
+                except BaseException:
+                    pass
+                return None
+
+        return RESOLVE_MODULE_CALLBACK(resolve)
 
     def run_script_callback(self, thread, script: bytes, inputs: bytes, write_callback):
-        return self.lib.run_script_callback(thread, script, inputs, write_callback, None)
+        with self._serialized_native_operation():
+            return self.lib.run_script_callback(thread, script, inputs, write_callback, None)
+
+    def run_script_callback_and_decode(self, thread, script: bytes, inputs: bytes, write_callback) -> str:
+        with self._serialized_native_operation():
+            with self._current_thread_attachment(thread) as current_thread:
+                return self.decode_and_free(
+                    self.lib.run_script_callback(current_thread, script, inputs, write_callback, None),
+                    current_thread,
+                )
 
     def run_script_input_output_callback(self, thread, script: bytes, inputs: bytes, input_name: bytes, input_mime_type: bytes, input_charset: Optional[bytes], read_callback, write_callback):
-        return self.lib.run_script_input_output_callback(
-            thread, script, inputs, input_name, input_mime_type, input_charset, read_callback, write_callback, None,
-        )
+        with self._serialized_native_operation():
+            return self.lib.run_script_input_output_callback(
+                thread, script, inputs, input_name, input_mime_type, input_charset, read_callback, write_callback, None,
+            )
+
+    def run_script_input_output_callback_and_decode(self, thread, script: bytes, inputs: bytes, input_name: bytes, input_mime_type: bytes, input_charset: Optional[bytes], read_callback, write_callback) -> str:
+        with self._serialized_native_operation():
+            with self._current_thread_attachment(thread) as current_thread:
+                return self.decode_and_free(
+                    self.lib.run_script_input_output_callback(
+                        current_thread, script, inputs, input_name, input_mime_type, input_charset, read_callback, write_callback, None,
+                    ),
+                    current_thread,
+                )
 
     def cleanup(self) -> None:
-        if not self.initialized:
-            return
-        try:
-            self._tear_down_isolate()
-        finally:
+        with self._serialized_native_operation():
+            if not self.initialized:
+                return
+            if current_thread() is getattr(self, "_owner_thread", current_thread()):
+                self._tear_down_isolate()
+                self._reset()
+                return
+
+            attached_thread = self.attach_thread()
+            try:
+                self._tear_down_isolate(attached_thread)
+            except Exception:
+                try:
+                    self.detach_thread(attached_thread)
+                except Exception:
+                    pass
+                raise
             self._reset()
 
-    def _tear_down_isolate(self, suppress_errors: bool = False) -> None:
-        if self.thread is None:
+    @contextmanager
+    def _serialized_native_operation(self):
+        owner = get_ident()
+        if getattr(self, "_execution_owner", None) == owner:
+            raise DataWeaveError("Reentrant DataWeave execution is not supported.")
+        if not hasattr(self, "_resolver_lock"):
+            self._resolver_lock = Lock()
+        with self._resolver_lock:
+            self._execution_owner = owner
+            try:
+                yield
+            finally:
+                self._execution_owner = None
+
+    @contextmanager
+    def _current_thread_attachment(self, thread):
+        owner = getattr(self, "_owner_thread", current_thread())
+        if current_thread() is owner or thread is not self.thread:
+            yield thread
+            return
+
+        attached_thread = self.attach_thread()
+        primary_error = None
+        try:
+            yield attached_thread
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            try:
+                self.detach_thread(attached_thread)
+            except Exception:
+                if primary_error is None:
+                    raise
+
+    def _tear_down_isolate(self, thread=None, suppress_errors: bool = False) -> None:
+        isolate_thread = thread or self.thread
+        if isolate_thread is None:
             return
         try:
-            result = self.lib.graal_tear_down_isolate(self.thread)
+            result = self.lib.graal_tear_down_isolate(isolate_thread)
             if result != 0:
                 raise DataWeaveError(f"Failed to tear down GraalVM isolate. Error code: {result}")
         except DataWeaveError:
@@ -203,8 +368,14 @@ class NativeRuntime:
 
     def _reset(self) -> None:
         self.initialized = False
+        self._owner_thread = None
         self.thread = None
         self.isolate = None
         self.lib = None
         self.has_callback_streaming = False
         self.has_callback_input_output = False
+        self.has_module_resolver = False
+        self._module_resolver = None
+        self._module_resolver_callback = None
+        self._resolver_buffers = []
+        self._resolver_active = False

@@ -10,6 +10,7 @@ from typing import Dict, Union
 import pytest
 
 import dataweave
+import conftest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -68,6 +69,49 @@ ACCEPTED_BASELINE_MISMATCHES = {
 }
 
 DEFERRED_WRITER_CASE = "core-modules/deferred-write-should-terminate-out.json:out.json"
+RECOVERED_MODULE_CASES = {
+    "runtime/full-qualified-name-ref-out.json",
+    "runtime/import-component-alias-lib-out.json",
+    "runtime/import-lib-out.json",
+    "runtime/import-lib-with-alias-out.json",
+    "runtime/import-named-lib-out.json",
+    "runtime/import-star-out.json",
+}
+
+
+@pytest.mark.unit
+def test_tck_runtime_uses_shared_module_fixture_resolver(monkeypatch):
+    fixtures_dir = Path(__file__).resolve().parents[3] / "node" / "tests" / "tck" / "fixtures"
+    captured = {"fixture_directories": []}
+    resolver = lambda _path: "module source"
+
+    class FakeRuntime:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(conftest.dataweave, "DataWeave", FakeRuntime)
+    monkeypatch.setattr(
+        conftest.dataweave,
+        "modules_from_directory",
+        lambda directory: captured["fixture_directories"].append(directory) or resolver,
+    )
+
+    runtime = conftest._tck_runtime()
+
+    assert (fixtures_dir / "org" / "mule" / "weave" / "v2" / "libs" / "lib.dwl").is_file()
+    assert captured["fixture_directories"] == [fixtures_dir]
+    assert captured["resolve_module"] is resolver
+    assert isinstance(runtime, FakeRuntime)
+
+
+@pytest.mark.unit
+def test_module_singleton_exclusion_preserves_direct_runtime_evidence():
+    reason = EXCLUDED_CASES["runtime/module-singleton-out.json"].reason
+
+    for module in ("libA", "libB", "libSource"):
+        path = f"org::mule::weave::v2::libs::singleton::{module}"
+        assert f"runtime cannot resolve {path}" in reason
+        assert f"shared fixture lacks {path}" in reason
 
 
 def tck_params():
@@ -452,12 +496,11 @@ def test_only_declared_case_identifiers_are_excluded():
     """Catches broad exclusion matching that can skip unrelated failures."""
     assert validate_exclusions(EXCLUDED_CASES, SCENARIOS) == []
     assert exclusion_for("unknown-case") is None
-    exclusion = exclusion_for("runtime/import-lib-out.json")
-    assert exclusion.case_identifier == "runtime/import-lib-out.json"
-    assert exclusion.category == "unsupported-dw-module-resolution"
-    assert len(EXCLUDED_CASES) == 37
+    assert RECOVERED_MODULE_CASES.isdisjoint(EXCLUDED_CASES)
+    assert len(EXCLUDED_CASES) == 31
 
 
+@pytest.mark.unit
 def test_exclusion_registry_uses_the_inventory_categories():
     """Catches category collapse that would conceal the unsupported boundary."""
     categories = {}
@@ -467,7 +510,7 @@ def test_exclusion_registry_uses_the_inventory_categories():
     assert categories == {
         "unavailable-classpath-test-resource": 2,
         "unavailable-java-module": 11,
-        "unsupported-dw-module-resolution": 24,
+        "unsupported-dw-module-resolution": 18,
     }
 
 
