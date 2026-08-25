@@ -43,13 +43,18 @@ In-memory map of module paths to source code:
 ```typescript
 import { DataWeave, modulesFromMap } from 'dataweave-native';
 
+// Inside an async function so `await dw.cleanup()` is available.
 const dw = new DataWeave({
   resolveModule: modulesFromMap({
     'org/test/lib.dwl': '%dw 2.0\nfun foo() = 42',
   }),
 });
 dw.initialize();
-const result = dw.run('import org::test::lib\n%dw 2.0\n---\nlib::foo()');
+try {
+  const result = dw.run('import org::test::lib\n%dw 2.0\n---\nlib::foo()');
+} finally {
+  await dw.cleanup();
+}
 ```
 
 Best for: Small, in-memory module sets; testing and development.
@@ -61,13 +66,18 @@ Read modules from a directory tree on disk:
 ```typescript
 import { DataWeave, modulesFromDirectory } from 'dataweave-native';
 
+// Inside an async function so `await dw.cleanup()` is available.
 const dw = new DataWeave({
   resolveModule: modulesFromDirectory('./my-modules'),
 });
 dw.initialize();
 
-// Resolves "org/test/lib.dwl" → reads "./my-modules/org/test/lib.dwl"
-const result = dw.run('import org::test::lib\n%dw 2.0\n---\nlib::foo()');
+try {
+  // Resolves "org/test/lib.dwl" → reads "./my-modules/org/test/lib.dwl"
+  const result = dw.run('import org::test::lib\n%dw 2.0\n---\nlib::foo()');
+} finally {
+  await dw.cleanup();
+}
 ```
 
 Best for: Development and file-based module repositories.
@@ -89,7 +99,11 @@ const dw = new DataWeave({
   resolveModule: resolver,
 });
 dw.initialize();
-const result = dw.run('import org::mule::weave::core::Strings\n%dw 2.0\n---\nStrings::capitalize("hello")');
+try {
+  const result = dw.run('import org::mule::weave::core::Strings\n%dw 2.0\n---\nStrings::capitalize("hello")');
+} finally {
+  await dw.cleanup();
+}
 ```
 
 **Note:** `modulesFromJars()` returns a `Promise<ModuleResolver>` because JAR extraction must complete first. The returned resolver itself is synchronous and can be used repeatedly.
@@ -99,6 +113,8 @@ Best for: Packaged dependencies and distributed libraries.
 ### composeResolvers
 
 Combine multiple resolvers with fallback chain (tries each in order, returns first match):
+
+*Abbreviated fragment — see the first example for the required `try/finally { await dw.cleanup() }` lifecycle.*
 
 ```typescript
 import { DataWeave, composeResolvers, modulesFromMap, modulesFromDirectory, modulesFromJars } from 'dataweave-native';
@@ -131,6 +147,7 @@ Best for: Layered resolution with fallbacks (overrides, shared libraries, vendor
 When a module cannot be resolved:
 
 ```typescript
+// Inside an async function so `await dw.cleanup()` is available.
 const dw = new DataWeave({
   resolveModule: modulesFromMap({
     // Only 'org/test/lib.dwl' is available
@@ -138,15 +155,19 @@ const dw = new DataWeave({
 });
 dw.initialize();
 
-const result = dw.run(`
-  %dw 2.0
-  import org::missing::module  // Not found
-  ---
-  missing::something()
-`);
+try {
+  const result = dw.run(`
+    %dw 2.0
+    import org::missing::module  // Not found
+    ---
+    missing::something()
+  `);
 
-if (!result.success) {
-  console.error(result.error);  // "Unable to resolve module with identifier ..."
+  if (!result.success) {
+    console.error(result.error);  // "Unable to resolve module with identifier ..."
+  }
+} finally {
+  await dw.cleanup();
 }
 ```
 
@@ -157,23 +178,28 @@ The resolver returns `null`, and the engine reports a compile-time error.
 When the resolver encounters file system errors (unreadable files, permission denied, etc.), the resolver throws an error. This error is caught internally by the native layer and the callback returns `null` — indistinguishable from "module not found" to the DataWeave compiler:
 
 ```typescript
+// Inside an async function so `await dw.cleanup()` is available.
 const dw = new DataWeave({
   resolveModule: modulesFromDirectory('./my-modules'),
 });
 dw.initialize();
 
-const result = dw.run(`
-  %dw 2.0
-  import org::test::lib
-  ---
-  lib::foo()
-`);
+try {
+  const result = dw.run(`
+    %dw 2.0
+    import org::test::lib
+    ---
+    lib::foo()
+  `);
 
-if (!result.success) {
-  // result.error is the same generic message as "module not found":
-  console.error(result.error);  // "Unable to resolve module with identifier ..."
-  // The actual error details (permissions, encoding, etc.) are not available
-  // in the result object; see "Debugging" below for how to surface them.
+  if (!result.success) {
+    // result.error is the same generic message as "module not found":
+    console.error(result.error);  // "Unable to resolve module with identifier ..."
+    // The actual error details (permissions, encoding, etc.) are not available
+    // in the result object; see "Debugging" below for how to surface them.
+  }
+} finally {
+  await dw.cleanup();
 }
 ```
 
@@ -265,6 +291,8 @@ mvn dependency:copy \
 Future releases may add `npm run dw-deps` for automatic resolution. Check your project's `package.json`.
 
 Then pass JAR paths to `modulesFromJars()`:
+
+*Abbreviated fragment — see the first example for the required `try/finally { await dw.cleanup() }` lifecycle.*
 
 ```typescript
 const resolver = await modulesFromJars([
