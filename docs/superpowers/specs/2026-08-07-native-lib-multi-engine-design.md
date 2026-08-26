@@ -1,40 +1,34 @@
-# Design: Multiple Isolated DataWeave Engines per Process (native-lib, Node)
+# Design: Multiple Isolated DataWeave Engines per Process (native-lib — Node & Python)
 
-**Date:** 2026-08-07 (consolidated 2026-08-25)
+**Date:** 2026-08-07 (consolidated 2026-08-25; unified Node + Python 2026-08-26)
 **Status:** Approved and implemented on `w-23692110-multi-engine-design` (PR #157)
 **Tracks:** GUS [W-23692110](https://gus.my.salesforce.com/lightning/r/ADM_Work__c/a07EE00002gS7SOYA0/view) — "Native-lib: support multiple DataWeave engine instances with independent module resolvers"
 **Related:** [docs/superpowers/specs/2026-08-04-nodejs-external-modules-design.md](./2026-08-04-nodejs-external-modules-design.md) (the design during which this limitation was discovered)
 
-> **About this document.** This is the single, consolidated design for the multi-engine Node
-> binding. It describes the **final state** of the feature as shipped on PR #157. The core
-> feature (object-level engines behind opaque handles) is unchanged from the original design;
-> the substantial addition is the **concurrency & lifecycle model** (§6), which was hardened
-> across a long series of code reviews. Those hardening decisions are folded into the relevant
-> sections here rather than kept as separate per-round documents; a provenance map for git
-> archaeology lives in the [Appendix](#appendix-hardening-provenance). The product-facing
-> `DataWeave` class is pre-GA, so several internal contracts (async `cleanup()`, the removed
-> `*_with_resolver` C ABI) changed during hardening without a compatibility ceremony.
-
-> **Superseded Python notes (update 2026-08-26).** This document is the *Node* design and
-> assumed the Python binding would stay on the old isolate-per-instance model behind the
-> retained legacy singleton entrypoints (`ScriptRuntime.getInstance()` + `run_script` /
-> `run_script_callback` / `run_script_input_output_callback`). That is no longer true: the
-> `ScriptRuntime` singleton and all three legacy C entrypoints have been **removed**, and both
-> the Node and Python bindings now drive the *same* shared-isolate + handle-addressed-engine
-> model through the identical `*_engine` C ABI. Python uses a module-level reference-counted
-> isolate with one engine handle per `DataWeave` instance. The Python-specific claims flagged
-> inline below are corrected in place; see
-> [docs/superpowers/specs/2026-08-26-python-multi-engine-unification-design.md](./2026-08-26-python-multi-engine-unification-design.md)
-> for the design that superseded them. The Node sections remain accurate as shipped.
+> **About this document.** This is the single, consolidated design for the multi-engine
+> `native-lib` feature across **both** consumer bindings — Node and Python. It describes the
+> **final state** as shipped on PR #157. The core feature (object-level engines behind opaque
+> handles, one shared GraalVM isolate) is common to both bindings and is driven through the
+> identical `*_engine` C ABI. Two substantial bodies of work are folded in here rather than kept
+> as separate documents: the Node **concurrency & lifecycle model** (§6), hardened across a long
+> series of code reviews, and the **Python unification** (§7) that removed the `ScriptRuntime`
+> singleton and moved Python off its former isolate-per-instance model onto the shared model.
+> A provenance map for git archaeology lives in the [Appendix](#appendix-hardening-provenance).
+> The product-facing `DataWeave` classes are pre-GA, so several internal contracts (async Node
+> `cleanup()`, the removed `*_with_resolver` and legacy-singleton C ABI) changed during this work
+> without a compatibility ceremony.
 
 ## 1. Goal
 
-Let multiple `DataWeave` instances coexist in one Node process, each with its own module
-resolver and script cache, so that different resolvers never collide. Before this change the
-second `new DataWeave({ resolveModule })` in a process silently kept the first instance's
-resolver. The isolation must hold with instances living in different Worker threads and being
-created, run, and torn down concurrently, without leaking native resources or wedging the
-shared GraalVM isolate.
+Let multiple `DataWeave` instances coexist in one process — in **either** binding — each with its
+own module resolver and script cache, so that different resolvers never collide. Before this
+change the second `new DataWeave({ resolveModule })` in a Node process silently kept the first
+instance's resolver, and Python achieved isolation only by paying for a whole GraalVM isolate per
+instance. The isolation must hold with instances created, run, and torn down concurrently
+(including across Node Worker threads and Python worker threads), without leaking native resources
+or wedging the shared GraalVM isolate. A secondary goal, realized by the 2026-08-26 unification, is
+that both bindings drive **one** shared Java engine layer through the **same** C ABI, so there is a
+single mental model and a single source of truth to maintain.
 
 ## 2. Background
 
@@ -49,68 +43,94 @@ resolver-backed `run()` first won.
 (`native-cli/src/main/scala/org/mule/weave/dwnative/NativeRuntime.scala:50-60`) already builds one
 independent `DataWeaveScriptingEngine` + `CompositeWeaveResourceResolver` per instance — there is
 no shared static state there. GraalVM Java statics are scoped per-isolate, which is also why the
-Python binding — which *at the time of this design* used one GraalVM isolate per `DataWeave()`
-instance — got resolver isolation "for free." The limitation was specific to `native-lib`'s
-deliberate Java static singleton plus the Node C addon's global resolver bridge. (Python has
-since been unified onto the shared-isolate + handle model; see the superseded-notes banner above.)
+Python binding — which **originally** used one GraalVM isolate per `DataWeave()` instance — got
+resolver isolation "for free." The limitation was specific to `native-lib`'s deliberate Java static
+singleton plus the Node C addon's global resolver bridge.
+
+**Why unification followed.** The Node change (this PR's original scope) fixed Node but, for
+backward compatibility, kept the `ScriptRuntime` singleton (`getInstance()`/`defaultInstance`) and
+three legacy singleton C entrypoints (`run_script`, `run_script_callback`,
+`run_script_input_output_callback`) because the Python binding still used them. A later rebase
+exposed a collision: master had shipped a Python module-resolver feature calling a
+`run_script_with_resolver` entrypoint that this branch's ABI redesign removed. Rather than maintain
+two isolation models (Python isolate-per-instance vs. Node shared-isolate + handles) and a
+compatibility shim, the maintainer chose to **unify**: remove the singleton entirely and put both
+bindings on the shared-isolate + handle-addressed-engine model through the identical `*_engine`
+ABI (§7).
 
 ## 3. Scope
 
 **In scope:**
 - `native-lib` Java layer: turn `ScriptRuntime` from a static singleton into a handle-addressable
-  registry of instances, each with its own engine + resolver.
+  registry of instances, each with its own engine + resolver; **remove** `getInstance()` /
+  `defaultInstance` so `ScriptRuntime` is purely handle-addressed.
 - Node C addon (`native-lib/node/src/addon.c`): per-handle resolver bridge state instead of one
   process-global bridge, plus the concurrency & lifecycle machinery in §6.
 - Node TypeScript layer (`ffi.ts`, `dataweave.ts`, `stream.ts`, `reader.ts`): each `DataWeave`
   instance owns an engine handle for its whole lifecycle.
+- Python layer (`native-lib/python/src/dataweave/{native,runtime,models}.py`): move off
+  isolate-per-instance and off the legacy singleton onto a module-level reference-counted shared
+  isolate with one engine handle per `DataWeave` instance (§7). The public Python API is unchanged.
 
-**Out of scope (as of this Node design):**
-- Python binding changes. Python already achieved isolation via one isolate per instance;
-  unifying it onto the same handle-based API was left as a follow-up. **(Since completed —
-  see the superseded-notes banner above and the 2026-08-26 Python unification design.)**
+**Out of scope:**
 - Separate GraalVM isolates per engine — rejected as the isolation mechanism (see §5).
 - Solving streaming/transform + **custom-module** resolution across the background-thread
   boundary. Streaming against a resolver-backed engine still fails closed (returns "not found")
-  for custom modules reached from a background worker thread; built-in modules continue to
-  resolve normally in all cases. This is a pre-existing, documented hazard, not introduced here.
+  for custom modules reached from a background worker thread, in **both** bindings; built-in
+  modules continue to resolve normally in all cases. This is a pre-existing, documented hazard,
+  deliberately kept identical across bindings, not introduced here.
 
 ## 4. Definitions
 
-- **Isolate** — the single process-wide GraalVM isolate. All engines share it. Its lifetime is
-  governed by `g_ref_count` (§6.1).
+- **Isolate** — the single process-wide GraalVM isolate. All engines share it. In Node its lifetime
+  is governed by `g_ref_count` (§6.1); in Python by `_isolate_ref_count` (§7).
 - **Engine** — a `ScriptRuntime` Java object (own resolver + compiled-script cache) addressed by
   an opaque `long long` handle. Many engines per isolate.
-- **Init reference** — the `g_ref_count` unit an env acquires on each `initialize()` and releases
-  on the matching `cleanup()` (or on env death). Distinct from an engine handle.
+- **Init reference / isolate ref** — the reference-count unit a binding acquires per engine on
+  `initialize()` and releases on `cleanup()` (or on owner death). Distinct from an engine handle.
 - **Op** — one in-flight `run()`/`runStreaming()`/`runTransform()` native call.
-- **Owner env / owner thread** — the `napi_env` (and its JS thread) that created a given engine
+- **Owner env / owner thread** — the `napi_env` (and its JS thread) that created a given Node engine
   or init reference. `napi_env`/`napi_ref`/`napi_deferred`/`napi_threadsafe_function` are
-  thread-affine; env-affine calls only ever happen on the owner thread.
+  thread-affine; env-affine calls only ever happen on the owner thread. (Python has no `napi_env`;
+  its thread model is §7.)
 
 ## 5. Alternatives Considered (isolation mechanism)
 
 **Separate GraalVM isolates per engine (rejected).** The most complete isolation (own heap, own
-JIT, own Java statics), and what Python originally did per-instance (before the 2026-08-26
-unification moved Python onto this shared-isolate model too). Rejected for Node because `addon.c`
-assumed exactly one isolate as global state; supporting N isolates means restructuring all of
-that into per-handle structs, and isolate teardown is fragile (`graal_tear_down_isolate` blocks
-until every attached thread reaches a safepoint). It is unnecessarily heavy for the actual need:
-independent module resolution and script caching, not full JVM-level sandboxing.
+JIT, own Java statics), and what Python originally did per-instance. Rejected as the unifying model
+for two reasons:
 
-**Chosen: object-level engines in one shared isolate.** Multiple `ScriptRuntime` Java objects,
-each with its own resolver and compiled-script cache, all in the single existing GraalVM isolate,
-addressed by an opaque handle. Mirrors what `native-cli` already does and requires no change to
-isolate lifecycle management for the *feature* — though it does require the careful
-reference-and-teardown coordination in §6, because now the isolate is shared by independently
-created and destroyed engines across threads.
+- **Node cannot cheaply move to isolate-per-engine.** `addon.c` assumed exactly one isolate as
+  global state; supporting N isolates means restructuring all of that into per-handle structs, and
+  isolate teardown is fragile — `graal_tear_down_isolate` blocks until every attached thread
+  reaches a safepoint, and Node's streaming workers deliver chunks via a `napi_threadsafe_function`
+  that needs the libuv event loop to keep running. Multiplying that per-isolate is strictly worse
+  and discards the hardening work in §6.
+- It is unnecessarily heavy for the actual need: independent module resolution and script caching,
+  not full JVM-level sandboxing.
 
-## 6. Concurrency & Lifecycle Model
+**Chosen: object-level engines in one shared isolate (for both bindings).** Multiple `ScriptRuntime`
+Java objects, each with its own resolver and compiled-script cache, all in the single existing
+GraalVM isolate, addressed by an opaque handle. Mirrors what `native-cli` already does and requires
+no change to isolate lifecycle management for the *feature*. Node requires the careful
+reference-and-teardown coordination in §6 because the isolate is shared by independently created and
+destroyed engines across threads. **Python can adopt the same model trivially**: its ctypes calls
+are synchronous and it owns its stream-worker threads directly, so it needs none of Node's
+`PENDING_WAIT`/adoption/retry machinery — just a reference count and a synchronous
+drain-before-teardown (§7).
 
-This section is the heart of the design. It governs how the shared isolate, per-engine registry
-entries, and in-flight ops coordinate so that no thread ever attaches to, executes on, or
-resolves a module against a torn-down isolate or a freed engine record, and no native resource
-leaks — under concurrent creation, execution, abandonment (env death without `cleanup()`), and
-teardown across Worker threads.
+**Accepted trade-off (Python).** Python instances in one process now share one isolate's heap
+instead of having separate heaps. This is weaker memory isolation, relevant only if
+mutually-untrusted scripts run in one process expecting heap-level separation. The maintainer
+accepted this in exchange for a single maintained model.
+
+## 6. Node Concurrency & Lifecycle Model
+
+This section governs how the shared isolate, per-engine registry entries, and in-flight ops
+coordinate in the **Node** binding so that no thread ever attaches to, executes on, or resolves a
+module against a torn-down isolate or a freed engine record, and no native resource leaks — under
+concurrent creation, execution, abandonment (env death without `cleanup()`), and teardown across
+Worker threads. (Python's simpler model is §7.)
 
 All shared C state is read and written **only under `g_mutex`**, with two documented exceptions:
 the cheap top-of-function `!g_initialized` fast-path read (a benign optimization; the
@@ -345,35 +365,112 @@ because a boolean cannot represent the window during which `cleanup()` has start
   `startRejected` boolean, not a value sentinel, so `Promise.reject(undefined)` propagates
   correctly.
 
-## 7. Architecture (layer map)
+## 7. Python Lifecycle & Teardown Model
 
-### Layer 1 — Java (`native-lib/src/main/java/org/mule/weave/lib/`)
+Python drives the **same** shared Java engine layer and the **same** `*_engine` C ABI as Node, but
+its isolate/thread glue (`native-lib/python/src/dataweave/native.py`) is much simpler than §6:
+ctypes calls are synchronous and Python owns its stream-worker threads directly, so it needs none
+of Node's `PENDING_WAIT`/adoption/retry machinery — just a reference count and a synchronous
+drain-before-teardown. The **public Python API is unchanged** by the unification.
+
+### 7.1 Shared state and the reference-count invariant
+
+Module-level state in `native.py`, all mutations under one module lock (`_isolate_lock`):
+`_lib`, `_lib_path`, `_isolate` (the single process-wide isolate, or None), `_isolate_ref_count`.
+
+> **Invariant:** `_isolate_ref_count` == number of live engines across all `DataWeave` instances,
+> and the isolate exists iff the count > 0.
+
+Each `DataWeave` instance owns exactly one engine handle and contributes exactly one to the
+refcount. The module lock guards only isolate refcount/create/teardown; it is **not** held during
+script execution, so one engine's long-running script never blocks another engine's
+`initialize()`/`run()`. Different instances can run concurrently, each on its own attached thread in
+the shared isolate.
+
+### 7.2 No persistent isolate-thread attachment (attach-on-demand)
+
+`graal_tear_down_isolate` blocks forever waiting for every *other* GraalVM-attached thread to reach
+a safepoint. If the isolate's creating ("bootstrap") thread stayed attached for the isolate's life,
+a last-release teardown running on a *different* OS thread — e.g. an `atexit`/interpreter-shutdown
+cleanup on the main thread after the first `run()` happened on a worker, or two instances torn down
+from different threads — would block forever. The binding therefore holds **no persistent
+attachment**, mirroring the Node and Go bindings:
+
+- **`_acquire_isolate`** (first ref): `graal_create_isolate`, then **immediately
+  `graal_detach_thread` on the bootstrap thread** (a nonzero return is surfaced as a
+  `DataWeaveError`). No IsolateThread is retained.
+- **Every synchronous native call** (`run`, `run_callback`, `run_input_output_callback`,
+  `create_engine[_with_resolver]`, `destroy_engine`) attaches a **fresh** thread on demand, uses it
+  for the whole call, and detaches it when done (`_current_thread_attachment`). A stream-worker
+  thread that has already attached its own IsolateThread passes it through unchanged.
+- **`_release_isolate`** (last ref): attaches a fresh thread solely to call
+  `graal_tear_down_isolate`, then clears the globals.
+
+Because nothing stays attached between calls, teardown never blocks on a phantom attachment
+regardless of which OS thread performs the last release.
+
+### 7.3 Instance lifecycle
+
+- **`initialize()`** — under the lock, `_acquire_isolate` (create-on-first-ref + bootstrap detach,
+  `_isolate_ref_count += 1`); then `create_engine()` or `create_engine_with_resolver(ctx, trampoline)`,
+  storing the returned `handle` on the instance. If `create_engine` fails after the isolate ref was
+  taken, the instance releases the ref (tearing down if it was the only one) and — when a resolver
+  was installed before `initialize()` — unregisters its resolver token, so a failed init leaks
+  nothing (neither an isolate ref nor a `_resolver_registry` entry).
+- **`run` / `run_streaming` / `run_callback` / `run_transform`** — route through the `*_engine`
+  entrypoints with the instance's `handle`, per §7.2's attachment rules. Per-instance execution is
+  serialized (`_serialized_native_operation`); different instances run concurrently.
+- **`cleanup()`** — drain *this instance's* stream workers (signal cancel + **join** the threads;
+  synchronous, Python owns them, so no event loop and no deadlock); `destroy_engine(handle)`; remove
+  the resolver-map entry; clear the instance handle; then release the isolate ref (`-= 1`), tearing
+  the isolate down on the last release. `cleanup()` on an uninitialized/already-cleaned instance is a
+  no-op; double-`cleanup()` releases the ref only once (guarded by the instance handle being
+  cleared). If `destroy_engine` throws, the isolate ref is still released so a throwing destroy
+  cannot strand the isolate; the error is re-raised after the release.
+
+**Why this stays simple:** teardown happens only on the *last* release, by which point every
+instance has already joined its own workers, so the isolate has no attached worker threads when
+`graal_tear_down_isolate` runs.
+
+### 7.4 Resolver dispatch and the streaming/resolver hazard
+
+- `create_engine_with_resolver` passes an opaque `ctx` (a Python-allocated monotonic token
+  registered in `_resolver_registry[token] = self` *before* the create call, so no resolve callback
+  can fire for a handle before its map entry exists). Python registers **one** C trampoline
+  (`RESOLVE_MODULE_CALLBACK`); GraalVM calls it with `(thread, ctx, module_path)`, and it dispatches
+  to the engine's Python resolver via the registered token, returning the source-buffer pointer.
+  This is the Python analog of Node's per-handle bridge — same `ctx` concept, identical Java/ABI
+  side.
+- **Streaming / transform + custom modules — parity with Node (out of scope):** the trampoline
+  resolves custom modules only when invoked on the engine's owner thread and **fails closed**
+  ("not found") on a background stream-worker thread. Built-in modules resolve normally everywhere;
+  synchronous `run()` with a resolver resolves custom modules fully. This is a conservative parity
+  choice (identical behavior across bindings), not a hard Python limitation.
+
+## 8. Architecture (layer map)
+
+### Layer 1 — Java (`native-lib/src/main/java/org/mule/weave/lib/`) — shared by both bindings
 
 - **`ScriptRuntime.java`** — from static singleton to per-instance + a
   `ConcurrentHashMap<Long, ScriptRuntime>` registry with `register`/`get`/`destroy` and an
   `AtomicLong` handle allocator. The resolver is bound once at construction (immutable for the
   instance's lifetime); the `static setResolver` write-once mutation is removed.
   `compositeResolver()` / `createModuleComponentsFactory()` become instance methods.
-  *(As originally shipped, `getInstance()` was kept returning a lazily-created default
-  instance so the resolver-less legacy entrypoints used by Python stayed untouched. Both
-  `getInstance()` and those legacy entrypoints have since been **removed** — Python now uses
-  the handle-addressed `*_engine` ABI. See the superseded-notes banner above.)*
+  `getInstance()` / `defaultInstance` are **removed** — `ScriptRuntime` is purely handle-addressed.
 - **`CallbackWeaveResourceResolver.java`** — stores a `PointerBase ctx` alongside the callback,
   forwarded on every `callback.invoke(...)`; constructor `(ResolveModuleCallback, PointerBase ctx)`.
-- **`NativeCallbacks.java`** — `ResolveModuleCallback` gains a `ctx` parameter
+- **`NativeCallbacks.java`** — `ResolveModuleCallback` is the 3-arg ctx form
   (`invoke(IsolateThread, PointerBase ctx, CCharPointer modulePath)`), mirroring the existing
   `WriteCallback`/`ReadCallback` ctx idiom. This is what lets one shared native callback dispatch
-  to the correct per-handle JS resolver on the C side.
-- **`NativeLib.java`** — adds handle-based lifecycle + execution entrypoints (`create_engine`,
-  `create_engine_with_resolver`, `destroy_engine`, `run_script_engine`,
+  to the correct per-handle resolver on the C/Python side. The old 2-arg form is gone.
+- **`NativeLib.java`** — exposes only the handle-based lifecycle + execution entrypoints
+  (`create_engine`, `create_engine_with_resolver`, `destroy_engine`, `run_script_engine`,
   `run_script_callback_engine`, `run_script_input_output_callback_engine`) resolving via
-  `ScriptRuntime.get(handle)`. *(As originally shipped, the legacy singleton entrypoints
-  (`run_script`, `run_script_callback`, `run_script_input_output_callback`) were preserved
-  unchanged for Python; they have since been **removed** — Python now consumes the `*_engine`
-  set too. See the superseded-notes banner above.)* The old `*_with_resolver` entrypoints are
-  **removed** (see §9).
+  `ScriptRuntime.get(handle)`. The three legacy singleton entrypoints (`run_script`,
+  `run_script_callback`, `run_script_input_output_callback`) and the old `*_with_resolver`
+  entrypoints are **removed** (see §10).
 
-### Layer 2 — C addon (`native-lib/node/src/addon.c`)
+### Layer 2 — Node C addon (`native-lib/node/src/addon.c`)
 
 - Per-handle resolver bridge state in `g_bridges` (§6.3) instead of a process-global bridge.
 - **Resolver dispatch:** `createEngineWithResolver` passes the bridge record's address as the
@@ -384,15 +481,15 @@ because a boolean cannot represent the window during which `cleanup()` has start
   found" if `resolve_module_callback` is reached from a non-owner thread (e.g. a streaming worker).
 - All of §6's machinery: `g_active_ops`, the `TEARDOWN_*` state machine, `g_teardown_cancelled`,
   `g_teardown_needed`, the per-env `g_env_recs` list, the `g_bridges` list, admission pinning, and
-  the split finalize.
+  the split finalize. The legacy `dw_napi_run_script` path and its `run_script` dlsym are removed.
 - N-API methods: `createEngine`, `createEngineWithResolver`, `destroyEngine`, and handle-taking
   `runScriptEngine`, `runScriptStreamingEngine`, `runScriptTransformEngine`.
 
 ### Layer 3 — Node TypeScript (`native-lib/node/src/`)
 
 - **`ffi.ts`** — `createEngine`, `createEngineWithResolver`, `destroyEngine`, and handle-taking
-  `runScriptEngine`, `runScriptStreamingEngine`, `runScriptTransformEngine`. `runWithResolver`
-  removed.
+  `runScriptEngine`, `runScriptStreamingEngine`, `runScriptTransformEngine`. `runScript` /
+  `runWithResolver` removed.
 - **`dataweave.ts`** — `DataWeave` owns a `private engineHandle`, the three-state lifecycle
   machine, and the module-level singleton/exit-hook/coalescing logic (§6.4). `initialize()` calls
   `ffi.createEngineWithResolver(this.resolveModule)` or `ffi.createEngine()`; run methods route
@@ -402,8 +499,20 @@ because a boolean cannot represent the window during which `cleanup()` has start
   `createChunkReader` pre-buffers async inputs (the native read callback is synchronous and cannot
   await), which is why `runTransform` re-checks readiness after it.
 
-## 8. Data Flow
+### Layer 4 — Python (`native-lib/python/src/dataweave/`)
 
+- **`native.py` (`NativeRuntime`)** — the shared-model glue (§7): module-level refcounted isolate,
+  attach-on-demand thread handling, the 3-arg ctx resolver trampoline + `_resolver_registry`, and
+  the `*_engine` + `create_engine[_with_resolver]` + `destroy_engine` symbol bindings.
+- **`runtime.py` (`DataWeave`)** — `initialize()` acquires an isolate ref + creates one engine and
+  stores its `handle`; run methods route through the `*_engine` entrypoints with that handle;
+  `cleanup()` drains this instance's stream workers, `destroy_engine(handle)`, releases the ref.
+  The public API surface is unchanged.
+- **`models.py`** — `RESOLVE_MODULE_CALLBACK` ctypes signature carries the `ctx` argument.
+
+## 9. Data Flow
+
+**Node:**
 ```
 new DataWeave({ resolveModule: A }).initialize()
   → ffi.initialize()                       // env init record for this env: init_refs 0→1, g_ref_count++
@@ -425,69 +534,115 @@ new DataWeave({ resolveModule: B }).initialize()  →  handle_B, bridge_B (indep
 dwB.run(...)  →  resolves via resolver B only; A's cache untouched; no cross-talk
 ```
 
-## 9. Error Handling & Backward Compatibility
+**Python:**
+```
+dwA = DataWeave(resolve_module=A); dwA.initialize()
+  → lock: _isolate None → graal_create_isolate() + detach bootstrap thread; ref 0→1
+  → create_engine_with_resolver(ctx=tokenA, trampoline); registry[tokenA]=dwA; dwA._handle = handleA
 
-- **Module not found / resolver throws:** resolver returns `null` → composite resolver falls
-  through → standard DataWeave "unable to resolve module" error (unchanged, scoped per-handle).
-- **Wrong-thread resolver invocation:** per-handle `owner` check fails closed to "not found"
-  rather than touching `napi_env` cross-thread.
+dwB = DataWeave(resolve_module=B); dwB.initialize()
+  → lock: _isolate exists → reuse; ref 1→2
+  → create_engine_with_resolver(ctx=tokenB, trampoline); registry[tokenB]=dwB
+
+dwA.run("... import custom/lib ...")
+  → attach a fresh thread on demand → run_script_engine(handleA, script, inputs) → detach
+  → Java engine A: ClassLoader miss → callback(thread, ctx=tokenA, "custom/lib")
+  → trampoline: registry[tokenA] → resolver A → source; A's cache used, B untouched
+
+dwA.cleanup()  → join dwA workers; destroy_engine(handleA); ref 2→1 (isolate stays)
+dwB.cleanup()  → join workers; destroy_engine(handleB); ref 1→0 → attach fresh thread + graal_tear_down_isolate(); _isolate=None
+```
+
+## 10. Error Handling & Backward Compatibility
+
+- **Module not found / resolver throws:** resolver returns `null`/non-str → composite resolver
+  falls through → standard DataWeave "unable to resolve module" error (unchanged, scoped
+  per-handle).
+- **Wrong-thread resolver invocation:** per-handle/per-token `owner` check fails closed to "not
+  found" rather than touching the host callback cross-thread — identical in both bindings.
 - **Invalid/unknown/destroyed handle:** `ScriptRuntime.get(handle)` returns null → the entrypoint
   returns `{"success":false,"error":"Unknown engine handle"}` (resolved for async ops, returned as
-  the JSON string for sync `run()`), never an NPE.
-- **Admission / argument / allocation failures:** synchronous `napi_throw_error` (generic Error);
-  worker-thread OOM → terminal error JSON. Never `napi_reject_deferred` (absent from `addon.c`).
-- **Python binding:** *(as of this Node design)* zero changes — it never called the removed
-  `*_with_resolver` entrypoints and continued on `getInstance()`. **(No longer true: Python has
-  since been ported to the handle-addressed `*_engine` ABI and `getInstance()` is gone — see the
-  superseded-notes banner above.)**
-- **Node, resolver-less / single-resolver usage:** behaves identically; the new code path is a
-  functional superset.
+  the JSON string for sync `run()`), never an NPE/crash.
+- **Node admission / argument / allocation failures:** synchronous `napi_throw_error` (generic
+  Error); worker-thread OOM → terminal error JSON. Never `napi_reject_deferred` (absent from
+  `addon.c`).
+- **Python init failures:** isolate-create failure → `DataWeaveError`, refcount not incremented,
+  `_isolate` stays None; `create_engine` failure after isolate create → release the ref (tearing
+  down if this call created it) and unregister any resolver token, then raise. `run`/stream after
+  `cleanup()` → instance guard raises `DataWeaveError` (handle already cleared).
+- **Teardown failure (Python `graal_tear_down_isolate` returns nonzero):** surface a warning and
+  re-raise `DataWeaveError`, and clear the isolate globals (`_lib`/`_lib_path`/`_isolate` → None,
+  count already 0) so the next `initialize()` builds a fresh isolate rather than reusing one whose
+  teardown just failed.
 - **Intended breaking changes (pre-GA, no shims):** the dwlib C ABI drops the exported
-  `run_script_with_resolver` / `run_script_callback_with_resolver` /
-  `run_script_input_output_callback_with_resolver` entrypoints and replaces them with the
-  `*_engine` set, and adds a `ctx` parameter to `ResolveModuleCallback`. dwlib is consumed by this
-  repo's own Python and Node bindings in lockstep. `DataWeave.cleanup()` changes from `void` to
-  `Promise<void>`. These are documented in the PR, not shimmed.
+  `run_script` / `run_script_callback` / `run_script_input_output_callback` legacy singleton
+  entrypoints **and** the `run_script[...]_with_resolver` entrypoints, keeping only the `*_engine`
+  + `create_engine[_with_resolver]` + `destroy_engine` set; `ResolveModuleCallback` is 3-arg only;
+  Java `getInstance()`/`defaultInstance` are removed. dwlib is consumed by this repo's own Python
+  and Node bindings in lockstep. Node `DataWeave.cleanup()` changed from `void` to `Promise<void>`.
+  The **Python public API is unchanged** — only `native.py`'s internal ABI changed.
 
-## 10. Testing Strategy
+## 11. Testing Strategy
 
 - **Java unit** (`native-lib:test`): two `ScriptRuntime` instances with different in-memory
-  resolvers each resolve only their own module; `destroy()` removes an instance. (The
-  `@CEntryPoint` methods can't be driven from a hosted JVM — GraalVM word types don't box — so
-  handle-based entrypoint coverage lives at the Node integration layer.)
+  resolvers each resolve only their own module; `destroy()` removes an instance; `getInstance()`
+  tests removed. (The `@CEntryPoint` methods can't be driven from a hosted JVM — GraalVM word types
+  don't box — so handle-based entrypoint coverage lives at the binding integration layers.)
 - **Node integration** (`native-lib:nodeTest`, real addon, `vi.mock` of `ffi` forbidden): the core
   W-23692110 regression (two independent resolvers in one process); unknown/destroyed-handle
   envelopes for all three run paths; the deadlock regression (active stream + `cleanup()` +
-  concurrent `run()` resolves within a bounded timeout); same-instance lifecycle
-  (init/run/transform during the cleanup window); ref-count-proxy teardown assertions (a
-  subsequent raw engine call throwing `/not initialized/` proves the isolate reached zero refs);
-  and `worker_threads` Worker lifecycle — resolver-backed and resolver-less engines in a Worker,
-  per-Worker resolver binding, **normal Worker exit without `cleanup()`** (the abandonment /
-  init-reference-release proof: N Workers each `initialize()` + create N≥3 engines and exit; the
-  main thread's engine must survive and final teardown must reach exactly zero),
-  `Worker.terminate()` mid-life, and explicit in-Worker `cleanup()`.
-- **Unit** (`ffi` mocked, no dwlib): `DataWeave.initialize()` ref-count/rollback safety; module
-  singleton poisoning recovery; module + instance `cleanup()` coalescing; `stream.ts` rejection
-  propagation (parked consumer wakes and throws; buffered-then-reject drains first); `runTransform`
-  post-pre-buffer re-check; `doCleanup()` releasing the init reference even when `destroyEngine`
-  throws.
-- **Documented posture on non-forceable paths.** Allocator/N-API fault injection and exact
+  concurrent `run()` resolves within a bounded timeout); same-instance lifecycle; ref-count-proxy
+  teardown assertions; and `worker_threads` Worker lifecycle including **normal Worker exit without
+  `cleanup()`** (the abandonment / init-reference-release proof), `Worker.terminate()` mid-life,
+  and explicit in-Worker `cleanup()`.
+- **Node unit** (`ffi` mocked, no dwlib): `DataWeave.initialize()` ref-count/rollback safety;
+  module singleton poisoning recovery; module + instance `cleanup()` coalescing; `stream.ts`
+  rejection propagation; `runTransform` post-pre-buffer re-check; `doCleanup()` releasing the init
+  reference even when `destroyEngine` throws.
+- **Python unit** (fake/mocked lib, no dwlib): refcount create/reuse/last-release-teardown;
+  attach-on-demand thread accounting (bootstrap detached after create; every op attaches+detaches
+  its own thread; teardown attaches a fresh thread); ctx→resolver trampoline dispatch (two handles →
+  two resolvers); `cleanup()` idempotency + double-cleanup; `create_engine`-failure rollback
+  releasing the ref; failed resolver-backed init unregistering the token.
+- **Python integration** (real dwlib): the core W-23692110 regression (two instances, different
+  resolvers, no cross-talk); multi-instance refcount teardown; synchronous `run()` resolving custom
+  modules; streaming/transform still stream; streaming custom-module resolution fails closed
+  (parity); a **foreign-thread last-release no-hang** regression (init on a worker thread, last
+  release/cleanup on a different thread, bounded timeout); TCK conformance stays green.
+- **Documented posture on non-forceable paths (Node).** Allocator/N-API fault injection and exact
   cross-thread teardown interleavings are **not deterministically forceable** from JS/vitest (no
   addon-boundary fault-injection hook — deliberately not added, YAGNI/test-only surface). Their
   correctness rests on the C-level invariants in §6, verified by code reasoning and adversarial
-  review; the Worker tests are best-effort probabilistic guards (green on fixed code, cannot
-  false-fail on it). This is a standing, documented decision.
-- **Native image build** (`native-lib:nativeCompile`) stays green.
+  review; the Worker tests are best-effort probabilistic guards. This is a standing, documented
+  decision.
+- **Native image build** (`native-lib:nativeCompile`) stays green with the legacy entrypoints
+  removed (confirms no SPI/reflection config referenced them).
 
-## 11. Follow-Up Work
+## 12. Engine lifecycle contract (shared by both bindings)
 
-- **Python binding parity: DONE (2026-08-26).** The handle-based
-  `create_engine`/`run_script_engine` API has been ported to the Python binding so both
-  bindings share one mental model, and the `ScriptRuntime` singleton plus the three legacy C
-  entrypoints have been removed. See
-  [docs/superpowers/specs/2026-08-26-python-multi-engine-unification-design.md](./2026-08-26-python-multi-engine-unification-design.md).
+These invariants are the shared artifact both `native-lib/node/src/addon.c` and
+`native-lib/python/src/dataweave/native.py` implement. Any binding on the `*_engine` C ABI must
+uphold all six:
+
+1. One process-wide isolate; engines are handle-addressed objects in the Java registry.
+2. The isolate is reference-counted; the refcount equals the number of live engines; the isolate
+   exists iff the refcount > 0.
+3. Create-on-first-ref, tear-down-on-last-release; the binding calls
+   `graal_create_isolate` / `graal_tear_down_isolate` from *outside* the isolate, and holds no
+   thread persistently attached across calls (so teardown never blocks on a phantom attachment).
+4. Each engine handle is created by `create_engine` / `create_engine_with_resolver` and destroyed
+   by `destroy_engine`.
+5. Resolver dispatch is per-engine via the opaque `ctx` echoed to the 3-arg `ResolveModuleCallback`;
+   custom-module resolution fails closed off the engine's owner thread.
+6. A failed engine-create rolls back the isolate ref; a throwing `destroy_engine` still releases
+   the ref.
+
+## 13. Follow-Up Work
+
 - **Streaming/transform + custom-module resolution** across the background-thread boundary remains
-  a separate, not-yet-scoped effort (unrelated to the singleton fix).
+  a separate, not-yet-scoped effort in both bindings (unrelated to the singleton fix). Because
+  Python callbacks hold the GIL, Python *could* later support this as a Python-specific enhancement;
+  kept out of scope here to preserve one unified behavior.
 
 ## References
 
@@ -497,24 +652,27 @@ dwB.run(...)  →  resolves via resolver B only; A's cache untouched; no cross-t
 | Singleton root cause | `native-lib/src/main/java/org/mule/weave/lib/ScriptRuntime.java` |
 | CLI's per-instance pattern (proof it's not a GraalVM constraint) | `native-cli/src/main/scala/org/mule/weave/dwnative/NativeRuntime.scala:50-60` |
 | WriteCallback/ReadCallback ctx idiom | `native-lib/src/main/java/org/mule/weave/lib/NativeCallbacks.java` |
-| Concurrency & lifecycle machinery | `native-lib/node/src/addon.c` |
-| JS lifecycle / singleton / exit hooks | `native-lib/node/src/dataweave.ts` |
-| Stream error propagation | `native-lib/node/src/stream.ts` |
+| Java engine registry / entrypoints | `native-lib/src/main/java/org/mule/weave/lib/{ScriptRuntime,NativeLib,NativeCallbacks}.java` |
+| Node concurrency & lifecycle machinery | `native-lib/node/src/addon.c` |
+| Node JS lifecycle / singleton / exit hooks | `native-lib/node/src/dataweave.ts` |
+| Node stream error propagation | `native-lib/node/src/stream.ts` |
+| Python isolate/engine glue | `native-lib/python/src/dataweave/{native,runtime,models}.py` |
 | Node binding API + lifecycle docs | `native-lib/node/README.md`, `native-lib/node/docs/external-modules.md` |
 | Original external-modules design | `docs/superpowers/specs/2026-08-04-nodejs-external-modules-design.md` |
 
 ## Appendix: Hardening provenance
 
-The concurrency & lifecycle model (§6) converged over a series of code-review rounds; each round's
-decisions are folded into the sections above. This map exists only for git archaeology — the
-per-round design documents were consolidated into this file.
+The Node concurrency & lifecycle model (§6) converged over a series of code-review rounds, and the
+Python unification (§7) was implemented and reviewed task-by-task; each round's decisions are folded
+into the sections above. This map exists only for git archaeology — the per-round and Python
+unification design documents were consolidated into this file.
 
 | Round(s) | Area folded into | Decision |
 |----------|------------------|----------|
-| Feature (08-07) | §1–§5, §7–§9 | Object-level engines behind opaque handles; per-handle resolver bridge; ABI redesign. |
+| Feature (08-07) | §1–§5, §8–§10 | Object-level engines behind opaque handles; per-handle resolver bridge; ABI redesign. |
 | 5 (08-11) | §6.2 | `cleanup()`-during-active-stream deadlock → async teardown + waiter thread + `TEARDOWN_*` adoption. |
 | 6 (08-14) | §6.3, §6.4 | JS three-state lifecycle; atomic streaming/transform admission under `g_mutex`; handle-read validation. |
-| 7 (08-18 ffi-sweep) | §6.3, §6.5, §9 | Atomic admission for sync `run()`; uniform `napi_get_value_*` status checks; docs await `cleanup()`. |
+| 7 (08-18 ffi-sweep) | §6.3, §6.5, §10 | Atomic admission for sync `run()`; uniform `napi_get_value_*` status checks; docs await `cleanup()`. |
 | 8 (08-18 oom-setup) | §6.5 | OOM-safe streaming/transform setup allocations. |
 | 9 (08-18 engine/worker-oom) | §6.3, §6.5 | Deferred registry removal for all engines; worker/callback OOM → terminal result; N-API-create checks. |
 | 10 (08-19 dangling-ctx) | §6.3, §6.4 | Env-cleanup removes the Java registry entry (`deferred_registry_remove`); shutdown-doc accuracy. |
@@ -523,4 +681,6 @@ per-round design documents were consolidated into this file.
 | 13 (08-20 per-env init) | §6.1 | Per-`napi_env` init-reference ownership; `g_ref_count == Σ init_refs`. |
 | 14 (08-21 review5) | §6.2, §6.3 | Engine-creation admission requires an owned init reference; `g_teardown_needed` retry flag; `doCleanup()` releases the ref even when destroy throws. |
 | 15 (08-21 review6) | §6.2, §6.4, §6.5 | Singleton-poisoning fix; stream rejection propagation; teardown return-code checks; init-driven stranded-teardown retry. |
-| 16 (08-24 review7) | §6.2, §6.4, §6.5, §9 | Detach on failed teardown; init-hook-failure retry arming; observable init rollback; `Promise.reject(undefined)` fix; lifecycle-doc accuracy. |
+| 16 (08-24 review7) | §6.2, §6.4, §6.5, §10 | Detach on failed teardown; init-hook-failure retry arming; observable init rollback; `Promise.reject(undefined)` fix; lifecycle-doc accuracy. |
+| Python unification (08-26) | §2, §5, §7, §8 (Layer 1/4), §10–§12 | Remove `ScriptRuntime` singleton + 3 legacy C entrypoints; Python onto shared refcounted isolate + handle engines via `*_engine` ABI; 3-arg ctx resolver trampoline. |
+| Python final review (08-26) | §7.2, §10 | Detach isolate bootstrap thread at create + attach-on-demand so cross-thread last-release teardown cannot hang; unregister resolver token on failed init. |
