@@ -137,6 +137,14 @@ def _release_isolate() -> None:
                 if lib.graal_attach_thread(isolate, ctypes.byref(worker)) != 0:
                     raise DataWeaveError("Failed to attach thread for isolate teardown")
                 _tear_down(lib, worker)
+        except BaseException:
+            print(
+                "DataWeave: GraalVM isolate teardown failed; the isolate reference "
+                "has been cleared and a fresh isolate will be created on the next "
+                "initialize().",
+                file=sys.stderr,
+            )
+            raise
         finally:
             _lib = _lib_path = _isolate = _isolate_thread = _isolate_owner_thread = None
 
@@ -219,10 +227,11 @@ class NativeRuntime:
     def _create_engine(self) -> int:
         # Engines without a resolver are created here; the resolver variant is
         # installed by install_resolver() (Task 4) before this is called.
-        try:
-            handle = self.lib.create_engine(self.thread)
-        except Exception as error:
-            raise DataWeaveError(f"Failed to create DataWeave engine: {error}") from error
+        with self._current_thread_attachment(self.thread) as thread:
+            try:
+                handle = self.lib.create_engine(thread)
+            except Exception as error:
+                raise DataWeaveError(f"Failed to create DataWeave engine: {error}") from error
         if not handle:
             raise DataWeaveError("Native create_engine returned a null handle")
         return handle
@@ -366,7 +375,8 @@ class NativeRuntime:
             self.initialized = False
             try:
                 if self.handle:
-                    self.lib.destroy_engine(self.thread, self.handle)
+                    with self._current_thread_attachment(self.thread) as thread:
+                        self.lib.destroy_engine(thread, self.handle)
             finally:
                 # Release the isolate ref even if destroy_engine throws, so a
                 # throwing destroy cannot strand the isolate.

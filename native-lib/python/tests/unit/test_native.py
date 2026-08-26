@@ -24,12 +24,14 @@ class FakeLibrary:
     run_script = Function()
     free_cstring = Function()
 
-    def __init__(self, *, resolver_export=True):
+    def __init__(self):
         self.attach_calls = []
         self.detach_calls = []
         self.tear_down_threads = []
         self.created_engines = []
         self.destroyed_engines = []
+        self.create_engine_threads = []
+        self.destroy_engine_threads = []
         self._next_handle = 1
         self.graal_create_isolate = CallableFunction(lambda _params, _isolate, _thread: 0)
         self.graal_attach_thread = CallableFunction(self._attach_thread)
@@ -43,22 +45,27 @@ class FakeLibrary:
         self.create_engine = CallableFunction(self._create_engine)
         self.create_engine_with_resolver = CallableFunction(self._create_engine_with_resolver)
         self.destroy_engine = CallableFunction(
-            lambda _thread, handle: self.destroyed_engines.append(handle)
+            lambda thread, handle: (
+                self.destroy_engine_threads.append(thread),
+                self.destroyed_engines.append(handle),
+            )
         )
         self.run_script_engine = Function()
         self.run_script_callback_engine = Function()
         self.run_script_input_output_callback_engine = Function()
 
-    def _create_engine(self, _thread):
+    def _create_engine(self, thread):
         handle = self._next_handle
         self._next_handle += 1
         self.created_engines.append((handle, None, None))
+        self.create_engine_threads.append(thread)
         return handle
 
-    def _create_engine_with_resolver(self, _thread, callback, ctx):
+    def _create_engine_with_resolver(self, thread, callback, ctx):
         handle = self._next_handle
         self._next_handle += 1
         self.created_engines.append((handle, callback, ctx))
+        self.create_engine_threads.append(thread)
         return handle
 
     def _attach_thread(self, _isolate, thread):
@@ -365,11 +372,21 @@ def test_cleanup_from_worker_uses_current_thread_for_isolate_teardown(monkeypatc
     assert not worker.is_alive()
     worker_ident, teardown_thread = teardown_calls[0]
     assert worker_ident != owner_ident
+    # Off-owner cleanup now attaches/detaches its own thread for destroy_engine
+    # (attach_calls[0]), then the isolate teardown attaches a second, separate
+    # thread for graal_tear_down_isolate (attach_calls[1]); teardown itself
+    # never explicitly detaches (tearing down the isolate implicitly does).
+    assert len(library.attach_calls) == 2
     assert library.attach_calls[0][0] == worker_ident
+    assert library.attach_calls[1][0] == worker_ident
     assert ctypes.cast(teardown_thread, ctypes.c_void_p).value == ctypes.cast(
+        library.attach_calls[1][1], ctypes.c_void_p
+    ).value
+    assert len(library.detach_calls) == 1
+    assert library.detach_calls[0][0] == worker_ident
+    assert ctypes.cast(library.detach_calls[0][1], ctypes.c_void_p).value == ctypes.cast(
         library.attach_calls[0][1], ctypes.c_void_p
     ).value
-    assert library.detach_calls == []
     assert runtime.initialized is False
 
 
@@ -469,3 +486,67 @@ def test_thread_lifecycle_wraps_native_invocation_errors(method_name, error_mess
             runtime.attach_thread()
         else:
             runtime.detach_thread(object())
+
+
+@pytest.mark.unit
+def test_engine_create_and_destroy_off_owner_thread_use_an_attached_thread(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    # A initializes on THIS (owner) thread -> create uses the owner isolate thread.
+    a = native.NativeRuntime("/tmp/dwlib")
+    a.initialize()
+    owner_thread_ptr = native._isolate_thread
+    assert library.create_engine_threads[0] is owner_thread_ptr
+
+    # B initializes on a DIFFERENT OS thread -> must attach a fresh thread.
+    errors = []
+    b = native.NativeRuntime("/tmp/dwlib")
+
+    def init_b():
+        try:
+            b.initialize()
+        except BaseException as error:  # pragma: no cover - surfaced via assert
+            errors.append(error)
+
+    t = Thread(target=init_b)
+    t.start()
+    t.join(2)
+    assert not errors
+    assert library.create_engine_threads[1] is not owner_thread_ptr
+
+    # Destroy B from a non-owner thread -> likewise attaches, not owner ptr.
+    def cleanup_b():
+        try:
+            b.cleanup()
+        except BaseException as error:  # pragma: no cover
+            errors.append(error)
+
+    t2 = Thread(target=cleanup_b)
+    t2.start()
+    t2.join(2)
+    assert not errors
+    assert library.destroy_engine_threads[-1] is not owner_thread_ptr
+
+    a.cleanup()
+
+
+@pytest.mark.unit
+def test_failed_isolate_teardown_surfaces_and_clears_state_for_retry(monkeypatch):
+    library = FakeLibrary()
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 1)  # non-zero == failure
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    a = native.NativeRuntime("/tmp/dwlib")
+    a.initialize()
+    with pytest.raises(native.DataWeaveError):
+        a.cleanup()  # last release -> teardown fails -> raises
+    # State cleared regardless, so a fresh isolate is creatable.
+    assert native._isolate is None
+    assert native._isolate_ref_count == 0
+    b = native.NativeRuntime("/tmp/dwlib")
+    b.initialize()  # must succeed against a fresh isolate
+    assert native._isolate is not None
+    # Restore a passing teardown so b.cleanup() doesn't raise on the way out.
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 0)
+    b.cleanup()
