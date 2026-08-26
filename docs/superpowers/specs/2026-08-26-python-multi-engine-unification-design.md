@@ -227,9 +227,11 @@ dwB.cleanup()  → join workers; destroy_engine(handleB); ref 1→0 → detach m
   cleared); the C layer never sees a stale handle.
 - **`destroy_engine` throws during `cleanup()`** → still release the isolate ref (so a throwing
   destroy cannot strand the isolate), then re-raise — mirrors Node's `doCleanup()`.
-- **`graal_tear_down_isolate` returns nonzero** → raise `DataWeaveError`, but leave `_isolate` set
-  with count 0; the next `initialize()` reuses that live isolate (count 0→1). No retry flag needed
-  — there is no event loop to defer to.
+- **`graal_tear_down_isolate` returns nonzero** → surface a warning and re-raise `DataWeaveError`,
+  and clear the isolate globals (`_lib`/`_lib_path`/`_isolate` → None, count already 0) so the next
+  `initialize()` builds a fresh isolate rather than reusing one whose teardown just failed. No retry
+  flag needed — there is no event loop to defer to. (The implementation nulls the globals in a
+  `finally` after re-raising; the failed teardown is reported on `stderr`.)
 
 ## 10. Backward compatibility (all intended, pre-GA, no shims)
 

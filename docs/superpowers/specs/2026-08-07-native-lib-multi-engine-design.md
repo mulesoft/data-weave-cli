@@ -90,7 +90,8 @@ since been unified onto the shared-isolate + handle model; see the superseded-no
 ## 5. Alternatives Considered (isolation mechanism)
 
 **Separate GraalVM isolates per engine (rejected).** The most complete isolation (own heap, own
-JIT, own Java statics), and what Python does per-instance. Rejected for Node because `addon.c`
+JIT, own Java statics), and what Python originally did per-instance (before the 2026-08-26
+unification moved Python onto this shared-isolate model too). Rejected for Node because `addon.c`
 assumed exactly one isolate as global state; supporting N isolates means restructuring all of
 that into per-handle structs, and isolate teardown is fragile (`graal_tear_down_isolate` blocks
 until every attached thread reaches a safepoint). It is unnecessarily heavy for the actual need:
