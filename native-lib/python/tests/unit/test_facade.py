@@ -12,12 +12,8 @@ class FakeNativeRuntime:
         self.thread = "thread"
         self.calls = []
 
-    def run_script_and_decode(self, *args):
-        self.calls.append(("run_script_and_decode", args))
-        return self._result()
-
-    def run_script_with_resolver_and_decode(self, *args):
-        self.calls.append(("run_script_with_resolver_and_decode", args))
+    def run_engine_and_decode(self, *args):
+        self.calls.append(("run_engine_and_decode", args))
         return self._result()
 
     @staticmethod
@@ -91,7 +87,7 @@ def test_dataweave_constructor_stores_keyword_only_module_resolver(monkeypatch):
 
 
 @pytest.mark.unit
-def test_run_dispatches_to_resolver_aware_native_execution():
+def test_run_uses_engine_execution_regardless_of_resolver():
     resolver = lambda _path: "source"
     instance = configured_runtime(resolver)
 
@@ -102,19 +98,17 @@ def test_run_dispatches_to_resolver_aware_native_execution():
     )
     assert instance._native.calls == [
         (
-            "run_script_with_resolver_and_decode",
+            "run_engine_and_decode",
             (
-                "thread",
                 b"payload",
                 b'{"value": {"content": "MQ==", "mimeType": "application/json", "charset": "utf-8"}}',
-                resolver,
             ),
         )
     ]
 
 
 @pytest.mark.unit
-def test_run_without_resolver_preserves_native_execution_path():
+def test_run_without_resolver_routes_through_engine():
     instance = configured_runtime()
 
     result = instance.run("payload")
@@ -123,7 +117,7 @@ def test_run_without_resolver_preserves_native_execution_path():
         True, "SGVsbG8=", None, False, "text/plain", "utf-8"
     )
     assert instance._native.calls == [
-        ("run_script_and_decode", ("thread", b"payload", b"{}"))
+        ("run_engine_and_decode", (b"payload", b"{}"))
     ]
 
 

@@ -1,6 +1,6 @@
 import ctypes
 from queue import Full, Queue
-from threading import current_thread, Event, Thread
+from threading import current_thread, Event, Lock, Thread
 from time import sleep
 
 import pytest
@@ -40,14 +40,14 @@ class FakeNative:
         self._buffers.append(buffer)
         return ctypes.addressof(buffer)
 
-    def run_script_callback(self, _thread, _script, _inputs, write_callback, _context):
+    def run_script_callback_engine(self, _thread, _handle, _script, _inputs, write_callback, _context):
         if self.emit:
             buffer = ctypes.create_string_buffer(self.emit)
             self.write_status = write_callback(None, ctypes.addressof(buffer), len(self.emit))
         return self._response_pointer()
 
-    def run_script_input_output_callback(
-        self, _thread, _script, _inputs, _input_name, _mime_type, _charset, read_callback, write_callback, _context,
+    def run_script_input_output_callback_engine(
+        self, _thread, _handle, _script, _inputs, _input_name, _mime_type, _charset, read_callback, write_callback, _context,
     ):
         if self.consume_input:
             buffer = ctypes.create_string_buffer(3)
@@ -66,6 +66,9 @@ class FakeNative:
             assert write_callback(None, ctypes.addressof(buffer), len(self.emit)) == 0
         return self._response_pointer()
 
+    def destroy_engine(self, _thread, _handle):
+        self.destroyed_handle = _handle
+
 
 def configured_runtime(native):
     runtime = dataweave.DataWeave.__new__(dataweave.DataWeave)
@@ -77,6 +80,15 @@ def configured_runtime(native):
     native_runtime.isolate = object()
     native_runtime.thread = object()
     native_runtime._owner_thread = current_thread()
+    native_runtime.handle = 1
+    native_runtime._resolver = None
+    native_runtime._resolver_callback = None
+    native_runtime._resolver_token = 0
+    native_runtime._resolver_buffers = []
+    native_runtime._resolver_active = False
+    native_runtime._resolver_active_ident = None
+    native_runtime._resolver_lock = Lock()
+    native_runtime._execution_owner = None
     runtime._native = native_runtime
     return runtime
 
@@ -234,7 +246,7 @@ def test_stream_public_close_aborts_worker_and_detaches_after_consumer_abandons_
             self.first_chunk_written = Event()
             self.cancelled = None
 
-        def run_script_callback(self, _thread, _script, _inputs, write_callback, _context):
+        def run_script_callback_engine(self, _thread, _handle, _script, _inputs, write_callback, _context):
             first = ctypes.create_string_buffer(b"first")
             assert write_callback(None, ctypes.addressof(first), 5) == 0
             self.first_chunk_written.set()
@@ -259,8 +271,8 @@ def test_stream_public_close_aborts_worker_and_detaches_after_consumer_abandons_
 @pytest.mark.unit
 def test_run_input_output_callback_rejects_oversized_read_chunk_without_truncating():
     class OversizedInputNative(FakeNative):
-        def run_script_input_output_callback(
-            self, _thread, _script, _inputs, _input_name, _mime_type, _charset, read_callback, _write_callback, _context,
+        def run_script_input_output_callback_engine(
+            self, _thread, _handle, _script, _inputs, _input_name, _mime_type, _charset, read_callback, _write_callback, _context,
         ):
             buffer = ctypes.create_string_buffer(3)
             self.read_status = read_callback(None, ctypes.addressof(buffer), len(buffer))
@@ -298,7 +310,7 @@ def test_stream_early_close_does_not_block_terminal_publication_on_full_queue(mo
             self.queue_full = Event()
             self.cancelled = None
 
-        def run_script_callback(self, _thread, _script, _inputs, write_callback, _context):
+        def run_script_callback_engine(self, _thread, _handle, _script, _inputs, write_callback, _context):
             first = ctypes.create_string_buffer(b"first")
             assert write_callback(None, ctypes.addressof(first), 5) == 0
             second = ctypes.create_string_buffer(b"second")
@@ -334,7 +346,7 @@ def test_runtime_module_owns_dataweave_orchestration():
 @pytest.mark.unit
 def test_run_streaming_reports_worker_timeout_when_native_call_produces_no_output(monkeypatch):
     class BlockingFakeNative(FakeNative):
-        def run_script_callback(self, _thread, _script, _inputs, _write_callback, _context):
+        def run_script_callback_engine(self, _thread, _handle, _script, _inputs, _write_callback, _context):
             sleep(0.05)
             return self._response_pointer()
 
@@ -348,7 +360,6 @@ def test_run_streaming_reports_worker_timeout_when_native_call_produces_no_outpu
 @pytest.mark.unit
 def test_stream_worker_start_failure_does_not_block_cleanup(monkeypatch):
     native = FakeNative('{"success": true}')
-    native.graal_tear_down_isolate = lambda _thread: 0
     runtime = configured_runtime(native)
 
     def fail_start(_worker):
@@ -364,7 +375,7 @@ def test_stream_worker_start_failure_does_not_block_cleanup(monkeypatch):
 @pytest.mark.unit
 def test_stream_finalization_does_not_raise_when_a_native_worker_cannot_cancel(monkeypatch):
     class UncancellableNative(FakeNative):
-        def run_script_callback(self, _thread, _script, _inputs, _write_callback, _context):
+        def run_script_callback_engine(self, _thread, _handle, _script, _inputs, _write_callback, _context):
             sleep(0.1)
             return self._response_pointer()
 
@@ -384,14 +395,13 @@ def test_cleanup_refuses_to_tear_down_isolate_while_stream_worker_is_active(monk
             self.release = Event()
             self.torn_down = False
 
-        def run_script_callback(self, _thread, _script, _inputs, _write_callback, _context):
+        def run_script_callback_engine(self, _thread, _handle, _script, _inputs, _write_callback, _context):
             self.started.set()
             self.release.wait()
             return self._response_pointer()
 
-        def graal_tear_down_isolate(self, _thread):
+        def destroy_engine(self, _thread, _handle):
             self.torn_down = True
-            return 0
 
     monkeypatch.setattr(runtime_module, "_WORKER_JOIN_TIMEOUT_SECONDS", 0.001)
     native = BlockingNative()
@@ -430,10 +440,9 @@ def test_stream_worker_cannot_register_after_isolate_teardown_starts():
             self.cleanup_started = Event()
             self.release_cleanup = Event()
 
-        def graal_tear_down_isolate(self, _thread):
+        def destroy_engine(self, _thread, _handle):
             self.cleanup_started.set()
             self.release_cleanup.wait()
-            return 0
 
     native = BlockingCleanupNative()
     runtime = configured_runtime(native)
