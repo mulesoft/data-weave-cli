@@ -3,7 +3,7 @@ from contextlib import contextmanager
 import os
 from pathlib import Path
 import sys
-from threading import current_thread, get_ident, Lock
+from threading import get_ident, Lock
 import traceback
 from typing import Optional
 
@@ -34,8 +34,6 @@ _isolate_lock = Lock()
 _lib = None
 _lib_path = None
 _isolate = None
-_isolate_thread = None          # the main attached IsolateThread (GraalIsolateThreadPointer)
-_isolate_owner_thread = None    # the Python threading.Thread that created the isolate
 _isolate_ref_count = 0
 
 
@@ -105,9 +103,9 @@ def _bind_abi(lib) -> None:
 
 
 def _acquire_isolate(lib_path: str):
-    """Returns (lib, isolate, thread, owner_thread), creating the shared isolate on
-    the first reference. Increments the refcount only on success."""
-    global _lib, _lib_path, _isolate, _isolate_thread, _isolate_owner_thread, _isolate_ref_count
+    """Returns (lib, isolate), creating the shared isolate on the first reference.
+    Increments the refcount only on success."""
+    global _lib, _lib_path, _isolate, _isolate_ref_count
     with _isolate_lock:
         if _isolate is None:
             try:
@@ -123,35 +121,41 @@ def _acquire_isolate(lib_path: str):
                 raise DataWeaveError(f"Failed to create GraalVM isolate: {error}") from error
             if result != 0:
                 raise DataWeaveError(f"Failed to create GraalVM isolate. Error code: {result}")
+            # Detach the bootstrap thread immediately. A thread left attached to the
+            # isolate blocks graal_tear_down_isolate forever when the last release
+            # runs on a different OS thread (e.g. the atexit cleanup thread). Every
+            # subsequent native call attaches its own thread on demand and detaches
+            # when done; teardown attaches a fresh thread. Mirrors the Node/Go bindings.
+            detach_result = lib.graal_detach_thread(thread)
+            if detach_result != 0:
+                raise DataWeaveError(
+                    f"Failed to detach GraalVM isolate bootstrap thread. Error code: {detach_result}"
+                )
             _lib = lib
             _lib_path = lib_path
             _isolate = isolate
-            _isolate_thread = thread
-            _isolate_owner_thread = current_thread()
         _isolate_ref_count += 1
-        return _lib, _isolate, _isolate_thread, _isolate_owner_thread
+        return _lib, _isolate
 
 
 def _release_isolate() -> None:
     """Decrements the refcount; tears the isolate down and nulls globals on 0."""
-    global _lib, _lib_path, _isolate, _isolate_thread, _isolate_owner_thread, _isolate_ref_count
+    global _lib, _lib_path, _isolate, _isolate_ref_count
     with _isolate_lock:
         if _isolate_ref_count == 0:
             return
         _isolate_ref_count -= 1
         if _isolate_ref_count > 0:
             return
-        # Last release: tear down from the owner thread if we are on it, else a
-        # fresh attached thread. Then clear globals regardless.
-        lib, isolate, main_thread, owner = _lib, _isolate, _isolate_thread, _isolate_owner_thread
+        # Last release: no thread is persistently attached (the bootstrap was
+        # detached at create and every op detaches its own thread), so attach a
+        # fresh thread and tear down. Then clear globals regardless.
+        lib, isolate = _lib, _isolate
         try:
-            if current_thread() is owner:
-                _tear_down(lib, main_thread)
-            else:
-                worker = GraalIsolateThreadPointer()
-                if lib.graal_attach_thread(isolate, ctypes.byref(worker)) != 0:
-                    raise DataWeaveError("Failed to attach thread for isolate teardown")
-                _tear_down(lib, worker)
+            worker = GraalIsolateThreadPointer()
+            if lib.graal_attach_thread(isolate, ctypes.byref(worker)) != 0:
+                raise DataWeaveError("Failed to attach thread for isolate teardown")
+            _tear_down(lib, worker)
         except BaseException:
             print(
                 "DataWeave: GraalVM isolate teardown failed; the isolate reference "
@@ -161,7 +165,7 @@ def _release_isolate() -> None:
             )
             raise
         finally:
-            _lib = _lib_path = _isolate = _isolate_thread = _isolate_owner_thread = None
+            _lib = _lib_path = _isolate = None
 
 
 def _tear_down(lib, thread) -> None:
@@ -210,7 +214,6 @@ class NativeRuntime:
         self.lib = None
         self.isolate = None
         self.thread = None
-        self._owner_thread = None
         self.handle = 0
         self.initialized = False
         # Every engine supports every API now (single unified ABI).
@@ -229,12 +232,19 @@ class NativeRuntime:
     def initialize(self) -> None:
         if self.initialized:
             return
-        self.lib, self.isolate, self.thread, self._owner_thread = _acquire_isolate(self.lib_path)
+        self.lib, self.isolate = _acquire_isolate(self.lib_path)
         try:
             self.handle = self._create_engine()
         except Exception:
             # Roll back the ref we just took so a failed init leaks nothing.
-            self.lib = self.isolate = self.thread = self._owner_thread = None
+            self.lib = self.isolate = None
+            # Finding #2: install_resolver() registered a token BEFORE this call.
+            # A failed init must unregister it, or it leaks: self.initialized stays
+            # False, so a later cleanup() returns early and never reaches the pop.
+            if self._resolver_token:
+                with _resolver_lock_global:
+                    _resolver_registry.pop(self._resolver_token, None)
+                self._resolver_token = 0
             _release_isolate()
             raise
         self.initialized = True
@@ -397,7 +407,7 @@ class NativeRuntime:
             finally:
                 # Release the isolate ref even if destroy_engine throws, so a
                 # throwing destroy cannot strand the isolate.
-                self.lib = self.isolate = self.thread = self._owner_thread = None
+                self.lib = self.isolate = self.thread = None
                 self._resolver = None
                 self._resolver_callback = None
                 self._resolver_buffers = []
@@ -425,11 +435,13 @@ class NativeRuntime:
 
     @contextmanager
     def _current_thread_attachment(self, thread):
-        owner = getattr(self, "_owner_thread", current_thread())
-        if current_thread() is owner or thread is not self.thread:
+        # A non-None thread is one the caller already attached (a streaming worker
+        # passes its own); use it as-is. Otherwise (self.thread is None for every
+        # synchronous call) attach a fresh thread on demand and detach when done --
+        # no thread is persistently attached, so cross-thread teardown never blocks.
+        if thread is not None:
             yield thread
             return
-
         attached_thread = self.attach_thread()
         primary_error = None
         try:

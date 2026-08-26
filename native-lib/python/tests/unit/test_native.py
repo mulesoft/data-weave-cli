@@ -222,6 +222,11 @@ def test_buffered_worker_execution_uses_one_current_thread_attachment_for_run_de
     runtime = native.NativeRuntime("/tmp/dwlib")
     runtime.initialize()
     owner_ident = get_ident()
+    # Snapshot right after initialize(): the bootstrap create/detach and the
+    # attach-on-demand engine create already added entries, so we assert the
+    # DELTA the worker run adds rather than a brittle absolute count.
+    attach_count_after_init = len(library.attach_calls)
+    detach_count_after_init = len(library.detach_calls)
     outcomes = []
 
     worker = Thread(
@@ -236,9 +241,15 @@ def test_buffered_worker_execution_uses_one_current_thread_attachment_for_run_de
     worker_ident, result = outcomes[0]
     assert worker_ident != owner_ident
     assert result == "result"
-    assert runtime._owner_thread is current_thread()
-    assert len(library.attach_calls) == 1
-    assert library.attach_calls[0][0] == worker_ident
+    # Exactly one attach and one detach for the whole run+decode+free, both on
+    # the worker's OS thread -- no owner fast-path, one attachment shared by
+    # run and free.
+    assert len(library.attach_calls) - attach_count_after_init == 1
+    assert len(library.detach_calls) - detach_count_after_init == 1
+    new_attach = library.attach_calls[attach_count_after_init]
+    new_detach = library.detach_calls[detach_count_after_init]
+    assert new_attach[0] == worker_ident
+    assert new_detach[0] == worker_ident
     worker_pointer = ctypes.cast(calls[0][2], ctypes.c_void_p).value
     assert [(name, ident) for name, ident, _thread in calls] == [
         ("run", worker_ident),
@@ -248,12 +259,17 @@ def test_buffered_worker_execution_uses_one_current_thread_attachment_for_run_de
         ctypes.cast(thread, ctypes.c_void_p).value == worker_pointer
         for _name, _ident, thread in calls
     )
-    assert library.detach_calls[0][0] == worker_ident
-    assert ctypes.cast(library.detach_calls[0][1], ctypes.c_void_p).value == worker_pointer
+    assert ctypes.cast(new_attach[1], ctypes.c_void_p).value == worker_pointer
+    assert ctypes.cast(new_detach[1], ctypes.c_void_p).value == worker_pointer
 
 
 @pytest.mark.unit
-def test_distinct_thread_object_attaches_when_python_thread_ident_is_reused(monkeypatch):
+def test_attach_on_demand_does_not_cache_by_thread_ident(monkeypatch):
+    # This guarded the OLD owner-reuse-by-thread-object branch (comparing
+    # `current_thread() is owner` under a spoofed get_ident so a reused ident
+    # could not be mistaken for the owner). That branch is gone entirely: every
+    # call attaches on demand regardless of ident. Keep the get_ident spoof to
+    # prove there is no ident-keyed cache anywhere in the new path.
     buffer = ctypes.create_string_buffer(b"result")
     library = FakeLibrary()
     library.run_script_engine = CallableFunction(
@@ -265,12 +281,15 @@ def test_distinct_thread_object_attaches_when_python_thread_ident_is_reused(monk
     runtime = native.NativeRuntime("/tmp/dwlib")
     runtime.initialize()
     owner_thread = current_thread()
+    attach_count_after_init = len(library.attach_calls)
+    detach_count_after_init = len(library.detach_calls)
     observed_threads = []
+    outcomes = []
 
     worker = Thread(
         target=lambda: (
             observed_threads.append(current_thread()),
-            runtime.run_engine_and_decode(b"script", b"{}"),
+            outcomes.append(runtime.run_engine_and_decode(b"script", b"{}")),
         )
     )
     worker.start()
@@ -279,24 +298,25 @@ def test_distinct_thread_object_attaches_when_python_thread_ident_is_reused(monk
     assert not worker.is_alive()
     assert observed_threads == [worker]
     assert observed_threads[0] is not owner_thread
-    assert runtime._owner_thread is owner_thread
-    assert len(library.attach_calls) == 1
-    assert len(library.detach_calls) == 1
+    assert outcomes == ["result"]
+    assert len(library.attach_calls) - attach_count_after_init == 1
+    assert len(library.detach_calls) - detach_count_after_init == 1
 
 
 @pytest.mark.unit
-def test_cleanup_clears_owner_thread_reference(monkeypatch):
+def test_cleanup_releases_isolate_ref(monkeypatch):
+    # _owner_thread no longer exists (attach-on-demand for every call); the
+    # remaining intent this test guards is that cleanup() releases the shared
+    # isolate ref and, on the last release, clears the module-level isolate.
     library = FakeLibrary()
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
     runtime = native.NativeRuntime("/tmp/dwlib")
     runtime.initialize()
 
-    assert runtime._owner_thread is current_thread()
-
     runtime.cleanup()
 
-    assert runtime._owner_thread is None
     assert native._isolate_ref_count == 0
+    assert native._isolate is None
 
 
 @pytest.mark.unit
@@ -316,15 +336,22 @@ def test_buffered_worker_execution_detaches_current_thread_after_failure(monkeyp
 
     library.run_script_engine = CallableFunction(run_script_engine)
     library.free_cstring = CallableFunction(free_cstring)
-    if failure == "detach":
-        library.graal_detach_thread = CallableFunction(
-            lambda _thread: (_ for _ in ()).throw(RuntimeError("detach failed"))
-        )
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
     if failure == "decode":
         monkeypatch.setattr(native.ctypes, "string_at", lambda _ptr: b"\xff")
     runtime = native.NativeRuntime("/tmp/dwlib")
     runtime.initialize()
+    # Snapshot right after initialize(): the bootstrap create/detach and the
+    # attach-on-demand engine create already used the library's default
+    # (working) detach, so the "detach" failure below is installed AFTER
+    # initialize() -- it must only break the worker run's own detach, not the
+    # unrelated bootstrap-detach call inside _acquire_isolate.
+    attach_count_after_init = len(library.attach_calls)
+    detach_count_after_init = len(library.detach_calls)
+    if failure == "detach":
+        library.graal_detach_thread = CallableFunction(
+            lambda _thread: (_ for _ in ()).throw(RuntimeError("detach failed"))
+        )
     errors = []
 
     worker = Thread(
@@ -340,10 +367,10 @@ def test_buffered_worker_execution_detaches_current_thread_after_failure(monkeyp
     assert len(errors) == 1
     if failure == "detach":
         assert "detach failed" in str(errors[0])
-    assert len(library.attach_calls) == 1
+    assert len(library.attach_calls) - attach_count_after_init == 1
     if failure != "detach":
-        assert len(library.detach_calls) == 1
-        assert library.detach_calls[0][0] == library.attach_calls[0][0]
+        assert len(library.detach_calls) - detach_count_after_init == 1
+        assert library.detach_calls[detach_count_after_init][0] == library.attach_calls[attach_count_after_init][0]
 
 
 def _capture_error(errors, invoke):
@@ -364,6 +391,12 @@ def test_cleanup_from_worker_uses_current_thread_for_isolate_teardown(monkeypatc
     runtime = native.NativeRuntime("/tmp/dwlib")
     runtime.initialize()
     owner_ident = get_ident()
+    # Snapshot right after initialize(): the bootstrap create/detach and the
+    # attach-on-demand engine create already added entries on this (main)
+    # thread's ident, so we assert the DELTA the worker cleanup() adds rather
+    # than a brittle absolute count.
+    attach_count_after_init = len(library.attach_calls)
+    detach_count_after_init = len(library.detach_calls)
 
     worker = Thread(target=runtime.cleanup)
     worker.start()
@@ -372,20 +405,27 @@ def test_cleanup_from_worker_uses_current_thread_for_isolate_teardown(monkeypatc
     assert not worker.is_alive()
     worker_ident, teardown_thread = teardown_calls[0]
     assert worker_ident != owner_ident
-    # Off-owner cleanup now attaches/detaches its own thread for destroy_engine
-    # (attach_calls[0]), then the isolate teardown attaches a second, separate
-    # thread for graal_tear_down_isolate (attach_calls[1]); teardown itself
+    # This is the structural guard for Finding #1: the isolate was created on
+    # the main thread, but the bootstrap thread was detached immediately after
+    # create, so teardown on a completely different (worker) thread does not
+    # block on a phantom attachment. Off-owner cleanup attaches/detaches its
+    # own thread for destroy_engine (the first post-init attach), then the
+    # isolate teardown attaches a second, separate thread for
+    # graal_tear_down_isolate (the second post-init attach); teardown itself
     # never explicitly detaches (tearing down the isolate implicitly does).
-    assert len(library.attach_calls) == 2
-    assert library.attach_calls[0][0] == worker_ident
-    assert library.attach_calls[1][0] == worker_ident
+    assert len(library.attach_calls) - attach_count_after_init == 2
+    destroy_attach = library.attach_calls[attach_count_after_init]
+    teardown_attach = library.attach_calls[attach_count_after_init + 1]
+    assert destroy_attach[0] == worker_ident
+    assert teardown_attach[0] == worker_ident
     assert ctypes.cast(teardown_thread, ctypes.c_void_p).value == ctypes.cast(
-        library.attach_calls[1][1], ctypes.c_void_p
+        teardown_attach[1], ctypes.c_void_p
     ).value
-    assert len(library.detach_calls) == 1
-    assert library.detach_calls[0][0] == worker_ident
-    assert ctypes.cast(library.detach_calls[0][1], ctypes.c_void_p).value == ctypes.cast(
-        library.attach_calls[0][1], ctypes.c_void_p
+    assert len(library.detach_calls) - detach_count_after_init == 1
+    new_detach = library.detach_calls[detach_count_after_init]
+    assert new_detach[0] == worker_ident
+    assert ctypes.cast(new_detach[1], ctypes.c_void_p).value == ctypes.cast(
+        destroy_attach[1], ctypes.c_void_p
     ).value
     assert runtime.initialized is False
 
@@ -490,16 +530,37 @@ def test_thread_lifecycle_wraps_native_invocation_errors(method_name, error_mess
 
 @pytest.mark.unit
 def test_engine_create_and_destroy_off_owner_thread_use_an_attached_thread(monkeypatch):
+    # native._isolate_thread is gone: there is no persistent bootstrap thread to
+    # compare against anymore (it is detached immediately after
+    # graal_create_isolate). The new intent is that engine create/destroy always
+    # run on a freshly *attached* thread, and different OS threads use different
+    # attachments.
+    #
+    # NOTE on comparison strategy: FakeLibrary's graal_attach_thread stub writes
+    # a brand-new, always-NULL ctypes pointer into its out-param on every call
+    # (there is no real native memory backing it here), so casting to
+    # ctypes.c_void_p and comparing .value is always None == None / None != None
+    # is always False -- vacuous regardless of correctness. Object identity
+    # (`is`/`is not`) IS meaningful here: attach_thread() allocates a distinct
+    # Python pointer object on every invocation, so two *different* attaches are
+    # guaranteed to be different objects, while the (now-removed) bug reused the
+    # exact SAME object across calls. We anchor on identity + OS thread ident.
     library = FakeLibrary()
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
 
-    # A initializes on THIS (owner) thread -> create uses the owner isolate thread.
+    # A initializes on THIS thread -> create_engine runs on a freshly attached
+    # thread (the bootstrap thread from graal_create_isolate was already
+    # detached inside _acquire_isolate and is never reused for engine create;
+    # exactly one attach is added by a.initialize(), used for the create call).
     a = native.NativeRuntime("/tmp/dwlib")
     a.initialize()
-    owner_thread_ptr = native._isolate_thread
-    assert library.create_engine_threads[0] is owner_thread_ptr
+    owner_ident = get_ident()
+    assert len(library.attach_calls) == 1
+    assert library.attach_calls[0][0] == owner_ident
+    a_create_thread = library.create_engine_threads[0]
 
-    # B initializes on a DIFFERENT OS thread -> must attach a fresh thread.
+    # B initializes on a DIFFERENT OS thread -> attaches its own fresh thread
+    # there, distinct from A's.
     errors = []
     b = native.NativeRuntime("/tmp/dwlib")
 
@@ -513,9 +574,17 @@ def test_engine_create_and_destroy_off_owner_thread_use_an_attached_thread(monke
     t.start()
     t.join(2)
     assert not errors
-    assert library.create_engine_threads[1] is not owner_thread_ptr
+    assert len(library.attach_calls) == 2
+    assert library.attach_calls[1][0] == t.ident
+    assert library.attach_calls[1][0] != owner_ident
+    b_create_thread = library.create_engine_threads[1]
+    # A freshly attached thread is never the SAME object as a previous one --
+    # this is exactly how the (now-removed) reused-bootstrap/owner-thread bug
+    # would have shown up: B's create thread being the literal object A used.
+    assert b_create_thread is not a_create_thread
 
-    # Destroy B from a non-owner thread -> likewise attaches, not owner ptr.
+    # Destroy B from yet another non-owner thread -> attaches its own thread,
+    # matching that thread's ident, and it is a fresh object too.
     def cleanup_b():
         try:
             b.cleanup()
@@ -526,7 +595,10 @@ def test_engine_create_and_destroy_off_owner_thread_use_an_attached_thread(monke
     t2.start()
     t2.join(2)
     assert not errors
-    assert library.destroy_engine_threads[-1] is not owner_thread_ptr
+    assert len(library.attach_calls) == 3
+    assert library.attach_calls[2][0] == t2.ident
+    assert library.destroy_engine_threads[-1] is not a_create_thread
+    assert library.destroy_engine_threads[-1] is not b_create_thread
 
     a.cleanup()
 
@@ -615,3 +687,70 @@ def test_resolver_fails_closed_off_the_owner_thread_without_invoking_python(monk
     assert results and ctypes.string_at(results[0]) == b"src"
 
     a.cleanup()
+
+
+@pytest.mark.unit
+def test_bootstrap_thread_is_detached_after_isolate_create(monkeypatch):
+    # Regression (final review Finding #1): the isolate's bootstrap thread must be
+    # detached immediately after graal_create_isolate, before anything attaches a
+    # fresh thread for engine creation. So a last release on a different OS
+    # thread can tear down without blocking on a phantom attachment.
+    #
+    # NOTE on comparison strategy: FakeLibrary's stubs write NULL pointers into
+    # their out-params (there is no real native memory backing them here), so
+    # pointer VALUES (and even object identity, since nothing ever aliases the
+    # bootstrap thread object across calls) cannot distinguish "the bootstrap
+    # thread" from a later attach. What CAN be checked -- and is exactly what
+    # Finding #1 is about -- is call ORDER: detach must happen immediately
+    # after create_isolate, strictly before the attach used for engine create.
+    library = FakeLibrary()
+    events = []
+
+    def create_isolate(_params, _isolate, _thread_out):
+        events.append("create_isolate")
+        return 0
+
+    def detach_thread(_thread):
+        events.append("detach")
+        return 0
+
+    def attach_thread(isolate, thread_out):
+        events.append("attach")
+        return library._attach_thread(isolate, thread_out)
+
+    library.graal_create_isolate = CallableFunction(create_isolate)
+    library.graal_detach_thread = CallableFunction(detach_thread)
+    library.graal_attach_thread = CallableFunction(attach_thread)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    assert events[:2] == ["create_isolate", "detach"], (
+        "bootstrap thread was not detached immediately after graal_create_isolate"
+    )
+    assert "attach" in events[2:], "engine create never attached its own thread"
+    assert events.index("attach") > events.index("detach"), (
+        "engine create attached before the bootstrap thread was detached"
+    )
+    runtime.cleanup()
+
+
+@pytest.mark.unit
+def test_failed_init_with_resolver_unregisters_the_token(monkeypatch):
+    library = FakeLibrary()
+    library.create_engine_with_resolver = CallableFunction(
+        lambda _thread, _cb, _ctx: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.install_resolver(lambda path: "src")
+    token = runtime._resolver_token
+    assert native._resolver_registry.get(token) is runtime
+    with pytest.raises(native.DataWeaveError):
+        runtime.initialize()
+
+    assert token not in native._resolver_registry
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None

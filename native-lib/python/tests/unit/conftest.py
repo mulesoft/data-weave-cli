@@ -19,6 +19,4 @@ def _reset_shared_isolate():
 def _clear():
     native._lib = None
     native._isolate = None
-    native._isolate_thread = None
-    native._isolate_owner_thread = None
     native._isolate_ref_count = 0

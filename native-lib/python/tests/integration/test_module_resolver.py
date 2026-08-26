@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 from zipfile import ZipFile
 
 import pytest
@@ -346,3 +347,36 @@ def test_shared_isolate_survives_until_the_last_instance_cleans_up():
         b.cleanup()
     assert native._isolate_ref_count == 0
     assert native._isolate is None                   # last release tore it down
+
+
+@pytest.mark.integration
+def test_last_release_on_a_foreign_thread_does_not_hang():
+    from dataweave import native
+
+    # Initialize on a worker thread so the isolate's creating thread differs from
+    # the main thread that runs the final cleanup (the atexit-style ordering that
+    # deadlocked before Finding #1's fix).
+    holder = {}
+    def make():
+        dw = dataweave.DataWeave()
+        dw.initialize()
+        holder["dw"] = dw
+    t = threading.Thread(target=make)
+    t.start()
+    t.join(30)
+    assert not t.is_alive()
+    dw = holder["dw"]
+    try:
+        assert native._isolate_ref_count == 1
+        assert dw.run("%dw 2.0\noutput application/json\n---\n1 + 1").get_string() == "2"
+    finally:
+        # Last release runs HERE on the main thread (foreign to the creating
+        # worker). On the unfixed code graal_tear_down_isolate blocks forever;
+        # run the cleanup on a joinable thread with a timeout so a regression is a
+        # bounded failure instead of hanging the suite.
+        done = threading.Thread(target=dw.cleanup)
+        done.start()
+        done.join(30)
+        assert not done.is_alive(), "cleanup() hung: last-release teardown blocked on a foreign thread"
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None

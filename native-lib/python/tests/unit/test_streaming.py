@@ -1,6 +1,6 @@
 import ctypes
 from queue import Full, Queue
-from threading import current_thread, Event, Lock, Thread
+from threading import Event, Lock, Thread
 from time import sleep
 
 import pytest
@@ -78,8 +78,10 @@ def configured_runtime(native):
     native_runtime.has_callback_input_output = True
     native_runtime.lib = native
     native_runtime.isolate = object()
-    native_runtime.thread = object()
-    native_runtime._owner_thread = current_thread()
+    # No persistent attachment (attach-on-demand): every synchronous call --
+    # including cleanup() -- attaches its own thread via the FakeNative's
+    # graal_attach_thread/graal_detach_thread.
+    native_runtime.thread = None
     native_runtime.handle = 1
     native_runtime._resolver = None
     native_runtime._resolver_callback = None
