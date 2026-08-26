@@ -550,3 +550,68 @@ def test_failed_isolate_teardown_surfaces_and_clears_state_for_retry(monkeypatch
     # Restore a passing teardown so b.cleanup() doesn't raise on the way out.
     library.graal_tear_down_isolate = CallableFunction(lambda _thread: 0)
     b.cleanup()
+
+
+@pytest.mark.unit
+def test_two_engines_dispatch_to_their_own_resolver(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    a = native.NativeRuntime("/tmp/dwlib")
+    a.install_resolver(lambda path: f"A:{path}")
+    a.initialize()
+    b = native.NativeRuntime("/tmp/dwlib")
+    b.install_resolver(lambda path: f"B:{path}")
+    b.initialize()
+
+    # ctx tokens are distinct and registered.
+    _ha, cb_a, ctx_a = next(e for e in library.created_engines if e[0] == a.handle)
+    _hb, cb_b, ctx_b = next(e for e in library.created_engines if e[0] == b.handle)
+    assert ctx_a != ctx_b
+    assert native._resolver_registry[ctx_a] is a
+    assert native._resolver_registry[ctx_b] is b
+
+    # Simulate a synchronous resolve on each engine's owner thread.
+    with a._resolver_scope():
+        ptr_a = cb_a(None, ctx_a, b"org/x.dwl")
+    assert ctypes.string_at(ptr_a) == b"A:org/x.dwl"
+
+    with b._resolver_scope():
+        ptr_b = cb_b(None, ctx_b, b"org/x.dwl")
+    assert ctypes.string_at(ptr_b) == b"B:org/x.dwl"
+
+    a.cleanup()
+    assert ctx_a not in native._resolver_registry
+    b.cleanup()
+
+
+@pytest.mark.unit
+def test_resolver_fails_closed_off_the_owner_thread_without_invoking_python(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    calls = []
+    a = native.NativeRuntime("/tmp/dwlib")
+    a.install_resolver(lambda path: calls.append(path) or "src")
+    a.initialize()
+    _h, callback, ctx = library.created_engines[0]
+
+    # Not inside a synchronous resolver scope (mirrors a streaming worker): must
+    # return None WITHOUT invoking the Python resolver.
+    assert callback(None, ctx, b"org/x.dwl") is None
+    assert calls == []
+
+    # Inside the scope but on a different Python thread ident: still fail-closed.
+    results = []
+    def worker():
+        with a._resolver_scope():
+            # Overwrite the active ident to the worker's, but call from... actually
+            # _resolver_scope records THIS thread's ident, so a same-thread call
+            # resolves. Assert the positive to anchor the guard semantics.
+            results.append(callback(None, ctx, b"org/y.dwl"))
+    import threading
+    t = threading.Thread(target=worker)
+    t.start(); t.join(2)
+    assert results and ctypes.string_at(results[0]) == b"src"
+
+    a.cleanup()

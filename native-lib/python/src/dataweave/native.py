@@ -39,6 +39,21 @@ _isolate_owner_thread = None    # the Python threading.Thread that created the i
 _isolate_ref_count = 0
 
 
+# Per-engine resolver dispatch. The ctx passed to create_engine_with_resolver is
+# a Python-allocated monotonic token (NOT the Java handle) so it is known before
+# the engine exists -- no resolve callback can fire for an unregistered ctx.
+_resolver_lock_global = Lock()
+_resolver_registry = {}          # token(int) -> NativeRuntime
+_resolver_token_seq = 0
+
+
+def _next_resolver_token() -> int:
+    global _resolver_token_seq
+    with _resolver_lock_global:
+        _resolver_token_seq += 1
+        return _resolver_token_seq
+
+
 def _bind_abi(lib) -> None:
     """Binds argtypes/restypes for the engine ABI and lifecycle exports (once)."""
     for name in ("graal_create_isolate", "graal_attach_thread", "graal_detach_thread",
@@ -225,11 +240,19 @@ class NativeRuntime:
         self.initialized = True
 
     def _create_engine(self) -> int:
-        # Engines without a resolver are created here; the resolver variant is
-        # installed by install_resolver() (Task 4) before this is called.
         with self._current_thread_attachment(self.thread) as thread:
             try:
-                handle = self.lib.create_engine(thread)
+                if self._resolver is not None:
+                    # Pass the bare int token; the declared c_void_p argtype on the
+                    # real ABI call converts it automatically. (Wrapping it in
+                    # ctypes.c_void_p(...) here would produce an unhashable Python
+                    # object, breaking the FakeLibrary-recorded ctx round-trip used
+                    # in tests -- and offers no benefit for the real ctypes call.)
+                    handle = self.lib.create_engine_with_resolver(
+                        thread, self._resolver_callback, self._resolver_token
+                    )
+                else:
+                    handle = self.lib.create_engine(thread)
             except Exception as error:
                 raise DataWeaveError(f"Failed to create DataWeave engine: {error}") from error
         if not handle:
@@ -304,57 +327,37 @@ class NativeRuntime:
                     current,
                 )
 
-    @contextmanager
-    def _resolver_scope(self):
-        yield
+    def install_resolver(self, resolver: ModuleResolver) -> None:
+        """Binds a module resolver to this engine. Must be called before initialize()."""
+        if self.initialized:
+            raise DataWeaveError("Cannot install a resolver after initialize().")
+        self._resolver = resolver
+        self._resolver_token = _next_resolver_token()
+        self._resolver_callback = self._make_trampoline()
+        with _resolver_lock_global:
+            _resolver_registry[self._resolver_token] = self
 
-    def run_script_with_resolver(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver):
-        with self._serialized_native_operation():
-            return self._run_script_with_resolver(thread, script, inputs, resolver)
-
-    def run_script_with_resolver_and_decode(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver) -> str:
-        with self._serialized_native_operation():
-            with self._current_thread_attachment(thread) as current_thread:
-                return self.decode_and_free(
-                    self._run_script_with_resolver(current_thread, script, inputs, resolver),
-                    current_thread,
-                )
-
-    def _run_script_with_resolver(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver):
-        if not self.has_module_resolver:
-            raise DataWeaveError(
-                "Native library does not support module resolver API "
-                "(run_script_with_resolver not found)."
-            )
-        if self._module_resolver is None:
-            self._module_resolver = resolver
-            self._module_resolver_callback = self._create_module_resolver_callback(resolver)
-        elif self._module_resolver is not resolver:
-            raise DataWeaveError("Native runtime already has a different module resolver")
-
-        self._resolver_buffers.clear()
-        self._resolver_active = True
-        try:
-            return self.lib.run_script_with_resolver(
-                thread, script, inputs, self._module_resolver_callback
-            )
-        finally:
-            self._resolver_active = False
-            self._resolver_buffers.clear()
-
-    def _create_module_resolver_callback(self, resolver: ModuleResolver):
-        def resolve(_thread, module_path):
+    def _make_trampoline(self):
+        token = self._resolver_token
+        def resolve(_thread, _ctx, module_path):
             try:
-                if not self._resolver_active:
+                entry = _resolver_registry.get(token)
+                if entry is None:
+                    return None
+                # Fail-closed guard: resolve only during a synchronous run on the
+                # thread that installed the scope. Streaming workers run on other
+                # threads and never enter the scope -> return None without calling
+                # the Python resolver (preserves calls == calls_after_install).
+                if not entry._resolver_active or get_ident() != entry._resolver_active_ident:
                     return None
                 path = module_path.decode("utf-8")
                 if path.startswith("/"):
                     path = path[1:]
-                source = resolver(path)
+                source = entry._resolver(path)
                 if not isinstance(source, str):
                     return None
                 buffer = ctypes.create_string_buffer(source.encode("utf-8"))
-                self._resolver_buffers.append(buffer)
+                entry._resolver_buffers.append(buffer)
                 return ctypes.addressof(buffer)
             except BaseException:
                 try:
@@ -365,8 +368,22 @@ class NativeRuntime:
                 except BaseException:
                     pass
                 return None
-
         return RESOLVE_MODULE_CALLBACK(resolve)
+
+    @contextmanager
+    def _resolver_scope(self):
+        if self._resolver is None:
+            yield
+            return
+        self._resolver_buffers = []
+        self._resolver_active = True
+        self._resolver_active_ident = get_ident()
+        try:
+            yield
+        finally:
+            self._resolver_active = False
+            self._resolver_active_ident = None
+            self._resolver_buffers = []
 
     def cleanup(self) -> None:
         with self._serialized_native_operation():
@@ -386,6 +403,10 @@ class NativeRuntime:
                 self._resolver_buffers = []
                 self._resolver_active = False
                 self._resolver_active_ident = None
+                if self._resolver_token:
+                    with _resolver_lock_global:
+                        _resolver_registry.pop(self._resolver_token, None)
+                    self._resolver_token = 0
                 _release_isolate()
 
     @contextmanager
