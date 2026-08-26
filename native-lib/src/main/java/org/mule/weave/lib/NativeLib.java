@@ -31,26 +31,7 @@ public class NativeLib {
     static final String UNKNOWN_ENGINE_HANDLE_JSON = "{\"success\":false,\"error\":\"Unknown engine handle\"}";
 
     /**
-     * Native method that executes a DataWeave script with inputs and returns the result.
-     * Can be called from Python via FFI.
-     *
-     * @param thread the isolate thread (automatically provided by GraalVM)
-     * @param script the DataWeave script to execute (C string pointer)
-     * @param inputsJson JSON string containing the inputs map with content (base64 encoded), mimeType, properties and charset for each binding
-     * @return the script execution result base64 encoded (C string pointer)
-     */
-    @CEntryPoint(name = "run_script")
-    public static CCharPointer runDwScriptEncoded(IsolateThread thread, CCharPointer script, CCharPointer inputsJson) {
-        String dwScript = CTypeConversion.toJavaString(script);
-        String inputs = CTypeConversion.toJavaString(inputsJson);
-
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
-        String result = runtime.run(dwScript, inputs);
-        return toUnmanagedCString(result);
-    }
-
-    /**
-     * Frees a C string previously returned by {@link #runDwScriptEncoded(IsolateThread, CCharPointer, CCharPointer)}.
+     * Frees a C string previously returned by engine entrypoints.
      *
      * @param thread the isolate thread (automatically provided by GraalVM)
      * @param pointer the pointer to the unmanaged C string to free; if null, this is a no-op
@@ -68,44 +49,7 @@ public class NativeLib {
     private static final int CALLBACK_BUFFER_SIZE = 8 * 1024;
 
     /**
-     * Executes a DataWeave script and streams the result to a caller-supplied write callback.
-     *
-     * <p>Instead of the session-based open/read/close cycle, the caller passes a
-     * {@code WriteCallback} function pointer. The Java side reads the output stream in chunks
-     * and invokes the callback for each chunk until the stream is exhausted.</p>
-     *
-     * <p>The returned C string is a JSON object with the execution metadata:
-     * <ul>
-     *   <li>On success: {@code {"success":true,"mimeType":"...","charset":"...","binary":true/false}}</li>
-     *   <li>On error:   {@code {"success":false,"error":"..."}}</li>
-     * </ul>
-     * The caller must free the returned pointer with {@link #freeCString}.</p>
-     *
-     * @param thread        the isolate thread
-     * @param script        the DataWeave script (C string)
-     * @param inputsJson    JSON-encoded inputs map (C string), may be null
-     * @param writeCallback function pointer invoked with each output chunk; must return 0 on success
-     * @param ctx           opaque context pointer forwarded to every callback invocation
-     * @return an unmanaged C string with JSON metadata/error
-     */
-    @CEntryPoint(name = "run_script_callback")
-    public static CCharPointer runScriptCallback(
-            IsolateThread thread,
-            CCharPointer script,
-            CCharPointer inputsJson,
-            NativeCallbacks.WriteCallback writeCallback,
-            PointerBase ctx) {
-
-        String dwScript = CTypeConversion.toJavaString(script);
-        String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
-
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
-        return streamToWriteCallback(runtime, dwScript, inputs, writeCallback, ctx);
-    }
-
-    /**
-     * Runs the streaming write-callback loop shared by the legacy singleton entrypoint
-     * ({@link #runScriptCallback}) and the per-engine entrypoint
+     * Runs the streaming write-callback loop shared by the per-engine entrypoint
      * ({@link #runScriptCallbackEngine}).
      */
     private static CCharPointer streamToWriteCallback(
@@ -151,55 +95,7 @@ public class NativeLib {
     }
 
     /**
-     * Executes a DataWeave script whose output is streamed via a write callback, and whose
-     * input named {@code inputName} is fed via a read callback.
-     *
-     * <p>The read callback is invoked on a background thread to pull input data while the
-     * output is pushed to the write callback on the calling thread. This allows fully
-     * callback-driven input <em>and</em> output streaming in a single call.</p>
-     *
-     * <p>The returned C string follows the same JSON schema as
-     * {@link #runScriptCallback}.</p>
-     *
-     * @param thread        the isolate thread
-     * @param script        the DataWeave script (C string)
-     * @param inputsJson    JSON-encoded inputs map (C string), may be null; entries for
-     *                      {@code inputName} are ignored since the read callback supplies that input
-     * @param inputName     the binding name for the callback-supplied input (C string)
-     * @param inputMimeType the MIME type of the callback-supplied input (C string)
-     * @param inputCharset  the charset of the callback-supplied input (C string), may be null for UTF-8
-     * @param readCallback  function pointer invoked to read the next chunk; must return bytes written,
-     *                      0 on EOF, or -1 on error
-     * @param writeCallback function pointer invoked with each output chunk; must return 0 on success
-     * @param ctx           opaque context pointer forwarded to every callback invocation
-     * @return an unmanaged C string with JSON metadata/error
-     */
-    @CEntryPoint(name = "run_script_input_output_callback")
-    public static CCharPointer runScriptInputOutputCallback(
-            IsolateThread thread,
-            CCharPointer script,
-            CCharPointer inputsJson,
-            CCharPointer inputName,
-            CCharPointer inputMimeType,
-            CCharPointer inputCharset,
-            NativeCallbacks.ReadCallback readCallback,
-            NativeCallbacks.WriteCallback writeCallback,
-            PointerBase ctx) {
-
-        String dwScript = CTypeConversion.toJavaString(script);
-        String inputs = inputsJson.isNull() ? null : CTypeConversion.toJavaString(inputsJson);
-        String inName = CTypeConversion.toJavaString(inputName);
-        String inMime = CTypeConversion.toJavaString(inputMimeType);
-        String inCharset = inputCharset.isNull() ? null : CTypeConversion.toJavaString(inputCharset);
-
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
-        return transformViaCallbacks(runtime, dwScript, inputs, inName, inMime, inCharset,
-                readCallback, writeCallback, ctx);
-    }
-
-    /**
-     * Runs the input-feeder + output-streaming loop shared by the legacy singleton entrypoint
-     * ({@link #runScriptInputOutputCallback}) and the per-engine entrypoint
+     * Runs the input-feeder + output-streaming loop shared by the per-engine entrypoint
      * ({@link #runScriptInputOutputCallbackEngine}).
      */
     private static CCharPointer transformViaCallbacks(
@@ -437,7 +333,7 @@ public class NativeLib {
 
     /**
      * Executes a DataWeave script against a specific engine, streaming the result to a
-     * caller-supplied write callback. See {@link #runScriptCallback} for the callback contract.
+     * caller-supplied write callback. See {@link #streamToWriteCallback} for the callback contract.
      *
      * <p>If {@code handle} does not identify a live engine, returns
      * {@code {"success":false,"error":"Unknown engine handle"}} rather than throwing.</p>
@@ -465,7 +361,7 @@ public class NativeLib {
 
     /**
      * Executes a DataWeave script against a specific engine, with a callback-supplied input
-     * and callback-streamed output. See {@link #runScriptInputOutputCallback} for the callback
+     * and callback-streamed output. See {@link #transformViaCallbacks} for the callback
      * contract.
      *
      * <p>If {@code handle} does not identify a live engine, returns

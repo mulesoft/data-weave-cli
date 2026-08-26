@@ -58,28 +58,6 @@ public class ScriptRuntime {
         return REGISTRY.remove(handle) != null;
     }
 
-    // ── Legacy singleton (ClassLoader-only) for Python entrypoints ────────
-    private static volatile ScriptRuntime defaultInstance = null;
-
-    /**
-     * Returns the process-wide legacy singleton instance (ClassLoader-only resolver).
-     *
-     * @return the shared {@link ScriptRuntime}
-     */
-    public static ScriptRuntime getInstance() {
-        ScriptRuntime local = defaultInstance;
-        if (local == null) {
-            synchronized (ScriptRuntime.class) {
-                local = defaultInstance;
-                if (local == null) {
-                    local = new ScriptRuntime(null);
-                    defaultInstance = local;
-                }
-            }
-        }
-        return local;
-    }
-
     // ── Per-instance engine ───────────────────────────────────────────────
     private final DWScriptingEngine engine;
 

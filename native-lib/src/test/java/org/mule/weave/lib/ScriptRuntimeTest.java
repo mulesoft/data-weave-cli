@@ -19,7 +19,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runSimpleScript() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
         
         System.out.println("Running sqrt(144) 10 times with timing:");
         System.out.println("=".repeat(50));
@@ -39,7 +39,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runParseError() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
 
         System.out.println("Running sqrt(144) 10 times with timing:");
         System.out.println("=".repeat(50));
@@ -55,7 +55,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithInputs() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
         
         System.out.println("Testing runWithInputs with two integer numbers:");
         System.out.println("=".repeat(50));
@@ -129,7 +129,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithXmlInput() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
         
         System.out.println("Testing runWithInputs with XML input to calculate average age:");
         System.out.println("=".repeat(50));
@@ -181,7 +181,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithJsonObjectInput() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
         
         System.out.println("Testing runWithInputs with JSON object input:");
         System.out.println("=".repeat(50));
@@ -216,7 +216,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithBinaryResult() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
 
         System.out.println("Running fromBase64 10 times with timing:");
         System.out.println("=".repeat(50));
@@ -239,7 +239,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithInputProperties() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
         String encodedIn0 = Base64.getEncoder().encodeToString("1234567".getBytes());
         Result result = Result.parse(runtime.run("in0.column_1[0] as Number",
                 "{\"in0\": " +
@@ -252,7 +252,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamSimpleScript() throws IOException {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
 
         System.out.println("Testing streaming simple script:");
         System.out.println("=".repeat(50));
@@ -279,7 +279,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamWithInputs() throws IOException {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
 
         System.out.println("Testing streaming with inputs:");
         System.out.println("=".repeat(50));
@@ -310,7 +310,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamChunkedRead() throws IOException {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
 
         System.out.println("Testing streaming chunked read:");
         System.out.println("=".repeat(50));
@@ -341,7 +341,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamWithStreamingInput() throws Exception {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
 
         System.out.println("Testing streaming with streaming input:");
         System.out.println("=".repeat(50));
@@ -396,7 +396,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamWithLargeStreamingInput() throws Exception {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
 
         System.out.println("Testing streaming with large streaming input:");
         System.out.println("=".repeat(50));
@@ -455,7 +455,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamErrorSession() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
 
         System.out.println("Testing streaming error session:");
         System.out.println("=".repeat(50));
@@ -474,7 +474,7 @@ class ScriptRuntimeTest {
 
     @Test
     void callbackOutputStreaming() throws IOException {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
 
         System.out.println("Testing callback-based output streaming:");
         System.out.println("=".repeat(50));
@@ -505,7 +505,7 @@ class ScriptRuntimeTest {
 
     @Test
     void callbackInputOutputStreaming() throws Exception {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
 
         System.out.println("Testing callback-based input+output streaming:");
         System.out.println("=".repeat(50));
@@ -566,7 +566,7 @@ class ScriptRuntimeTest {
 
     @Test
     void callbackOutputStreamingError() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime(null);
 
         System.out.println("Testing callback-based output streaming with error:");
         System.out.println("=".repeat(50));
