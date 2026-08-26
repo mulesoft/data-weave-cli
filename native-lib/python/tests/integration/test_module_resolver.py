@@ -318,3 +318,31 @@ print(json.dumps({{
         ],
         "errors": [],
     }
+
+
+@pytest.mark.integration
+def test_shared_isolate_survives_until_the_last_instance_cleans_up():
+    from dataweave import native
+
+    a = dataweave.DataWeave(resolve_module=dataweave.modules_from_map({
+        "org/test/lib.dwl": "%dw 2.0\nfun answer() = 1",
+    }))
+    b = dataweave.DataWeave(resolve_module=dataweave.modules_from_map({
+        "org/test/lib.dwl": "%dw 2.0\nfun answer() = 2",
+    }))
+    a.initialize()
+    b.initialize()
+    try:
+        assert native._isolate is not None
+        assert native._isolate_ref_count == 2
+        assert a.run(IMPORT_LIB_SCRIPT).get_string() == "1"
+        assert b.run(IMPORT_LIB_SCRIPT).get_string() == "2"
+
+        a.cleanup()
+        assert native._isolate is not None          # b still holds a ref
+        assert native._isolate_ref_count == 1
+        assert b.run(IMPORT_LIB_SCRIPT).get_string() == "2"  # b unaffected
+    finally:
+        b.cleanup()
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None                   # last release tore it down
