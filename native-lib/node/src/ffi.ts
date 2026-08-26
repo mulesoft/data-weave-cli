@@ -3,7 +3,6 @@ import type { ModuleResolver } from "./resolver";
 
 interface NativeAddon {
   initialize(libPath: string): void;
-  runScript(script: string, inputsJson: string): string;
   createEngine(): number;
   createEngineWithResolver(resolver: ModuleResolver): number;
   destroyEngine(handle: number): void;
@@ -38,10 +37,6 @@ function getAddon(addonPath?: string): NativeAddon {
 
 export function initialize(libPath: string, addonPath?: string): void {
   getAddon(addonPath).initialize(libPath);
-}
-
-export function runScript(script: string, inputsJson: string): string {
-  return getAddon().runScript(script, inputsJson);
 }
 
 export function createEngine(): number {

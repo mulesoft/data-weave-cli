@@ -10,13 +10,10 @@ typedef int (*graal_create_isolate_fn)(void*, void**, void**);
 typedef int (*graal_attach_thread_fn)(void*, void**);
 typedef int (*graal_detach_thread_fn)(void*);
 typedef int (*graal_tear_down_isolate_fn)(void*);
-typedef void* (*run_script_fn)(void*, const char*, const char*);
 typedef void (*free_cstring_fn)(void*, void*);
 typedef int (*write_callback_t)(void* ctx, const char* buf, int len);
 typedef int (*read_callback_t)(void* ctx, char* buf, int buf_size);
 typedef char* (*resolve_module_callback_t)(void* thread, void* ctx, const char* module_path);
-typedef void* (*run_script_callback_fn)(void*, const char*, const char*, write_callback_t, void*);
-typedef void* (*run_script_input_output_callback_fn)(void*, const char*, const char*, const char*, const char*, const char*, read_callback_t, write_callback_t, void*);
 
 // Per-engine entrypoint types. Handles are Java long values and MUST be C
 // long long everywhere (plain long is 32-bit on Windows LLP64 and would
@@ -48,10 +45,7 @@ static graal_create_isolate_fn fn_create_isolate = NULL;
 static graal_attach_thread_fn fn_attach_thread = NULL;
 static graal_detach_thread_fn fn_detach_thread = NULL;
 static graal_tear_down_isolate_fn fn_tear_down_isolate = NULL;
-static run_script_fn fn_run_script = NULL;
 static free_cstring_fn fn_free_cstring = NULL;
-static run_script_callback_fn fn_run_script_callback = NULL;
-static run_script_input_output_callback_fn fn_run_script_input_output_callback = NULL;
 
 // Per-engine entrypoints
 static create_engine_fn fn_create_engine = NULL;
@@ -475,15 +469,11 @@ static void init_thread_fn(void* arg) {
   uv_dlsym(&g_lib, "graal_attach_thread", (void**)&fn_attach_thread);
   uv_dlsym(&g_lib, "graal_detach_thread", (void**)&fn_detach_thread);
   uv_dlsym(&g_lib, "graal_tear_down_isolate", (void**)&fn_tear_down_isolate);
-  uv_dlsym(&g_lib, "run_script", (void**)&fn_run_script);
   uv_dlsym(&g_lib, "free_cstring", (void**)&fn_free_cstring);
-  uv_dlsym(&g_lib, "run_script_callback", (void**)&fn_run_script_callback);
-  uv_dlsym(&g_lib, "run_script_input_output_callback", (void**)&fn_run_script_input_output_callback);
 
   // Load per-engine entrypoints. Every initialize() call creates an engine via
   // create_engine/create_engine_with_resolver (see dataweave.ts), so these are
-  // load-time required, not optional, even though they are newer than the
-  // legacy singleton symbols above.
+  // load-time required, not optional.
   uv_dlsym(&g_lib, "create_engine", (void**)&fn_create_engine);
   uv_dlsym(&g_lib, "create_engine_with_resolver", (void**)&fn_create_engine_with_resolver);
   uv_dlsym(&g_lib, "destroy_engine", (void**)&fn_destroy_engine);
@@ -491,7 +481,7 @@ static void init_thread_fn(void* arg) {
   uv_dlsym(&g_lib, "run_script_callback_engine", (void**)&fn_run_script_callback_engine);
   uv_dlsym(&g_lib, "run_script_input_output_callback_engine", (void**)&fn_run_script_input_output_callback_engine);
 
-  if (!fn_create_isolate || !fn_run_script || !fn_free_cstring) {
+  if (!fn_create_isolate || !fn_free_cstring) {
     snprintf(args->error, sizeof(args->error), "Missing required symbols in library");
     args->result = -2;
     return;
@@ -767,92 +757,6 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   g_teardown_needed = false;
   uv_mutex_unlock(&g_mutex);
   return NULL;
-}
-
-// --- Helper: run any GraalVM call on a dedicated thread ---
-
-struct script_call_args {
-  const char* script;
-  const char* inputs_json;
-  char* result;
-};
-
-static void run_script_thread_fn(void* arg) {
-  struct script_call_args* a = (struct script_call_args*)arg;
-
-  void* thread = NULL;
-  int rc = fn_attach_thread(g_isolate, &thread);
-  if (rc != 0) {
-    a->result = strdup("{\"success\":false,\"error\":\"Failed to attach GraalVM thread\"}");
-    return;
-  }
-
-  void* ptr = fn_run_script(thread, a->script, a->inputs_json);
-  if (ptr) {
-    a->result = strdup((const char*)ptr);
-    fn_free_cstring(thread, ptr);
-  } else {
-    a->result = strdup("");
-  }
-
-  fn_detach_thread(thread);
-}
-
-// --- runScript (synchronous from JS, but runs GraalVM on a thread) ---
-
-static napi_value dw_napi_run_script(napi_env env, napi_callback_info info) {
-  if (!g_initialized) {
-    napi_throw_error(env, NULL, "Not initialized. Call initialize() first.");
-    return NULL;
-  }
-
-  size_t argc = 2;
-  napi_value argv[2];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
-  if (argc < 2) {
-    napi_throw_error(env, NULL, "runScript requires (script, inputsJson)");
-    return NULL;
-  }
-
-  size_t script_len, inputs_len;
-  napi_get_value_string_utf8(env, argv[0], NULL, 0, &script_len);
-  napi_get_value_string_utf8(env, argv[1], NULL, 0, &inputs_len);
-
-  char* script = malloc(script_len + 1);
-  char* inputs = malloc(inputs_len + 1);
-  napi_get_value_string_utf8(env, argv[0], script, script_len + 1, NULL);
-  napi_get_value_string_utf8(env, argv[1], inputs, inputs_len + 1, NULL);
-
-  struct script_call_args call_args;
-  call_args.script = script;
-  call_args.inputs_json = inputs;
-  call_args.result = NULL;
-
-  uv_thread_t tid;
-  uv_thread_options_t opts;
-  opts.flags = UV_THREAD_HAS_STACK_SIZE;
-  opts.stack_size = 2 * 1024 * 1024;
-  int spawn_rc = uv_thread_create_ex(&tid, &opts, run_script_thread_fn, &call_args);
-  if (spawn_rc != 0) {
-    free(script);
-    free(inputs);
-    napi_throw_error(env, NULL, "Failed to spawn script execution thread");
-    return NULL;
-  }
-  uv_thread_join(&tid);
-
-  free(script);
-  free(inputs);
-
-  napi_value result;
-  if (call_args.result) {
-    napi_create_string_utf8(env, call_args.result, strlen(call_args.result), &result);
-    free(call_args.result);
-  } else {
-    napi_create_string_utf8(env, "", 0, &result);
-  }
-  return result;
 }
 
 // --- Streaming output ---
@@ -2905,9 +2809,6 @@ static napi_value Init(napi_env env, napi_value exports) {
 
   napi_create_function(env, "initialize", NAPI_AUTO_LENGTH, napi_initialize, NULL, &fn);
   napi_set_named_property(env, exports, "initialize", fn);
-
-  napi_create_function(env, "runScript", NAPI_AUTO_LENGTH, dw_napi_run_script, NULL, &fn);
-  napi_set_named_property(env, exports, "runScript", fn);
 
   napi_create_function(env, "createEngine", NAPI_AUTO_LENGTH, napi_create_engine, NULL, &fn);
   napi_set_named_property(env, exports, "createEngine", fn);
