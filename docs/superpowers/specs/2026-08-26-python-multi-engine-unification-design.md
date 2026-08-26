@@ -279,3 +279,21 @@ dwB.cleanup()  → join workers; destroy_engine(handleB); ref 1→0 → detach m
 | Node addon (legacy path to remove) | `native-lib/node/src/addon.c` (`dw_napi_run_script`) |
 | Python glue to rewrite | `native-lib/python/src/dataweave/{native,runtime,models}.py` |
 | Current Python isolate-per-instance model | `native-lib/python/src/dataweave/native.py` (`graal_create_isolate` in `NativeRuntime.initialize`) |
+
+## Engine lifecycle contract (shared by both bindings)
+
+These invariants are the shared artifact both `native-lib/node/src/addon.c` and
+`native-lib/python/src/dataweave/native.py` implement. Any binding on the `*_engine` C ABI must
+uphold all six:
+
+1. One process-wide isolate; engines are handle-addressed objects in the Java registry.
+2. The isolate is reference-counted; the refcount equals the number of live engines; the isolate
+   exists iff the refcount > 0.
+3. Create-on-first-ref, tear-down-on-last-release; the binding calls
+   `graal_create_isolate` / `graal_tear_down_isolate` from *outside* the isolate.
+4. Each engine handle is created by `create_engine` / `create_engine_with_resolver` and destroyed
+   by `destroy_engine`.
+5. Resolver dispatch is per-engine via the opaque `ctx` echoed to the 3-arg `ResolveModuleCallback`;
+   custom-module resolution fails closed off the engine's owner thread.
+6. A failed engine-create rolls back the isolate ref; a throwing `destroy_engine` still releases
+   the ref.

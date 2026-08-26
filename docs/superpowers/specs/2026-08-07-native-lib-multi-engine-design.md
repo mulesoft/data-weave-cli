@@ -15,6 +15,18 @@
 > `DataWeave` class is pre-GA, so several internal contracts (async `cleanup()`, the removed
 > `*_with_resolver` C ABI) changed during hardening without a compatibility ceremony.
 
+> **Superseded Python notes (update 2026-08-26).** This document is the *Node* design and
+> assumed the Python binding would stay on the old isolate-per-instance model behind the
+> retained legacy singleton entrypoints (`ScriptRuntime.getInstance()` + `run_script` /
+> `run_script_callback` / `run_script_input_output_callback`). That is no longer true: the
+> `ScriptRuntime` singleton and all three legacy C entrypoints have been **removed**, and both
+> the Node and Python bindings now drive the *same* shared-isolate + handle-addressed-engine
+> model through the identical `*_engine` C ABI. Python uses a module-level reference-counted
+> isolate with one engine handle per `DataWeave` instance. The Python-specific claims flagged
+> inline below are corrected in place; see
+> [docs/superpowers/specs/2026-08-26-python-multi-engine-unification-design.md](./2026-08-26-python-multi-engine-unification-design.md)
+> for the design that superseded them. The Node sections remain accurate as shipped.
+
 ## 1. Goal
 
 Let multiple `DataWeave` instances coexist in one Node process, each with its own module
@@ -37,9 +49,10 @@ resolver-backed `run()` first won.
 (`native-cli/src/main/scala/org/mule/weave/dwnative/NativeRuntime.scala:50-60`) already builds one
 independent `DataWeaveScriptingEngine` + `CompositeWeaveResourceResolver` per instance — there is
 no shared static state there. GraalVM Java statics are scoped per-isolate, which is also why the
-Python binding (one GraalVM isolate per `DataWeave()` instance) already gets resolver isolation
-"for free." The limitation was specific to `native-lib`'s deliberate Java static singleton plus
-the Node C addon's global resolver bridge.
+Python binding — which *at the time of this design* used one GraalVM isolate per `DataWeave()`
+instance — got resolver isolation "for free." The limitation was specific to `native-lib`'s
+deliberate Java static singleton plus the Node C addon's global resolver bridge. (Python has
+since been unified onto the shared-isolate + handle model; see the superseded-notes banner above.)
 
 ## 3. Scope
 
@@ -51,9 +64,10 @@ the Node C addon's global resolver bridge.
 - Node TypeScript layer (`ffi.ts`, `dataweave.ts`, `stream.ts`, `reader.ts`): each `DataWeave`
   instance owns an engine handle for its whole lifecycle.
 
-**Out of scope:**
-- Python binding changes. Python already achieves isolation via one isolate per instance;
-  unifying it onto the same handle-based API is a follow-up.
+**Out of scope (as of this Node design):**
+- Python binding changes. Python already achieved isolation via one isolate per instance;
+  unifying it onto the same handle-based API was left as a follow-up. **(Since completed —
+  see the superseded-notes banner above and the 2026-08-26 Python unification design.)**
 - Separate GraalVM isolates per engine — rejected as the isolation mechanism (see §5).
 - Solving streaming/transform + **custom-module** resolution across the background-thread
   boundary. Streaming against a resolver-backed engine still fails closed (returns "not found")
@@ -339,8 +353,10 @@ because a boolean cannot represent the window during which `cleanup()` has start
   `AtomicLong` handle allocator. The resolver is bound once at construction (immutable for the
   instance's lifetime); the `static setResolver` write-once mutation is removed.
   `compositeResolver()` / `createModuleComponentsFactory()` become instance methods.
-  `getInstance()` is **kept** returning a lazily-created default (ClassLoader-only, handle-less)
-  instance so the resolver-less legacy entrypoints used by Python are untouched.
+  *(As originally shipped, `getInstance()` was kept returning a lazily-created default
+  instance so the resolver-less legacy entrypoints used by Python stayed untouched. Both
+  `getInstance()` and those legacy entrypoints have since been **removed** — Python now uses
+  the handle-addressed `*_engine` ABI. See the superseded-notes banner above.)*
 - **`CallbackWeaveResourceResolver.java`** — stores a `PointerBase ctx` alongside the callback,
   forwarded on every `callback.invoke(...)`; constructor `(ResolveModuleCallback, PointerBase ctx)`.
 - **`NativeCallbacks.java`** — `ResolveModuleCallback` gains a `ctx` parameter
@@ -350,9 +366,11 @@ because a boolean cannot represent the window during which `cleanup()` has start
 - **`NativeLib.java`** — adds handle-based lifecycle + execution entrypoints (`create_engine`,
   `create_engine_with_resolver`, `destroy_engine`, `run_script_engine`,
   `run_script_callback_engine`, `run_script_input_output_callback_engine`) resolving via
-  `ScriptRuntime.get(handle)`. The legacy singleton entrypoints (`run_script`,
-  `run_script_callback`, `run_script_input_output_callback`) are **preserved unchanged** for
-  Python. The old `*_with_resolver` entrypoints are **removed** (see §9).
+  `ScriptRuntime.get(handle)`. *(As originally shipped, the legacy singleton entrypoints
+  (`run_script`, `run_script_callback`, `run_script_input_output_callback`) were preserved
+  unchanged for Python; they have since been **removed** — Python now consumes the `*_engine`
+  set too. See the superseded-notes banner above.)* The old `*_with_resolver` entrypoints are
+  **removed** (see §9).
 
 ### Layer 2 — C addon (`native-lib/node/src/addon.c`)
 
@@ -417,8 +435,10 @@ dwB.run(...)  →  resolves via resolver B only; A's cache untouched; no cross-t
   the JSON string for sync `run()`), never an NPE.
 - **Admission / argument / allocation failures:** synchronous `napi_throw_error` (generic Error);
   worker-thread OOM → terminal error JSON. Never `napi_reject_deferred` (absent from `addon.c`).
-- **Python binding:** zero changes — it never called the removed `*_with_resolver` entrypoints and
-  continues on `getInstance()`.
+- **Python binding:** *(as of this Node design)* zero changes — it never called the removed
+  `*_with_resolver` entrypoints and continued on `getInstance()`. **(No longer true: Python has
+  since been ported to the handle-addressed `*_engine` ABI and `getInstance()` is gone — see the
+  superseded-notes banner above.)**
 - **Node, resolver-less / single-resolver usage:** behaves identically; the new code path is a
   functional superset.
 - **Intended breaking changes (pre-GA, no shims):** the dwlib C ABI drops the exported
@@ -460,10 +480,11 @@ dwB.run(...)  →  resolves via resolver B only; A's cache untouched; no cross-t
 
 ## 11. Follow-Up Work
 
-- **Python binding parity:** port the handle-based `create_engine`/`run_script_engine` API to the
-  Python binding so both bindings share one mental model (child GUS item under W-23692110). The
-  broad Python-binding modernization currently riding along in this PR is acknowledged as a
-  scope-bundling and deferred to its own follow-up PR rather than split mid-review.
+- **Python binding parity: DONE (2026-08-26).** The handle-based
+  `create_engine`/`run_script_engine` API has been ported to the Python binding so both
+  bindings share one mental model, and the `ScriptRuntime` singleton plus the three legacy C
+  entrypoints have been removed. See
+  [docs/superpowers/specs/2026-08-26-python-multi-engine-unification-design.md](./2026-08-26-python-multi-engine-unification-design.md).
 - **Streaming/transform + custom-module resolution** across the background-thread boundary remains
   a separate, not-yet-scoped effort (unrelated to the singleton fix).
 
