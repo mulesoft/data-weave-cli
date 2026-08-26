@@ -26,6 +26,129 @@ GraalIsolatePointer = ctypes.POINTER(graal_isolate_t)
 GraalIsolateThreadPointer = ctypes.POINTER(graal_isolatethread_t)
 
 
+# ── Process-wide shared isolate (one per process, N handle-addressed engines) ──
+# All mutations happen under _isolate_lock. Invariant: _isolate_ref_count equals
+# the number of live engines across all DataWeave instances, and _isolate is not
+# None iff the count > 0.
+_isolate_lock = Lock()
+_lib = None
+_lib_path = None
+_isolate = None
+_isolate_thread = None          # the main attached IsolateThread (GraalIsolateThreadPointer)
+_isolate_owner_thread = None    # the Python threading.Thread that created the isolate
+_isolate_ref_count = 0
+
+
+def _bind_abi(lib) -> None:
+    """Binds argtypes/restypes for the engine ABI and lifecycle exports (once)."""
+    for name in ("graal_create_isolate", "graal_attach_thread", "graal_detach_thread",
+                 "graal_tear_down_isolate", "free_cstring",
+                 "create_engine", "create_engine_with_resolver", "destroy_engine",
+                 "run_script_engine", "run_script_callback_engine",
+                 "run_script_input_output_callback_engine"):
+        if not hasattr(lib, name):
+            raise DataWeaveError(f"Native library does not export {name}")
+
+    lib.graal_create_isolate.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(GraalIsolatePointer),
+        ctypes.POINTER(GraalIsolateThreadPointer),
+    ]
+    lib.graal_create_isolate.restype = ctypes.c_int
+    lib.graal_attach_thread.argtypes = [GraalIsolatePointer, ctypes.POINTER(GraalIsolateThreadPointer)]
+    lib.graal_attach_thread.restype = ctypes.c_int
+    lib.graal_detach_thread.argtypes = [GraalIsolateThreadPointer]
+    lib.graal_detach_thread.restype = ctypes.c_int
+    lib.graal_tear_down_isolate.argtypes = [GraalIsolateThreadPointer]
+    lib.graal_tear_down_isolate.restype = ctypes.c_int
+    lib.free_cstring.argtypes = [GraalIsolateThreadPointer, ctypes.c_void_p]
+    lib.free_cstring.restype = None
+
+    lib.create_engine.argtypes = [GraalIsolateThreadPointer]
+    lib.create_engine.restype = ctypes.c_int64
+    lib.create_engine_with_resolver.argtypes = [
+        GraalIsolateThreadPointer, RESOLVE_MODULE_CALLBACK, ctypes.c_void_p,
+    ]
+    lib.create_engine_with_resolver.restype = ctypes.c_int64
+    lib.destroy_engine.argtypes = [GraalIsolateThreadPointer, ctypes.c_int64]
+    lib.destroy_engine.restype = None
+    lib.run_script_engine.argtypes = [
+        GraalIsolateThreadPointer, ctypes.c_int64, ctypes.c_char_p, ctypes.c_char_p,
+    ]
+    lib.run_script_engine.restype = ctypes.c_void_p
+    lib.run_script_callback_engine.argtypes = [
+        GraalIsolateThreadPointer, ctypes.c_int64, ctypes.c_char_p, ctypes.c_char_p,
+        WRITE_CALLBACK, ctypes.c_void_p,
+    ]
+    lib.run_script_callback_engine.restype = ctypes.c_void_p
+    lib.run_script_input_output_callback_engine.argtypes = [
+        GraalIsolateThreadPointer, ctypes.c_int64, ctypes.c_char_p, ctypes.c_char_p,
+        ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+        READ_CALLBACK, WRITE_CALLBACK, ctypes.c_void_p,
+    ]
+    lib.run_script_input_output_callback_engine.restype = ctypes.c_void_p
+
+
+def _acquire_isolate(lib_path: str):
+    """Returns (lib, isolate, thread, owner_thread), creating the shared isolate on
+    the first reference. Increments the refcount only on success."""
+    global _lib, _lib_path, _isolate, _isolate_thread, _isolate_owner_thread, _isolate_ref_count
+    with _isolate_lock:
+        if _isolate is None:
+            try:
+                lib = ctypes.CDLL(lib_path)
+            except OSError as error:
+                raise DataWeaveError(f"Failed to load library from {lib_path}: {error}")
+            _bind_abi(lib)
+            isolate = GraalIsolatePointer()
+            thread = GraalIsolateThreadPointer()
+            try:
+                result = lib.graal_create_isolate(None, ctypes.byref(isolate), ctypes.byref(thread))
+            except Exception as error:
+                raise DataWeaveError(f"Failed to create GraalVM isolate: {error}") from error
+            if result != 0:
+                raise DataWeaveError(f"Failed to create GraalVM isolate. Error code: {result}")
+            _lib = lib
+            _lib_path = lib_path
+            _isolate = isolate
+            _isolate_thread = thread
+            _isolate_owner_thread = current_thread()
+        _isolate_ref_count += 1
+        return _lib, _isolate, _isolate_thread, _isolate_owner_thread
+
+
+def _release_isolate() -> None:
+    """Decrements the refcount; tears the isolate down and nulls globals on 0."""
+    global _lib, _lib_path, _isolate, _isolate_thread, _isolate_owner_thread, _isolate_ref_count
+    with _isolate_lock:
+        if _isolate_ref_count == 0:
+            return
+        _isolate_ref_count -= 1
+        if _isolate_ref_count > 0:
+            return
+        # Last release: tear down from the owner thread if we are on it, else a
+        # fresh attached thread. Then clear globals regardless.
+        lib, isolate, main_thread, owner = _lib, _isolate, _isolate_thread, _isolate_owner_thread
+        try:
+            if current_thread() is owner:
+                _tear_down(lib, main_thread)
+            else:
+                worker = GraalIsolateThreadPointer()
+                if lib.graal_attach_thread(isolate, ctypes.byref(worker)) != 0:
+                    raise DataWeaveError("Failed to attach thread for isolate teardown")
+                _tear_down(lib, worker)
+        finally:
+            _lib = _lib_path = _isolate = _isolate_thread = _isolate_owner_thread = None
+
+
+def _tear_down(lib, thread) -> None:
+    if thread is None:
+        return
+    result = lib.graal_tear_down_isolate(thread)
+    if result != 0:
+        raise DataWeaveError(f"Failed to tear down GraalVM isolate. Error code: {result}")
+
+
 def candidate_library_paths() -> list[Path]:
     paths: list[Path] = []
     env_value = (os.environ.get(_ENV_NATIVE_LIB) or "").strip()
@@ -64,102 +187,45 @@ class NativeRuntime:
         self.lib = None
         self.isolate = None
         self.thread = None
+        self._owner_thread = None
+        self.handle = 0
         self.initialized = False
-        self.has_callback_streaming = False
-        self.has_callback_input_output = False
-        self.has_module_resolver = False
-        self._module_resolver = None
-        self._module_resolver_callback = None
+        # Every engine supports every API now (single unified ABI).
+        self.has_callback_streaming = True
+        self.has_callback_input_output = True
+        self.has_module_resolver = True
+        self._resolver = None
+        self._resolver_callback = None
+        self._resolver_token = 0
         self._resolver_buffers = []
         self._resolver_active = False
+        self._resolver_active_ident = None
         self._resolver_lock = Lock()
         self._execution_owner = None
-        self._owner_thread = None
 
     def initialize(self) -> None:
         if self.initialized:
             return
+        self.lib, self.isolate, self.thread, self._owner_thread = _acquire_isolate(self.lib_path)
         try:
-            self.lib = ctypes.CDLL(self.lib_path)
-        except OSError as error:
-            raise DataWeaveError(f"Failed to load library from {self.lib_path}: {error}")
-        isolate_created = False
-        try:
-            self._create_isolate()
-            isolate_created = True
-            self._owner_thread = current_thread()
-            self._setup_functions()
-            self.initialized = True
+            self.handle = self._create_engine()
         except Exception:
-            if isolate_created:
-                self._tear_down_isolate(suppress_errors=True)
-            self._reset()
+            # Roll back the ref we just took so a failed init leaks nothing.
+            self.lib = self.isolate = self.thread = self._owner_thread = None
+            _release_isolate()
             raise
+        self.initialized = True
 
-    def _create_isolate(self) -> None:
-        self._require_export("graal_create_isolate")
-        self.lib.graal_create_isolate.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(GraalIsolatePointer),
-            ctypes.POINTER(GraalIsolateThreadPointer),
-        ]
-        self.lib.graal_create_isolate.restype = ctypes.c_int
-        self.isolate = GraalIsolatePointer()
-        self.thread = GraalIsolateThreadPointer()
+    def _create_engine(self) -> int:
+        # Engines without a resolver are created here; the resolver variant is
+        # installed by install_resolver() (Task 4) before this is called.
         try:
-            result = self.lib.graal_create_isolate(None, ctypes.byref(self.isolate), ctypes.byref(self.thread))
+            handle = self.lib.create_engine(self.thread)
         except Exception as error:
-            raise DataWeaveError(f"Failed to create GraalVM isolate: {error}") from error
-        if result != 0:
-            raise DataWeaveError(f"Failed to create GraalVM isolate. Error code: {result}")
-
-    def _setup_functions(self) -> None:
-        self._require_export("run_script")
-        self._require_export("free_cstring")
-        self._require_export("graal_tear_down_isolate")
-        self.lib.run_script.argtypes = [GraalIsolateThreadPointer, ctypes.c_char_p, ctypes.c_char_p]
-        self.lib.run_script.restype = ctypes.c_void_p
-        self.lib.free_cstring.argtypes = [GraalIsolateThreadPointer, ctypes.c_void_p]
-        self.lib.free_cstring.restype = None
-        self.lib.graal_tear_down_isolate.argtypes = [GraalIsolateThreadPointer]
-        self.lib.graal_tear_down_isolate.restype = ctypes.c_int
-        self._setup_thread_lifecycle_functions()
-        if hasattr(self.lib, "run_script_with_resolver"):
-            self.lib.run_script_with_resolver.argtypes = [
-                GraalIsolateThreadPointer,
-                ctypes.c_char_p,
-                ctypes.c_char_p,
-                RESOLVE_MODULE_CALLBACK,
-            ]
-            self.lib.run_script_with_resolver.restype = ctypes.c_void_p
-            self.has_module_resolver = True
-        if hasattr(self.lib, "run_script_callback"):
-            self._require_streaming_lifecycle_exports("run_script_callback")
-            self.lib.run_script_callback.argtypes = [GraalIsolateThreadPointer, ctypes.c_char_p, ctypes.c_char_p, WRITE_CALLBACK, ctypes.c_void_p]
-            self.lib.run_script_callback.restype = ctypes.c_void_p
-            self.has_callback_streaming = True
-        if hasattr(self.lib, "run_script_input_output_callback"):
-            self._require_streaming_lifecycle_exports("run_script_input_output_callback")
-            self.lib.run_script_input_output_callback.argtypes = [GraalIsolateThreadPointer, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, READ_CALLBACK, WRITE_CALLBACK, ctypes.c_void_p]
-            self.lib.run_script_input_output_callback.restype = ctypes.c_void_p
-            self.has_callback_input_output = True
-
-    def _require_export(self, name: str) -> None:
-        if not hasattr(self.lib, name):
-            raise DataWeaveError(f"Native library does not export {name}")
-
-    def _require_streaming_lifecycle_exports(self, callback_name: str) -> None:
-        for name in ("free_cstring", "graal_attach_thread", "graal_detach_thread"):
-            if not hasattr(self.lib, name):
-                raise DataWeaveError(f"{callback_name} requires native export {name}")
-
-    def _setup_thread_lifecycle_functions(self) -> None:
-        self._require_export("graal_attach_thread")
-        self._require_export("graal_detach_thread")
-        self.lib.graal_attach_thread.argtypes = [GraalIsolatePointer, ctypes.POINTER(GraalIsolateThreadPointer)]
-        self.lib.graal_attach_thread.restype = ctypes.c_int
-        self.lib.graal_detach_thread.argtypes = [GraalIsolateThreadPointer]
-        self.lib.graal_detach_thread.restype = ctypes.c_int
+            raise DataWeaveError(f"Failed to create DataWeave engine: {error}") from error
+        if not handle:
+            raise DataWeaveError("Native create_engine returned a null handle")
+        return handle
 
     def attach_thread(self):
         worker_thread = GraalIsolateThreadPointer()
@@ -196,17 +262,42 @@ class NativeRuntime:
                 if primary_error is None:
                     raise
 
-    def run_script(self, thread, script: bytes, inputs: bytes):
+    def run_engine_and_decode(self, script: bytes, inputs: bytes) -> str:
         with self._serialized_native_operation():
-            return self.lib.run_script(thread, script, inputs)
+            with self._current_thread_attachment(self.thread) as thread:
+                with self._resolver_scope():
+                    return self.decode_and_free(
+                        self.lib.run_script_engine(thread, self.handle, script, inputs),
+                        thread,
+                    )
 
-    def run_script_and_decode(self, thread, script: bytes, inputs: bytes) -> str:
+    def run_callback_engine_and_decode(self, thread, script: bytes, inputs: bytes, write_callback) -> str:
         with self._serialized_native_operation():
-            with self._current_thread_attachment(thread) as current_thread:
+            with self._current_thread_attachment(thread) as current:
                 return self.decode_and_free(
-                    self.lib.run_script(current_thread, script, inputs),
-                    current_thread,
+                    self.lib.run_script_callback_engine(
+                        current, self.handle, script, inputs, write_callback, None
+                    ),
+                    current,
                 )
+
+    def run_input_output_callback_engine_and_decode(
+        self, thread, script: bytes, inputs: bytes, input_name: bytes,
+        input_mime_type: bytes, input_charset: Optional[bytes], read_callback, write_callback,
+    ) -> str:
+        with self._serialized_native_operation():
+            with self._current_thread_attachment(thread) as current:
+                return self.decode_and_free(
+                    self.lib.run_script_input_output_callback_engine(
+                        current, self.handle, script, inputs, input_name,
+                        input_mime_type, input_charset, read_callback, write_callback, None,
+                    ),
+                    current,
+                )
+
+    @contextmanager
+    def _resolver_scope(self):
+        yield
 
     def run_script_with_resolver(self, thread, script: bytes, inputs: bytes, resolver: ModuleResolver):
         with self._serialized_native_operation():
@@ -268,53 +359,24 @@ class NativeRuntime:
 
         return RESOLVE_MODULE_CALLBACK(resolve)
 
-    def run_script_callback(self, thread, script: bytes, inputs: bytes, write_callback):
-        with self._serialized_native_operation():
-            return self.lib.run_script_callback(thread, script, inputs, write_callback, None)
-
-    def run_script_callback_and_decode(self, thread, script: bytes, inputs: bytes, write_callback) -> str:
-        with self._serialized_native_operation():
-            with self._current_thread_attachment(thread) as current_thread:
-                return self.decode_and_free(
-                    self.lib.run_script_callback(current_thread, script, inputs, write_callback, None),
-                    current_thread,
-                )
-
-    def run_script_input_output_callback(self, thread, script: bytes, inputs: bytes, input_name: bytes, input_mime_type: bytes, input_charset: Optional[bytes], read_callback, write_callback):
-        with self._serialized_native_operation():
-            return self.lib.run_script_input_output_callback(
-                thread, script, inputs, input_name, input_mime_type, input_charset, read_callback, write_callback, None,
-            )
-
-    def run_script_input_output_callback_and_decode(self, thread, script: bytes, inputs: bytes, input_name: bytes, input_mime_type: bytes, input_charset: Optional[bytes], read_callback, write_callback) -> str:
-        with self._serialized_native_operation():
-            with self._current_thread_attachment(thread) as current_thread:
-                return self.decode_and_free(
-                    self.lib.run_script_input_output_callback(
-                        current_thread, script, inputs, input_name, input_mime_type, input_charset, read_callback, write_callback, None,
-                    ),
-                    current_thread,
-                )
-
     def cleanup(self) -> None:
         with self._serialized_native_operation():
             if not self.initialized:
                 return
-            if current_thread() is getattr(self, "_owner_thread", current_thread()):
-                self._tear_down_isolate()
-                self._reset()
-                return
-
-            attached_thread = self.attach_thread()
+            self.initialized = False
             try:
-                self._tear_down_isolate(attached_thread)
-            except Exception:
-                try:
-                    self.detach_thread(attached_thread)
-                except Exception:
-                    pass
-                raise
-            self._reset()
+                if self.handle:
+                    self.lib.destroy_engine(self.thread, self.handle)
+            finally:
+                # Release the isolate ref even if destroy_engine throws, so a
+                # throwing destroy cannot strand the isolate.
+                self.lib = self.isolate = self.thread = self._owner_thread = None
+                self._resolver = None
+                self._resolver_callback = None
+                self._resolver_buffers = []
+                self._resolver_active = False
+                self._resolver_active_ident = None
+                _release_isolate()
 
     @contextmanager
     def _serialized_native_operation(self):
@@ -351,31 +413,3 @@ class NativeRuntime:
                 if primary_error is None:
                     raise
 
-    def _tear_down_isolate(self, thread=None, suppress_errors: bool = False) -> None:
-        isolate_thread = thread or self.thread
-        if isolate_thread is None:
-            return
-        try:
-            result = self.lib.graal_tear_down_isolate(isolate_thread)
-            if result != 0:
-                raise DataWeaveError(f"Failed to tear down GraalVM isolate. Error code: {result}")
-        except DataWeaveError:
-            if not suppress_errors:
-                raise
-        except Exception as error:
-            if not suppress_errors:
-                raise DataWeaveError(f"Failed to tear down GraalVM isolate: {error}") from error
-
-    def _reset(self) -> None:
-        self.initialized = False
-        self._owner_thread = None
-        self.thread = None
-        self.isolate = None
-        self.lib = None
-        self.has_callback_streaming = False
-        self.has_callback_input_output = False
-        self.has_module_resolver = False
-        self._module_resolver = None
-        self._module_resolver_callback = None
-        self._resolver_buffers = []
-        self._resolver_active = False
