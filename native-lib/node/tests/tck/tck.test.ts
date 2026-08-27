@@ -27,6 +27,7 @@ import {
 
 const SUITES_DIR = join(__dirname, "suites");
 const FIXTURES_DIR = join(__dirname, "fixtures");
+const REQUIRE_CORPUS = process.env.DATAWEAVE_TCK_REQUIRE_CORPUS === "1";
 
 /** A discovered case: its directory and the scenarios parsed from it. */
 interface DiscoveredCase {
@@ -72,81 +73,106 @@ function discoverCases(): {
   return { cases, skipped, structuralModuleCases };
 }
 
+/**
+ * Registers a stand-in for the TCK suite when the corpus is missing/empty.
+ * In the dedicated CI job (DATAWEAVE_TCK_REQUIRE_CORPUS=1) this must be loud —
+ * a silent skip there would let the conformance lane go green with zero
+ * cases. Local dev without the flag keeps the quiet skip.
+ */
+function registerMissingCorpus(reason: string) {
+  if (REQUIRE_CORPUS) {
+    describe("TCK conformance", () => {
+      it("TCK corpus must be staged", () => {
+        throw new Error(`TCK corpus ${reason} but DATAWEAVE_TCK_REQUIRE_CORPUS=1 — stage it with stageTckSuites`);
+      });
+    });
+  } else {
+    describe.skip(`TCK conformance (corpus ${reason} — run stageTckSuites)`, () => {
+      it("skipped", () => {});
+    });
+  }
+}
+
 if (!existsSync(SUITES_DIR)) {
   // Corpus not staged — nothing to run in this lane. `npm run test:tck` on a
-  // checkout without the Gradle download is a no-op (passWithNoTests).
-  describe.skip("TCK conformance (corpus not staged — run stageTckSuites)", () => {
-    it("skipped", () => {});
-  });
+  // checkout without the Gradle download is a no-op (passWithNoTests), unless
+  // the dedicated CI job opted into DATAWEAVE_TCK_REQUIRE_CORPUS=1.
+  registerMissingCorpus("not staged");
 } else {
   const { cases, skipped, structuralModuleCases } = discoverCases();
-  const runnableCases = new Set(cases.map((item) => item.caseIdentifier));
-  const runnableScenarios = new Set(cases.flatMap((item) => item.scenarios.map((scenario) => scenario.name)));
-  const policyErrors = [
-    ...validateInventoryPolicy(cases.length, skipped),
-    ...validateIgnorePolicy(IGNORED_CASES, runnableCases),
-    ...validateReconciledPolicy(IGNORED_CASES, ACCEPTED_BASELINE_MISMATCHES, REENABLED_CASES, runnableScenarios),
-    ...validateStructuralModulePolicy(STRUCTURAL_MODULE_CASES, structuralModuleCases),
-  ];
-  if (policyErrors.length > 0) {
-    throw new Error(`Invalid TCK policy:\n${policyErrors.join("\n")}`);
-  }
-
-  // One shared runtime for the whole lane. Modules imported by a handful of
-  // TCK cases (org::mule::weave::v2::libs::lib) live only in the private
-  // data-weave runtime repo's test resources, not in any published
-  // artifact/TCK zip — resolve them from a committed fixture instead.
-  const dw = new DataWeave({ resolveModule: modulesFromDirectory(FIXTURES_DIR) });
-
-  describe("TCK conformance", () => {
-    // eslint-disable-next-line no-console
-    console.log(
-      `TCK: ${cases.length} runnable cases, ${skipped} structurally skipped, `
-      + `${structuralModuleCases.size} structural module cases, ${Object.keys(IGNORED_CASES).length} exclusions, `
-      + `${Object.keys(ACCEPTED_BASELINE_MISMATCHES).length} expected failures`
-    );
-    dw.initialize();
-
-    for (const c of cases) {
-      const ignored = isIgnored(c.caseIdentifier);
-      for (const scenario of c.scenarios) {
-        const expectedFailure = ACCEPTED_BASELINE_MISMATCHES[scenario.name];
-        const testFn = ignored ? it.skip : it;
-        const label = ignored
-          ? `${scenario.name} [skip: ${ignoreReason(c.caseIdentifier)}]`
-          : expectedFailure
-            ? `${scenario.name} [xfail: ${expectedFailure}]`
-            : scenario.name;
-        testFn(label, () => {
-          const script = readFileSync(join(c.dir, MAIN_TRANSFORM), "utf-8");
-
-          const inputs = Object.fromEntries(
-            scenario.inputs.map((i) => [
-              i.name,
-              { content: readFileSync(join(c.dir, i.fileName)), mimeType: i.mimeType },
-            ])
-          );
-
-          const result = dw.run(script, inputs);
-          expect(result.success, `script failed: ${result.error}`).toBe(true);
-
-          const actual = result.getBytes()!;
-          const expected = readFileSync(join(c.dir, scenario.outputFileName));
-          const encodingFile = join(c.dir, "encoding");
-          const charset = existsSync(encodingFile)
-            ? readFileSync(encodingFile, "utf-8").trim()
-            : null;
-          const cmp = compareOutput(scenario.outputExtension, actual, expected, charset);
-          if (expectedFailure) {
-            expect(
-              cmp.match,
-              `expected baseline mismatch for ${scenario.name} ([xfail: ${expectedFailure}]) but output matched — remove it from ACCEPTED_BASELINE_MISMATCHES`
-            ).toBe(false);
-          } else {
-            expect(cmp.match, cmp.detail).toBe(true);
-          }
-        });
-      }
+  if (cases.length === 0) {
+    // Corpus directory exists but discovery found nothing runnable — same
+    // silent-green risk as the missing-directory case above.
+    registerMissingCorpus("empty");
+  } else {
+    const runnableCases = new Set(cases.map((item) => item.caseIdentifier));
+    const runnableScenarios = new Set(cases.flatMap((item) => item.scenarios.map((scenario) => scenario.name)));
+    const policyErrors = [
+      ...validateInventoryPolicy(cases.length, skipped),
+      ...validateIgnorePolicy(IGNORED_CASES, runnableCases),
+      ...validateReconciledPolicy(IGNORED_CASES, ACCEPTED_BASELINE_MISMATCHES, REENABLED_CASES, runnableScenarios),
+      ...validateStructuralModulePolicy(STRUCTURAL_MODULE_CASES, structuralModuleCases),
+    ];
+    if (policyErrors.length > 0) {
+      throw new Error(`Invalid TCK policy:\n${policyErrors.join("\n")}`);
     }
-  });
+
+    // One shared runtime for the whole lane. Modules imported by a handful of
+    // TCK cases (org::mule::weave::v2::libs::lib) live only in the private
+    // data-weave runtime repo's test resources, not in any published
+    // artifact/TCK zip — resolve them from a committed fixture instead.
+    const dw = new DataWeave({ resolveModule: modulesFromDirectory(FIXTURES_DIR) });
+
+    describe("TCK conformance", () => {
+      // eslint-disable-next-line no-console
+      console.log(
+        `TCK: ${cases.length} runnable cases, ${skipped} structurally skipped, `
+        + `${structuralModuleCases.size} structural module cases, ${Object.keys(IGNORED_CASES).length} exclusions, `
+        + `${Object.keys(ACCEPTED_BASELINE_MISMATCHES).length} expected failures`
+      );
+      dw.initialize();
+
+      for (const c of cases) {
+        const ignored = isIgnored(c.caseIdentifier);
+        for (const scenario of c.scenarios) {
+          const expectedFailure = ACCEPTED_BASELINE_MISMATCHES[scenario.name];
+          const testFn = ignored ? it.skip : it;
+          const label = ignored
+            ? `${scenario.name} [skip: ${ignoreReason(c.caseIdentifier)}]`
+            : expectedFailure
+              ? `${scenario.name} [xfail: ${expectedFailure}]`
+              : scenario.name;
+          testFn(label, () => {
+            const script = readFileSync(join(c.dir, MAIN_TRANSFORM), "utf-8");
+
+            const inputs = Object.fromEntries(
+              scenario.inputs.map((i) => [
+                i.name,
+                { content: readFileSync(join(c.dir, i.fileName)), mimeType: i.mimeType },
+              ])
+            );
+
+            const result = dw.run(script, inputs);
+            expect(result.success, `script failed: ${result.error}`).toBe(true);
+
+            const actual = result.getBytes()!;
+            const expected = readFileSync(join(c.dir, scenario.outputFileName));
+            const encodingFile = join(c.dir, "encoding");
+            const charset = existsSync(encodingFile)
+              ? readFileSync(encodingFile, "utf-8").trim()
+              : null;
+            const cmp = compareOutput(scenario.outputExtension, actual, expected, charset);
+            if (expectedFailure) {
+              expect(
+                cmp.match,
+                `expected baseline mismatch for ${scenario.name} ([xfail: ${expectedFailure}]) but output matched — remove it from ACCEPTED_BASELINE_MISMATCHES`
+              ).toBe(false);
+            } else {
+              expect(cmp.match, cmp.detail).toBe(true);
+            }
+          });
+        }
+      }
+    });
+  }
 }
