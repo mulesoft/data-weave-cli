@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { resolveAddonPath } from "./addon-path";
 import type { ModuleResolver } from "./resolver";
 
 interface NativeAddon {
@@ -28,7 +28,7 @@ let addon: NativeAddon | null = null;
 
 function getAddon(): NativeAddon {
   if (!addon) {
-    const addonPath = join(__dirname, "..", "build", "Release", "dwlib_addon.node");
+    const addonPath = resolveAddonPath();
     addon = require(addonPath) as NativeAddon;
   }
   return addon;

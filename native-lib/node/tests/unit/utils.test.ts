@@ -125,6 +125,11 @@ describe("findLibrary", () => {
     expect(findLibrary()).toBe("/custom/dwlib.dylib");
   });
 
+  it("prefers dwlib next to a resolved addon path", () => {
+    mockedExistsSync.mockImplementation((p) => String(p) === "/opt/plat/dwlib.so");
+    expect(findLibrary("/opt/plat/dwlib_addon.node")).toBe("/opt/plat/dwlib.so");
+  });
+
   it("ignores the env var when the path does not exist and falls through", () => {
     process.env.DATAWEAVE_NATIVE_LIB = "/missing/dwlib.so";
     // env path missing; first existing candidate is the packaged native/ dir

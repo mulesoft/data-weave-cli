@@ -18,18 +18,27 @@ function libNames(): string[] {
  *
  * Resolution is attempted in priority order:
  * 1. The {@link ENV_NATIVE_LIB} environment variable, if it points at an existing file.
- * 2. The packaged location — `<pkg>/native/dwlib.*` relative to this module.
- * 3. A dev-build fallback — walking up to 10 parent directories looking for
+ * 2. Next to the resolved native addon, when provided.
+ * 3. The packaged location — `<pkg>/native/dwlib.*` relative to this module.
+ * 4. A dev-build fallback — walking up to 10 parent directories looking for
  *    `build/native/nativeCompile/dwlib.*`.
- * 4. The current working directory.
+ * 5. The current working directory.
  *
  * @returns The absolute path to the located library.
  * @throws Error if no library can be found in any of the above locations.
  */
-export function findLibrary(): string {
+export function findLibrary(addonPath?: string): string {
   const envValue = (process.env[ENV_NATIVE_LIB] ?? "").trim();
   if (envValue && existsSync(envValue)) {
     return envValue;
+  }
+
+  if (addonPath) {
+    const addonDir = dirname(addonPath);
+    for (const name of libNames()) {
+      const p = join(addonDir, name);
+      if (existsSync(p)) return p;
+    }
   }
 
   const thisDir = __dirname;
