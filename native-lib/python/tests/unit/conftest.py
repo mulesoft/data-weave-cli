@@ -20,3 +20,5 @@ def _clear():
     native._lib = None
     native._isolate = None
     native._isolate_ref_count = 0
+    native._teardown_needed = False
+    native._lib_path = None
