@@ -129,7 +129,7 @@ def _retry_pending_teardown_locked() -> None:
 def _acquire_isolate(lib_path: str):
     """Returns (lib, isolate), creating the shared isolate on the first reference.
     Increments the refcount only on success."""
-    global _lib, _lib_path, _isolate, _isolate_ref_count
+    global _lib, _lib_path, _isolate, _isolate_ref_count, _teardown_needed
     with _isolate_lock:
         _retry_pending_teardown_locked()
         if _isolate is None:
@@ -153,6 +153,23 @@ def _acquire_isolate(lib_path: str):
             # when done; teardown attaches a fresh thread. Mirrors the Node/Go bindings.
             detach_result = lib.graal_detach_thread(thread)
             if detach_result != 0:
+                # The bootstrap thread could not be detached. The isolate is
+                # created but not yet published (globals unset, refcount not
+                # bumped), so tear it down here rather than leak an unreachable
+                # live isolate. Reuse the same still-attached bootstrap thread to
+                # tear down (it is the only attached thread).
+                try:
+                    _tear_down(lib, thread)
+                except BaseException:
+                    # Even teardown failed: retain the created isolate and arm a
+                    # retry rather than leaking it silently.
+                    _lib, _lib_path, _isolate = lib, lib_path, isolate
+                    _teardown_needed = True
+                    print(
+                        "DataWeave: bootstrap-thread detach and isolate teardown "
+                        "both failed; isolate retained for retry.",
+                        file=sys.stderr,
+                    )
                 raise DataWeaveError(
                     f"Failed to detach GraalVM isolate bootstrap thread. Error code: {detach_result}"
                 )

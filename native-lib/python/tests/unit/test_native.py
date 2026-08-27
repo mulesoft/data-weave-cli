@@ -683,6 +683,57 @@ def test_failed_teardown_retains_isolate_and_retries(monkeypatch):
 
 
 @pytest.mark.unit
+def test_bootstrap_detach_failure_tears_down_created_isolate(monkeypatch):
+    """A failed bootstrap-thread detach must not leak the just-created isolate:
+    it is torn down (reusing the still-attached bootstrap thread) before the
+    failure is raised, and nothing is published to the module globals."""
+    library = FakeLibrary()
+    create_isolate_calls = []
+
+    def create_isolate(_params, _isolate, _thread):
+        create_isolate_calls.append(1)
+        return 0
+
+    library.graal_create_isolate = CallableFunction(create_isolate)
+    library.graal_detach_thread = CallableFunction(lambda _thread: 1)  # bootstrap detach fails
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    with pytest.raises(native.DataWeaveError):
+        native._acquire_isolate("/tmp/dwlib")
+
+    # No leaked live isolate: the just-created isolate was torn down, and
+    # nothing was published since the detach failure happened before publish.
+    assert native._isolate is None
+    assert native._lib is None
+    assert native._isolate_ref_count == 0
+    assert len(create_isolate_calls) == 1
+    assert len(library.tear_down_threads) == 1
+    assert native._teardown_needed is False
+
+
+@pytest.mark.unit
+def test_bootstrap_detach_and_teardown_both_failing_arms_retry_instead_of_leaking(monkeypatch):
+    """If the just-created isolate's teardown ALSO fails after a bootstrap
+    detach failure, the isolate must be retained (not silently leaked) and a
+    retry armed for the next acquire -- mirroring the release-path contract."""
+    library = FakeLibrary()
+    library.graal_detach_thread = CallableFunction(lambda _thread: 1)  # bootstrap detach fails
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda thread: library.tear_down_threads.append(thread) or 1
+    )  # teardown also fails
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    with pytest.raises(native.DataWeaveError):
+        native._acquire_isolate("/tmp/dwlib")
+
+    assert native._isolate is not None
+    assert native._lib is library
+    assert native._isolate_ref_count == 0
+    assert native._teardown_needed is True
+    assert len(library.tear_down_threads) == 1
+
+
+@pytest.mark.unit
 def test_two_engines_dispatch_to_their_own_resolver(monkeypatch):
     library = FakeLibrary()
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
