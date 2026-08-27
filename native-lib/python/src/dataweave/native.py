@@ -232,11 +232,14 @@ class NativeRuntime:
     def initialize(self) -> None:
         if self.initialized:
             return
-        self.lib, self.isolate = _acquire_isolate(self.lib_path)
+        acquired = False
         try:
+            self.lib, self.isolate = _acquire_isolate(self.lib_path)
+            acquired = True
             self.handle = self._create_engine()
         except Exception:
-            # Roll back the ref we just took so a failed init leaks nothing.
+            # Roll back the ref we just took (if any) so a failed init leaks
+            # nothing.
             self.lib = self.isolate = None
             # Finding #2: install_resolver() registered a token BEFORE this call.
             # A failed init must unregister it, or it leaks: self.initialized stays
@@ -245,7 +248,12 @@ class NativeRuntime:
                 with _resolver_lock_global:
                     _resolver_registry.pop(self._resolver_token, None)
                 self._resolver_token = 0
-            _release_isolate()
+            # Release the ref only if _acquire_isolate actually incremented it
+            # (a library-load / isolate-create / bootstrap-detach failure inside
+            # _acquire_isolate never increments the refcount, so releasing here
+            # unconditionally would decrement someone else's live reference).
+            if acquired:
+                _release_isolate()
             raise
         self.initialized = True
 

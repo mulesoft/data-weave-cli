@@ -754,3 +754,26 @@ def test_failed_init_with_resolver_unregisters_the_token(monkeypatch):
     assert token not in native._resolver_registry
     assert native._isolate_ref_count == 0
     assert native._isolate is None
+
+
+@pytest.mark.unit
+def test_failed_acquire_with_resolver_unregisters_the_token(monkeypatch):
+    """A library-load failure inside _acquire_isolate must still roll back the
+    resolver token (regression: _acquire_isolate was called outside
+    initialize()'s try, so the rollback below never ran)."""
+    monkeypatch.setattr(
+        native.ctypes, "CDLL", lambda _path: (_ for _ in ()).throw(OSError("no lib"))
+    )
+
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.install_resolver(lambda path: "src")
+    token = runtime._resolver_token
+    assert native._resolver_registry.get(token) is runtime
+
+    with pytest.raises(native.DataWeaveError):
+        runtime.initialize()
+
+    assert token not in native._resolver_registry
+    assert runtime._resolver_token == 0
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None
