@@ -108,6 +108,19 @@ typedef struct engine_bridge {
 } engine_bridge_t;
 static engine_bridge_t* g_bridges = NULL;  // linked list, guarded by g_mutex
 
+// Round-15 (svacas P1): bridges whose engine destroy was SKIPPED because
+// fn_attach_thread failed while the isolate was STILL LIVE. Such a bridge must
+// NOT be freed: the Java-side CallbackWeaveResourceResolver still holds it as
+// its ctx word, so freeing it would leave a dangling ctx that a later
+// run_script_engine -> resolve_module_callback dereferences (UAF). Retain the
+// bridge here (linked via its own `next`, which is free once the bridge is
+// unlinked from g_bridges -- every bridge_finalize call site unlinks first) so
+// its ctx stays valid, and retry the destroy + free at the next drain point
+// (top of napi_initialize, or an op-completion path) once the isolate is
+// confirmed live and attachable -- or, if the isolate went away, free it then
+// (the Java registry died with the isolate). All access under g_mutex.
+static engine_bridge_t* g_stranded_bridges = NULL;  // linked list, guarded by g_mutex
+
 // One record per napi_env that has ever taken an init reference (via
 // initialize()). init_refs is that env's net initialize()-minus-cleanup()
 // balance. Created lazily on the env's first initialize(); registers exactly
@@ -218,6 +231,19 @@ static engine_bridge_t* bridge_find(long long handle) {
     return NULL;
 }
 
+// Round-15 (svacas P1): retain a bridge whose engine destroy was skipped while
+// the isolate was still live (see g_stranded_bridges). The ctx word Java holds
+// stays valid until a later drain retries the destroy and frees it. Takes
+// g_mutex; the caller MUST have already unlinked `b` from g_bridges (its `next`
+// is reused for the stranded list) and MUST NOT hold g_mutex.
+static void bridge_retain_stranded(engine_bridge_t* b) {
+    if (b == NULL) return;
+    uv_mutex_lock(&g_mutex);
+    b->next = g_stranded_bridges;
+    g_stranded_bridges = b;
+    uv_mutex_unlock(&g_mutex);
+}
+
 // Find this env's init record, or NULL. Caller MUST hold g_mutex.
 static env_init_rec_t* env_init_rec_find_locked(napi_env env) {
     for (env_init_rec_t* r = g_env_recs; r != NULL; r = r->next) {
@@ -287,33 +313,51 @@ static int env_init_refs_total_locked(void) {
 // attach. The teardown-state check and the g_active_ops++ are ONE critical
 // section: no teardown path can interleave between "isolate is live" and
 // "reservation taken". Callable from any thread NOT holding g_mutex.
-static void bridge_finalize_registry(engine_bridge_t* b) {
-    if (b == NULL || fn_destroy_engine == NULL) return;
+//
+// Returns TRUE when the caller may safely free the bridge: the engine was
+// actually destroyed (registry entry removed), OR the whole isolate is going
+// away (TEARING_DOWN / g_isolate == NULL) so the Java registry -- and the
+// CallbackWeaveResourceResolver holding this bridge as its ctx -- dies with it.
+// Returns FALSE only when the destroy was SKIPPED while the isolate is still
+// live (fn_attach_thread failed): the Java registry still holds this bridge as a
+// resolver ctx, so freeing it now would be a UAF. The caller must instead retain
+// the bridge (bridge_retain_stranded) and retry later (round-15, svacas P1).
+static bool bridge_finalize_registry(engine_bridge_t* b) {
+    if (b == NULL || fn_destroy_engine == NULL) return true;
     uv_mutex_lock(&g_mutex);
     // If the waiter already committed to physical teardown (TEARING_DOWN) or the
     // isolate is already gone, the Java registry died/dies with it -- nothing to
-    // remove, and attaching would race graal_tear_down_isolate. Skip. Because
-    // the waiter publishes TEARING_DOWN (and Case 4 holds g_mutex across its
-    // g_active_ops==0 check + teardown) under this same lock, this check plus the
-    // increment below cannot be split by a teardown.
+    // remove, and attaching would race graal_tear_down_isolate. Skip, but report
+    // "safe to free": the registry entry is (being) reclaimed with the isolate,
+    // so the resolver ctx can no longer be dereferenced. Because the waiter
+    // publishes TEARING_DOWN (and Case 4 holds g_mutex across its g_active_ops==0
+    // check + teardown) under this same lock, this check plus the increment below
+    // cannot be split by a teardown.
     if (g_teardown_state == TEARDOWN_TEARING_DOWN || g_isolate == NULL) {
         uv_mutex_unlock(&g_mutex);
-        return;
+        return true;
     }
     g_active_ops++;  // pins the live isolate against teardown for this attach
     uv_mutex_unlock(&g_mutex);
 
     void* thread = NULL;
-    if (fn_attach_thread(g_isolate, &thread) == 0) {
+    bool destroyed = false;
+    if (fn_attach_thread(g_isolate, &thread) == 0 && thread != NULL) {
         fn_destroy_engine(thread, b->handle);
         fn_detach_thread(thread);
+        destroyed = true;  // registry entry removed -> resolver ctx is now dead
     }
+    // else: attach failed while the isolate is STILL LIVE -- destroy was skipped,
+    // the Java registry still holds this bridge as a resolver ctx. Report FALSE so
+    // the caller retains (does NOT free) the bridge.
 
     // Verbatim g_active_ops release pattern.
     uv_mutex_lock(&g_mutex);
     g_active_ops--;
     uv_cond_broadcast(&g_teardown_cond);
     uv_mutex_unlock(&g_mutex);
+
+    return destroyed;
 }
 
 // The non-isolate finalize phase: delete the resolver napi_ref (owner JS thread
@@ -331,11 +375,56 @@ static void bridge_finalize_free(engine_bridge_t* b, bool env_still_alive) {
 
 // Thin wrapper preserving the original signature and every call site. Registry
 // removal (if requested) runs first under its transient reservation, then the
-// record is freed.
+// record is freed -- but round-15 (svacas P1) makes the free CONDITIONAL on the
+// registry removal succeeding. If do_registry_remove is requested and the
+// destroy was SKIPPED while the isolate is still live, bridge_finalize_registry
+// returns false: the Java registry still holds this bridge as a resolver ctx, so
+// we must NOT free it. Retain it (bridge_retain_stranded) so the ctx stays valid
+// and a later drain retries the destroy and frees it. When do_registry_remove is
+// false there is nothing registered (handle <= 0 construction failures), so the
+// free is unconditional as before.
 static void bridge_finalize(engine_bridge_t* b, bool env_still_alive, bool do_registry_remove) {
     if (b == NULL) return;
-    if (do_registry_remove) bridge_finalize_registry(b);
+    if (do_registry_remove && !bridge_finalize_registry(b)) {
+        bridge_retain_stranded(b);  // keep ctx valid; retry destroy + free later
+        return;
+    }
     bridge_finalize_free(b, env_still_alive);
+}
+
+// Round-15 (svacas P1): retry destroy for every bridge stranded because its
+// engine destroy was skipped on a transient fn_attach_thread failure while the
+// isolate was live (see g_stranded_bridges). Detach the whole list under g_mutex,
+// then for each bridge retry the isolate registry removal via
+// bridge_finalize_registry: on success (or the isolate having since gone away)
+// free the record; on repeated failure re-retain it for the next drain. Does
+// ONLY GraalVM calls (attach/destroy/detach, inside bridge_finalize_registry) +
+// list manipulation + free -- NO napi env-affine calls. In particular the free
+// passes env_still_alive=false: this drain may run on a thread that is NOT the
+// bridge's owner (e.g. another env's napi_initialize, or a background worker),
+// so it must not touch the thread-affine napi_ref; Node reclaims that ref when
+// the owner env is destroyed. Safe to call from any thread NOT holding g_mutex.
+static void drain_stranded_bridges(void) {
+    uv_mutex_lock(&g_mutex);
+    engine_bridge_t* list = g_stranded_bridges;
+    g_stranded_bridges = NULL;
+    uv_mutex_unlock(&g_mutex);
+
+    while (list != NULL) {
+        engine_bridge_t* b = list;
+        list = list->next;  // snapshot the link before b is freed or re-retained
+        b->next = NULL;
+        if (bridge_finalize_registry(b)) {
+            // Registry entry removed (or isolate gone): the resolver ctx is dead,
+            // so freeing is safe. Skip the napi_ref delete (env_still_alive=false)
+            // -- we may not be on the owner thread.
+            bridge_finalize_free(b, /*env_still_alive=*/false);
+        } else {
+            // Still could not attach (isolate live, transient failure): keep the
+            // ctx valid and retry at the next drain.
+            bridge_retain_stranded(b);
+        }
+    }
 }
 
 // Env cleanup hook (F2): registered per resolver-backed bridge at creation via
@@ -582,6 +671,14 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   char lib_path[4096];
   size_t len;
   napi_get_value_string_utf8(env, argv[0], lib_path, sizeof(lib_path), &len);
+
+  // Round-15 (svacas P1): retry any bridge whose engine destroy was skipped on a
+  // transient attach failure (g_stranded_bridges). Drain before taking g_mutex
+  // (drain_stranded_bridges locks internally). If a live isolate survives from a
+  // prior init the retry destroys + frees it now; if the isolate is gone the
+  // stranded bridges are freed (their Java registry died with it). Cheap no-op
+  // when nothing is stranded.
+  drain_stranded_bridges();
 
   uv_mutex_lock(&g_mutex);
 
@@ -914,6 +1011,11 @@ static void streaming_thread_fn(void* arg) {
   // and left it stranded (g_teardown_needed), retry now that this op has drained.
   retry_stranded_teardown_locked();
   uv_mutex_unlock(&g_mutex);
+
+  // Round-15 (svacas P1): op-completion drain point -- retry destroy for any
+  // bridge stranded on a transient attach failure. Graal-only + free, no napi
+  // env call, so it is safe on this background worker thread.
+  drain_stranded_bridges();
 
   // Round-9 (#2): if even the sentinel struct cannot be allocated, we cannot
   // enqueue a completion -- run the SAME native finalize the env-dead
@@ -1411,6 +1513,11 @@ static void transform_thread_fn(void* arg) {
   // Round-14 (#2/#3): retry a stranded teardown now that this op has drained.
   retry_stranded_teardown_locked();
   uv_mutex_unlock(&g_mutex);
+
+  // Round-15 (svacas P1): op-completion drain point -- retry destroy for any
+  // bridge stranded on a transient attach failure. Graal-only + free, no napi
+  // env call, so it is safe on this background worker thread.
+  drain_stranded_bridges();
 
   // Round-9 (#2): sentinel malloc NULL -> skip enqueue and run the same native
   // finalize as the env-dead branch below (release the bridge hold + free w and
@@ -1925,8 +2032,10 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
         engine_bridge_t** pp = &g_bridges;
         while (*pp != NULL) { if (*pp == rec) { *pp = rec->next; break; } pp = &(*pp)->next; }
         uv_mutex_unlock(&g_mutex);
-        bridge_finalize_registry(rec);
-        bridge_finalize_free(rec, /*env_still_alive=*/true);
+        // round-15 (svacas P1): go through bridge_finalize (do_registry_remove=true)
+        // so a destroy skipped on a transient attach failure retains the record for
+        // retry instead of freeing it while the Java registry still references it.
+        bridge_finalize(rec, /*env_still_alive=*/true, /*do_registry_remove=*/true);
         uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
         napi_throw_error(env, NULL, "Failed to register engine cleanup hook");
         return NULL;
@@ -2023,8 +2132,10 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
         engine_bridge_t** pp = &g_bridges;
         while (*pp != NULL) { if (*pp == bridge) { *pp = bridge->next; break; } pp = &(*pp)->next; }
         uv_mutex_unlock(&g_mutex);
-        bridge_finalize_registry(bridge);
-        bridge_finalize_free(bridge, /*env_still_alive=*/true);
+        // round-15 (svacas P1): go through bridge_finalize (do_registry_remove=true)
+        // so a destroy skipped on a transient attach failure retains the bridge for
+        // retry instead of freeing it while the Java registry still references it.
+        bridge_finalize(bridge, /*env_still_alive=*/true, /*do_registry_remove=*/true);
         uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
         napi_throw_error(env, NULL, "Failed to register engine cleanup hook");
         return NULL;
@@ -2218,6 +2329,12 @@ static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) 
     // streaming/transform completion.
     bridge_end_op(bridge, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+
+    // Round-15 (svacas P1): op-completion drain point -- retry destroy for any
+    // bridge stranded on a transient attach failure (Graal-only + free, no napi
+    // env call). This is the synchronous raw-FFI path whose resolve_module_callback
+    // is the UAF the retain fix protects.
+    drain_stranded_bridges();
 
     napi_value out;
     if (result_copy) { napi_create_string_utf8(env, result_copy, NAPI_AUTO_LENGTH, &out); free(result_copy); }
