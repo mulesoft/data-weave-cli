@@ -119,8 +119,9 @@ public class NativeLib {
         // raw addresses and reconstitutes them via WordFactory.
         final long readCallbackAddr = readCallback.rawValue();
         final long ctxAddr = ctx.rawValue();
-        Thread feeder = new Thread(new InputCallbackFeeder(
-                readCallbackAddr, ctxAddr, inputSession), "dw-input-callback-feeder");
+        InputCallbackFeeder feederRunnable = new InputCallbackFeeder(
+                readCallbackAddr, ctxAddr, inputSession);
+        Thread feeder = new Thread(feederRunnable, "dw-input-callback-feeder");
         feeder.setDaemon(true);
         feeder.start();
 
@@ -128,7 +129,7 @@ public class NativeLib {
         StreamSession session = runtime.runStreaming(dwScript, mergedInputs);
 
         if (session.isError()) {
-            cleanupFeeder(feeder, inputHandle);
+            cleanupFeeder(feederRunnable, feeder, inputHandle);
             return toUnmanagedCString("{\"success\":false,\"error\":\""
                     + escapeJsonString(session.getError()) + "\"}");
         }
@@ -144,7 +145,7 @@ public class NativeLib {
                     }
                     int rc = writeCallback.invoke(ctx, writeBuf, n);
                     if (rc != 0) {
-                        cleanupFeeder(feeder, inputHandle);
+                        cleanupFeeder(feederRunnable, feeder, inputHandle);
                         return toUnmanagedCString("{\"success\":false,\"error\":\""
                                 + "Write callback returned error: " + rc + "\"}");
                     }
@@ -153,14 +154,14 @@ public class NativeLib {
                 UnmanagedMemory.free(writeBuf);
             }
         } catch (IOException e) {
-            cleanupFeeder(feeder, inputHandle);
+            cleanupFeeder(feederRunnable, feeder, inputHandle);
             return toUnmanagedCString("{\"success\":false,\"error\":\""
                     + escapeJsonString(e.getMessage()) + "\"}");
         } finally {
             session.closeStream();
         }
 
-        cleanupFeeder(feeder, inputHandle);
+        cleanupFeeder(feederRunnable, feeder, inputHandle);
 
         return toUnmanagedCString("{\"success\":true"
                 + ",\"mimeType\":\"" + session.getMimeType() + "\""
@@ -181,14 +182,54 @@ public class NativeLib {
     }
 
     /**
-     * Waits for the feeder thread to finish and closes the input session.
+     * Cancels the input feeder, waits for it to fully exit {@link InputCallbackFeeder#run()}
+     * (including its {@code finally} block), and closes the input session.
+     *
+     * <p><strong>Why this must not abandon a live feeder:</strong> once this method returns,
+     * {@link #transformViaCallbacks} returns to its {@code @CEntryPoint}, which returns to the
+     * native caller — at which point the caller is free to release the callback state
+     * ({@code ctx}). If the feeder thread were still alive it could invoke
+     * {@code readCallback(ctx, …)} against freed memory, a native use-after-free. Therefore this
+     * method may only return once {@code thread.isAlive() == false}.</p>
+     *
+     * <p><strong>Order (all three are part of stopping the feeder):</strong></p>
+     * <ol>
+     *   <li><b>Signal cancel</b> — {@link InputCallbackFeeder#cancel()} sets a volatile flag the
+     *       loop checks immediately after each {@code readCallback} invocation returns and before
+     *       re-invoking it, so a slow-but-returning in-flight callback breaks the loop instead of
+     *       being re-entered.</li>
+     *   <li><b>Close the input session</b> — this closes both ends of the pipe, which unblocks a
+     *       feeder parked inside {@link InputStreamSession#write} on a full pipe (the next write
+     *       throws {@link IOException} and breaks the loop). This is a legitimate part of the
+     *       cancel signal for the pipe-backpressure case and is harmless on the success path,
+     *       where the feeder has already reached EOF and exited. It also unregisters the handle.</li>
+     *   <li><b>Join without a finite timeout</b> — we wait for {@code run()} to complete rather
+     *       than abandoning the thread after a bound. An {@link InterruptedException} does not end
+     *       the wait (returning early would reopen the use-after-free window); we re-assert the
+     *       interrupt and keep waiting.</li>
+     * </ol>
+     *
+     * <p><strong>Documented trade-off:</strong> cancellation guarantees we wait only for the
+     * <em>in-flight</em> {@code readCallback} to return — no signal can interrupt native code
+     * parked inside the caller's callback. A callback that blocks <em>forever</em> inside a single
+     * invocation therefore cannot be joined and this method would block indefinitely. That is the
+     * correct trade: the only alternative — abandoning a still-live feeder — is the
+     * use-after-free this method exists to prevent.</p>
      */
-    private static void cleanupFeeder(Thread feeder, long inputHandle) {
-        try {
-            feeder.join(5000);
-        } catch (InterruptedException ignored) {
-        }
+    static void cleanupFeeder(InputCallbackFeeder feederRunnable, Thread thread, long inputHandle) {
+        feederRunnable.cancel();
+        // Unblock a feeder parked on a full pipe and drop the session from the registry.
         InputStreamSession.close(inputHandle);
+        boolean joined = false;
+        while (!joined) {
+            try {
+                thread.join();
+                joined = true;
+            } catch (InterruptedException e) {
+                // Never abandon a live feeder: re-assert the interrupt and keep waiting.
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     /**
@@ -201,11 +242,25 @@ public class NativeLib {
      *
      * <p>The feeder allocates its own native read buffer and frees it in its {@code finally}
      * block, ensuring no shared native memory between threads.</p>
+     *
+     * <p><strong>Cancellation:</strong> {@link #cancel()} sets a {@code volatile} flag that
+     * {@link #run()} checks immediately <em>after</em> {@code readChunk} (the read callback)
+     * returns and <em>before</em> the next iteration re-invokes it. This is what closes the
+     * use-after-free window: once cancellation is requested, a callback that was blocked and then
+     * returns breaks the loop instead of being re-entered. See
+     * {@link NativeLib#cleanupFeeder} for the full stop protocol.</p>
+     *
+     * <p>Package-private and non-final (rather than {@code private}) so a JVM unit test can
+     * subclass it and override {@link #readChunk} with a pure-Java blocking source, exercising the
+     * cancel/join contract without the GraalVM {@code Word}-type machinery
+     * ({@link WordFactory#pointer}, {@code cb.invoke}), which only initialises inside a compiled
+     * native image.</p>
      */
-    private static final class InputCallbackFeeder implements Runnable {
+    static class InputCallbackFeeder implements Runnable {
         private final long readCallbackAddr;
         private final long ctxAddr;
         private final InputStreamSession inputSession;
+        private volatile boolean cancelled = false;
 
         InputCallbackFeeder(long readCallbackAddr, long ctxAddr,
                             InputStreamSession inputSession) {
@@ -214,27 +269,60 @@ public class NativeLib {
             this.inputSession = inputSession;
         }
 
-        @Override
-        public void run() {
+        /** Requests the feeder loop stop after the in-flight {@code readChunk} returns. */
+        void cancel() {
+            cancelled = true;
+        }
+
+        boolean isCancelled() {
+            return cancelled;
+        }
+
+        /**
+         * Pulls the next input chunk from the caller-owned read callback into {@code dest},
+         * returning the number of bytes read ({@code 0} = EOF, negative = error).
+         *
+         * <p>Reconstitutes the {@code Word}-typed callback and context from their raw addresses
+         * and copies the bytes out of a freshly allocated native scratch buffer. Overridable so
+         * JVM tests can supply a pure-Java implementation; production code never overrides it.</p>
+         */
+        int readChunk(byte[] dest, int max) {
             NativeCallbacks.ReadCallback cb = WordFactory.pointer(readCallbackAddr);
             PointerBase ctx = WordFactory.pointer(ctxAddr);
-            CCharPointer buf = UnmanagedMemory.malloc(CALLBACK_BUFFER_SIZE);
+            CCharPointer buf = UnmanagedMemory.malloc(max);
             try {
-                while (true) {
-                    int n = cb.invoke(ctx, buf, CALLBACK_BUFFER_SIZE);
+                int n = cb.invoke(ctx, buf, max);
+                if (n > 0) {
+                    for (int i = 0; i < n; i++) {
+                        dest[i] = buf.read(i);
+                    }
+                }
+                return n;
+            } finally {
+                UnmanagedMemory.free(buf);
+            }
+        }
+
+        @Override
+        public void run() {
+            byte[] tmp = new byte[CALLBACK_BUFFER_SIZE];
+            try {
+                while (!cancelled) {
+                    int n = readChunk(tmp, CALLBACK_BUFFER_SIZE);
                     if (n <= 0) {
                         break; // 0 = EOF, negative = error
                     }
-                    byte[] tmp = new byte[n];
-                    for (int i = 0; i < n; i++) {
-                        tmp[i] = buf.read(i);
+                    // Check AFTER the callback returns and BEFORE re-invoking / writing: once
+                    // cancelled, a slow-but-returning in-flight callback must not be re-entered
+                    // (its ctx may be freed the moment cleanupFeeder returns).
+                    if (cancelled) {
+                        break;
                     }
                     inputSession.write(tmp, n);
                 }
             } catch (IOException e) {
                 // pipe broken – DW engine will see the error
             } finally {
-                UnmanagedMemory.free(buf);
                 try {
                     inputSession.closeWriter();
                 } catch (IOException ignored) {
