@@ -1,4 +1,5 @@
 import * as ffi from "./ffi";
+import { resolveAddonPath } from "./addon-path";
 import { findLibrary, buildInputsJson } from "./utils";
 import { parseNativeResponse } from "./result";
 import { createChunkReader } from "./reader";
@@ -59,6 +60,7 @@ export interface DataWeaveOptions {
  * instance directly.
  */
 export class DataWeave {
+  private readonly addonPath: string;
   private readonly libPath: string;
   private readonly resolveModule?: ModuleResolver;
   private initialized = false;
@@ -68,12 +70,13 @@ export class DataWeave {
    *   When a string is provided, it is treated as {@link DataWeaveOptions.libPath}.
    */
   constructor(options?: DataWeaveOptions | string) {
+    this.addonPath = resolveAddonPath();
     if (typeof options === "string") {
       // Legacy constructor signature: DataWeave(libPath)
       this.libPath = options;
       this.resolveModule = undefined;
     } else {
-      this.libPath = options?.libPath ?? findLibrary();
+      this.libPath = options?.libPath ?? findLibrary(this.addonPath);
       this.resolveModule = options?.resolveModule;
     }
   }
@@ -87,7 +90,7 @@ export class DataWeave {
   initialize(): void {
     if (this.initialized) return;
     try {
-      ffi.initialize(this.libPath);
+      ffi.initialize(this.libPath, this.addonPath);
     } catch (e: unknown) {
       throw new DataWeaveError(`Failed to initialize: ${e instanceof Error ? e.message : e}`);
     }

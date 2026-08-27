@@ -40,9 +40,14 @@ export function resolveAddonPath(opts?: {
     if (loaded && typeof loaded.filename === "string") return loaded.filename;
     const resolved = require.resolve(name);
     return resolved;
-  } catch {
-    throw new Error(
-      `Could not load native addon. Install optional dependency ${name} (supported: ${supported}).`
-    );
+  } catch (error: unknown) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "MODULE_NOT_FOUND") {
+      throw new Error(
+        `Could not load native addon. Install optional dependency ${name} (supported: ${supported}).`,
+        { cause: error }
+      );
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not load native addon ${name}: ${detail}`, { cause: error });
   }
 }

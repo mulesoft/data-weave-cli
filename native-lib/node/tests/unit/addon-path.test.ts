@@ -59,10 +59,24 @@ describe("resolveAddonPath", () => {
   it("throws naming the expected optional package when supported but missing", () => {
     mockedExistsSync.mockReturnValue(false);
     const requireFn = vi.fn(() => {
-      throw new Error("Cannot find module");
+      throw Object.assign(new Error("Cannot find module"), { code: "MODULE_NOT_FOUND" });
     });
     expect(() =>
       resolveAddonPath({ packageRoot: root, platform: "linux", arch: "x64", requireFn })
-    ).toThrow(/dataweave-native-linux-x64/);
+    ).toThrow(/Install optional dependency dataweave-native-linux-x64/);
+  });
+
+  it("reports optional package load failures without claiming it is missing", () => {
+    mockedExistsSync.mockReturnValue(false);
+    const requireFn = vi.fn(() => {
+      throw Object.assign(new Error("dlopen failed"), { code: "ERR_DLOPEN_FAILED" });
+    });
+
+    expect(() =>
+      resolveAddonPath({ packageRoot: root, platform: "linux", arch: "x64", requireFn })
+    ).toThrow(/Could not load native addon dataweave-native-linux-x64: dlopen failed/);
+    expect(() =>
+      resolveAddonPath({ packageRoot: root, platform: "linux", arch: "x64", requireFn })
+    ).not.toThrow(/Install optional dependency/);
   });
 });

@@ -26,16 +26,15 @@ interface NativeAddon {
 
 let addon: NativeAddon | null = null;
 
-function getAddon(): NativeAddon {
+function getAddon(addonPath?: string): NativeAddon {
   if (!addon) {
-    const addonPath = resolveAddonPath();
-    addon = require(addonPath) as NativeAddon;
+    addon = require(addonPath ?? resolveAddonPath()) as NativeAddon;
   }
   return addon;
 }
 
-export function initialize(libPath: string): void {
-  getAddon().initialize(libPath);
+export function initialize(libPath: string, addonPath?: string): void {
+  getAddon(addonPath).initialize(libPath);
 }
 
 export function runScript(script: string, inputsJson: string): string {
