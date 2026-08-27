@@ -19,6 +19,28 @@ describe("malformed raw-ffi inputs throw (round 7 #2)", () => {
     await ffi.cleanup();
   });
 
+  // Review #10 #5 (svacas P2): napi_initialize used to ignore the status of
+  // napi_get_cb_info and napi_get_value_string_utf8 and never checked that
+  // argv[0] is a string, so a non-string libPath left the 4096-byte stack
+  // lib_path buffer uninitialized before uv_dlopen used it. The TS wrapper
+  // always passes a string, so drive this through the raw ffi binding
+  // directly with each malformed shape and assert it throws synchronously
+  // (and the process survives) rather than reading the uninitialized buffer.
+  it.each([
+    { name: "number", value: 42 },
+    { name: "object", value: {} },
+    { name: "null", value: null },
+  ])("initialize throws synchronously on a non-string libPath ($name)", ({ value }) => {
+    // Assert on the specific validation message, not just toThrow(): without
+    // the argv[0] type check, the garbage stack lib_path still happens to
+    // make uv_dlopen fail downstream, so a bare toThrow() would pass even on
+    // the unfixed addon for the wrong reason (an accidental "Failed to load
+    // library" error instead of a synchronous, pre-buffer-use rejection).
+    expect(() => ffi.initialize(value as unknown as string)).toThrow(
+      /library path must be a string/
+    );
+  });
+
   it("destroyEngine throws on a non-integer handle", () => {
     ffi.initialize(findLibrary());
     expect(() => ffi.destroyEngine({} as unknown as number)).toThrow();

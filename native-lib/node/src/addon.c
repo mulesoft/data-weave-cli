@@ -661,16 +661,30 @@ static void retry_stranded_teardown_locked(void);
 static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-
-  if (argc < 1) {
+  // Review #10 #5 (svacas P2): check napi_get_cb_info's status too, not just
+  // argc -- mirrors every other validated entrypoint in this file (e.g.
+  // napi_run_script_engine), which never assumes an N-API call succeeded.
+  if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc < 1) {
     napi_throw_error(env, NULL, "initialize requires a library path argument");
+    return NULL;
+  }
+
+  // Reject a non-string argv[0] before touching the stack lib_path buffer
+  // below. Without this, a non-string argument left napi_get_value_string_utf8's
+  // status ignored and lib_path uninitialized/partially-written before
+  // uv_dlopen read it (garbage path, occasionally UB).
+  napi_valuetype vt;
+  if (napi_typeof(env, argv[0], &vt) != napi_ok || vt != napi_string) {
+    napi_throw_error(env, NULL, "initialize: library path must be a string");
     return NULL;
   }
 
   char lib_path[4096];
   size_t len;
-  napi_get_value_string_utf8(env, argv[0], lib_path, sizeof(lib_path), &len);
+  if (napi_get_value_string_utf8(env, argv[0], lib_path, sizeof(lib_path), &len) != napi_ok) {
+    napi_throw_error(env, NULL, "initialize: failed to read library path");
+    return NULL;
+  }
 
   // Round-15 (svacas P1): retry any bridge whose engine destroy was skipped on a
   // transient attach failure (g_stranded_bridges). Drain before taking g_mutex
