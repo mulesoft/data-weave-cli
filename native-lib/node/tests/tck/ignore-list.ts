@@ -164,23 +164,17 @@ export const ACCEPTED_BASELINE_MISMATCHES: ExpectedFailurePolicy = {
   "core-modules/multipart-binary-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
   "core-modules/multipart-class-cast-issue-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
   "core-modules/multipart-empty-part-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
-  "core-modules/multipart-mixed-message-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
-  "core-modules/multipart-write-message-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
-  "core-modules/multipart-write-subtype-override-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
   "core-modules/properties-passthrough-out.properties:out.properties": "properties writer output differs from the baseline fixture",
   "core-modules/xml-escaped-data-out.xml:out.xml": "XML character escaping differs from the baseline fixture",
   "core-modules/xml-streaming-selectors-out.xml:out.xml": "streaming XML serialization differs from the baseline fixture",
   "core-modules/xml-value-selector-out.xml:out.xml": "XML namespace scoping differs from the baseline fixture",
   "core-modules/xml_empty_namespace-out.xml:out.xml": "empty XML namespace serialization differs from the baseline fixture",
-  "runtime/access_raw_value-out.json:out.json": "runtime coercion output differs from the baseline fixture",
   "runtime/coerciones_toString-out.json:out.json": "locale-sensitive runtime output differs from the baseline fixture",
   "runtime/properties-writer-out.properties:out.properties": "properties writer output differs from the baseline fixture",
-  "runtime/read-concat-out.json:out.json": "runtime coercion output differs from the baseline fixture",
   "runtime/runtime_dataFormatsDescriptors-out.json:out.json": "dw::Runtime output differs from the baseline fixture",
   "runtime/runtime_orElseTry-out.json:out.json": "source-location runtime output differs from the baseline fixture",
   "runtime/runtime_run-out.json:out.json": "dw::Runtime output differs from the baseline fixture",
   "runtime/try-recursive-call-out.json:out.json": "source-location runtime output differs from the baseline fixture",
-  "runtime/update-op-out.dwl:out.dwl": "runtime coercion output differs from the baseline fixture",
 };
 
 export const REENABLED_CASES = [
