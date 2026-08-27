@@ -288,6 +288,23 @@ coordination: the op's own `g_active_ops--` stays on the worker thread; the fina
 short-lived reservation only around the attach, makes no env-affine or JS-loop-dependent call, and
 never holds it across a JS callback (so it cannot re-introduce the §6.2 deadlock).
 
+**Conditional bridge free (round 10, Task 6/svacas P1 confirmation).** When `bridge_finalize_registry`
+reports the destroy was *skipped* while the isolate is still live (a transient `fn_attach_thread`
+failure, not `TEARING_DOWN`/isolate-gone), `bridge_finalize` must not free the bridge — the Java
+registry still holds it as a `CallbackWeaveResourceResolver` ctx, and freeing it would be a
+use-after-free the next time that ctx is dereferenced. The bridge is instead moved onto
+`g_stranded_bridges` (`bridge_retain_stranded`, list guarded by `g_mutex`) and retried by
+`drain_stranded_bridges` at the next natural drain point (`napi_initialize`, op completion,
+`cleanup`), which frees it only once the registry removal actually succeeds or the whole isolate has
+since gone away. This is strictly better than the pre-fix behavior (an unconditional free on the
+skipped-destroy path). One caveat, documented at the call sites in `addon.c`: a stranded bridge is
+**not** `in_flight`-pinned the way a normally-admitted bridge is (§6.3's admission pinning above) —
+it doesn't need to be under the supported single-owner-thread contract, because by the time a bridge
+reaches this path its `in_flight` count has already drained to zero. The only way a drained-then-freed
+stranded bridge could still be dereferenced is unsupported cross-Worker handle sharing or other API
+misuse that starts a new operation against a handle that has already been unlinked from `g_bridges`
+— not a case the supported API surface can reach.
+
 **Env cleanup hooks reclaim abandoned engines.** Every engine registers a
 `napi_add_env_cleanup_hook` at creation (checked for failure — creation is all-or-nothing; on
 hook-registration failure the record is unlinked, its registry entry removed, its init reference
@@ -352,12 +369,26 @@ because a boolean cannot represent the window during which `cleanup()` has start
   `napi_run_script_engine`) and unwind `g_active_ops` + the engine pin with no double-free
   (`calloc`-zeroed `w` makes the free-set `free(NULL)`-safe). Worker-thread OOM produces a
   **terminal error JSON result** (a static `{"success":false,"error":"Out of memory"}` string when
-  the copy itself failed, flagged so it is never `free()`d), never a hung promise.
+  the copy itself failed, flagged so it is never `free()`d), never a hung promise. **The streaming
+  and transform completion sentinel (`struct chunk_data`, the `len == -1` terminal record) is now
+  pre-allocated in the synchronous setup path** (`w->sentinel`, allocated right before
+  `napi_create_promise`), not `malloc`'d on the worker's terminal path (round 10, Task 7). Before
+  this fix, a `malloc` failure on the worker's terminal path freed the work struct and returned
+  without ever enqueuing completion — the env was alive, so the JS promise never settled and the
+  tsfn was never released: a permanent hang, not a clean error. With the sentinel pre-allocated,
+  the worker's terminal completion path performs no allocation between the `g_active_ops--`
+  decrement and the unconditional tsfn enqueue, so that hang is now structurally impossible; a
+  setup-time sentinel-allocation failure instead unwinds cleanly and throws synchronous `"OOM"`,
+  identical to every other setup-phase allocation failure.
 - **Argument validation.** Every FFI-facing entrypoint checks the status of every
   `napi_get_value_*` conversion (handle `int64`, string size-probes and fills, `napi_typeof` for
   nullable args) and throws before using the converted value, so a raw addon caller cannot turn a
   malformed argument into an uninitialized native input. `inputCharset` is nullable
-  (`string | null | undefined`); any other type is rejected rather than silently coerced.
+  (`string | null | undefined`); any other type is rejected rather than silently coerced. The raw
+  `napi_initialize(libPath)` entrypoint now applies the same discipline to its own argument: it
+  checks `napi_get_cb_info`'s status, rejects a non-string `libPath` via `napi_typeof` before
+  touching it, and checks `napi_get_value_string_utf8`'s status — previously the argument was read
+  without any of these checks (round 10, Task 8).
 - **Stream error propagation.** `streamFromNative` handles **both** settlement branches of the
   native `start()` promise: on rejection it records the error, marks completion, and wakes every
   parked `next()` consumer (otherwise the generator hangs forever and the rejection is unhandled),
@@ -404,7 +435,15 @@ attachment**, mirroring the Node and Go bindings:
   for the whole call, and detaches it when done (`_current_thread_attachment`). A stream-worker
   thread that has already attached its own IsolateThread passes it through unchanged.
 - **`_release_isolate`** (last ref): attaches a fresh thread solely to call
-  `graal_tear_down_isolate`, then clears the globals.
+  `graal_tear_down_isolate`. On success it clears the globals; on failure (attach failure, or
+  `graal_tear_down_isolate` itself failing) it now **retains the live isolate and arms
+  `_teardown_needed`** rather than nulling the globals — nulling on a failed teardown would let the
+  next `_acquire_isolate` build a second, racing isolate over the first one, which is still alive
+  (round 10, Task 2/3). `_acquire_isolate` checks `_teardown_needed` first and retries the pending
+  teardown before deciding whether to create a new isolate; a repeated failure re-arms the flag and
+  raises rather than proceeding. This mirrors Node's `g_teardown_needed` retryable-teardown model
+  (§6.2) — the two bindings now share one failure-recovery contract instead of Python's previous
+  unconditional-null behavior.
 
 Because nothing stays attached between calls, teardown never blocks on a phantom attachment
 regardless of which OS thread performs the last release.
@@ -445,7 +484,15 @@ instance has already joined its own workers, so the isolate has no attached work
   resolves custom modules only when invoked on the engine's owner thread and **fails closed**
   ("not found") on a background stream-worker thread. Built-in modules resolve normally everywhere;
   synchronous `run()` with a resolver resolves custom modules fully. This is a conservative parity
-  choice (identical behavior across bindings), not a hard Python limitation.
+  choice (identical behavior across bindings), not a hard Python limitation. This scope is now
+  stated for end users directly (round 10, Task 13): both README's "Custom module resolution scope"
+  section (`native-lib/node/README.md`, `native-lib/python/README.md`) states the three-part rule —
+  a configured resolver applies to `run()`; built-ins resolve everywhere; custom modules fail closed
+  in streaming/transform/callback APIs — and the existing fail-closed behavior is covered by
+  `native-lib/node/tests/integration/dataweave-resolver.test.ts` (`runStreaming fails cleanly for a
+  custom module...`) and `native-lib/python/tests/integration/test_module_resolver.py`
+  (`test_resolver_is_inactive_for_resolver_less_apis_after_synchronous_install`, which additionally
+  covers `run_transform`, `run_callback`, and `run_input_output_callback`).
 
 ## 8. Architecture (layer map)
 
@@ -683,4 +730,5 @@ unification design documents were consolidated into this file.
 | 15 (08-21 review6) | §6.2, §6.4, §6.5 | Singleton-poisoning fix; stream rejection propagation; teardown return-code checks; init-driven stranded-teardown retry. |
 | 16 (08-24 review7) | §6.2, §6.4, §6.5, §10 | Detach on failed teardown; init-hook-failure retry arming; observable init rollback; `Promise.reject(undefined)` fix; lifecycle-doc accuracy. |
 | Python unification (08-26) | §2, §5, §7, §8 (Layer 1/4), §10–§12 | Remove `ScriptRuntime` singleton + 3 legacy C entrypoints; Python onto shared refcounted isolate + handle engines via `*_engine` ABI; 3-arg ctx resolver trampoline. |
+| PR157 review 10 (08-27) | §6.3, §6.5, §7.2, §7.4 | Python `_release_isolate`/`_acquire_isolate` retryable-teardown model brought to parity with Node's `g_teardown_needed` (retains the live isolate on failed teardown instead of nulling globals); Node streaming/transform completion sentinel pre-allocated in synchronous setup (worker terminal path now allocation-free, closing a stranded-hang window); stranded-bridge free confirmed conditional on registry removal, with the non-`in_flight`-pinned residual window documented as reachable only via unsupported cross-Worker handle sharing / API misuse; raw `napi_initialize` validates its library-path argument synchronously; user-facing custom-module resolution scope (`run()`-only) documented in both READMEs, cross-referencing the existing streaming-resolver-guard tests. |
 | Python final review (08-26) | §7.2, §10 | Detach isolate bootstrap thread at create + attach-on-demand so cross-thread last-release teardown cannot hang; unregister resolver token on failed init. |

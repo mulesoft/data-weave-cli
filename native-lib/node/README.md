@@ -292,6 +292,14 @@ try {
 
 See [docs/external-modules.md](docs/external-modules.md) for complete documentation, resolver factories, error handling, and dependency management. Note: a resolver runs with full process permissions (no sandboxing) — see the "Security / Trust Model" section there before pointing one at untrusted sources.
 
+### Custom module resolution scope
+
+- A `resolveModule` you configure applies to `run()`.
+- Built-in modules (e.g. `dw::core::*`) resolve everywhere — `run()`, `runStreaming()`, and `runTransform()`.
+- Custom modules do **not** resolve inside `runStreaming()`/`runTransform()`: those execute on a background thread that must not call back into your resolver, so a streamed/transformed script that imports a custom module fails closed (reports the module as not found) rather than making an unsafe cross-thread call. If you need a custom module in a streamed/transform script, resolve it via `run()` instead, or inline the module into the script.
+
+See [docs/external-modules.md](docs/external-modules.md#multiple-independent-engines) for the full explanation, including the Worker-thread ownership rules.
+
 ### Input Formats
 
 Inputs can be provided in multiple formats:

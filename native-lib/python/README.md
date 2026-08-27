@@ -210,6 +210,12 @@ runs reuse it. The instance retains the resolver callback until successful
 isolate teardown, then releases callback references during `cleanup()`.
 Different live instances can therefore use different resolvers.
 
+### Custom module resolution scope
+
+- A `resolve_module` you configure applies to `run()`.
+- Built-in modules (e.g. `dw::core::*`) resolve everywhere — `run()`, `run_streaming()`, `run_transform()`, and the low-level callback APIs.
+- Custom modules do **not** resolve inside `run_streaming()`, `run_transform()`, or the low-level callback APIs: those execute on a background thread that must not call back into your resolver, so such a script fails closed (reports the module as not found) rather than making an unsafe cross-thread call. If you need a custom module in a streamed/transform/callback script, resolve it via `run()` instead, or inline the module into the script.
+
 ### Error Handling
 
 **Option A: Use `raise_on_error=True` (recommended)**

@@ -236,6 +236,23 @@ static engine_bridge_t* bridge_find(long long handle) {
 // stays valid until a later drain retries the destroy and frees it. Takes
 // g_mutex; the caller MUST have already unlinked `b` from g_bridges (its `next`
 // is reused for the stranded list) and MUST NOT hold g_mutex.
+//
+// Round-10 review note (parked from Task 6): unlike the normal admitted-op path
+// in §6.3/above, a stranded bridge is NOT `in_flight`-pinned while it sits on
+// g_stranded_bridges. That is safe under the supported single-owner-thread
+// contract: a bridge only reaches here via bridge_finalize (destroyEngine, the
+// owner-thread-only call, or the env cleanup hook on the owner env's death), and
+// both of those already require in_flight == 0 to have run at all (see the
+// deferred-destroy comment above bridge_finalize_registry) -- so in_flight is
+// already drained to zero by construction before a bridge is ever stranded, and
+// bridge_find() can no longer look it up by handle (it's unlinked from
+// g_bridges), so no new op can be admitted against it. The only way a
+// drained-then-freed stranded bridge could still be dereferenced is unsupported
+// cross-Worker handle sharing or other API misuse that starts a background
+// operation against a handle after it has already been unlinked here --
+// outside the documented single-owner-thread usage this addon supports. Even in
+// that unsupported scenario this is strictly better than the pre-fix behavior
+// (an unconditional free on every skipped-destroy path).
 static void bridge_retain_stranded(engine_bridge_t* b) {
     if (b == NULL) return;
     uv_mutex_lock(&g_mutex);
