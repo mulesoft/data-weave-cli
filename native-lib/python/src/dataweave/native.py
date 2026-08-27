@@ -35,6 +35,12 @@ _lib = None
 _lib_path = None
 _isolate = None
 _isolate_ref_count = 0
+# Set when a final graal_tear_down_isolate (or the attach immediately before
+# it) failed. The isolate is still live in that case; teardown must be
+# retried -- and must succeed -- before any new isolate is created. Mirrors
+# Node's g_teardown_needed retryable-teardown model. Only read/written while
+# holding _isolate_lock.
+_teardown_needed = False
 
 
 # Per-engine resolver dispatch. The ctx passed to create_engine_with_resolver is
@@ -102,11 +108,30 @@ def _bind_abi(lib) -> None:
     lib.run_script_input_output_callback_engine.restype = ctypes.c_void_p
 
 
+def _retry_pending_teardown_locked() -> None:
+    """If a prior final teardown failed, retry it now (caller holds _isolate_lock).
+    On success, clears the flag and nulls the isolate globals so the caller may
+    build fresh. On failure, leaves the isolate live and the flag armed, and
+    propagates the failure so the caller does not proceed to build a second,
+    racing isolate."""
+    global _lib, _lib_path, _isolate, _teardown_needed
+    if not _teardown_needed:
+        return
+    lib, isolate = _lib, _isolate
+    worker = GraalIsolateThreadPointer()
+    if lib.graal_attach_thread(isolate, ctypes.byref(worker)) != 0:
+        raise DataWeaveError("Failed to attach thread to retry isolate teardown")
+    _tear_down(lib, worker)  # raises on failure -> flag stays armed
+    _lib = _lib_path = _isolate = None
+    _teardown_needed = False
+
+
 def _acquire_isolate(lib_path: str):
     """Returns (lib, isolate), creating the shared isolate on the first reference.
     Increments the refcount only on success."""
     global _lib, _lib_path, _isolate, _isolate_ref_count
     with _isolate_lock:
+        _retry_pending_teardown_locked()
         if _isolate is None:
             try:
                 lib = ctypes.CDLL(lib_path)
@@ -139,8 +164,12 @@ def _acquire_isolate(lib_path: str):
 
 
 def _release_isolate() -> None:
-    """Decrements the refcount; tears the isolate down and nulls globals on 0."""
-    global _lib, _lib_path, _isolate, _isolate_ref_count
+    """Decrements the refcount; tears the isolate down on 0. A failed teardown
+    (or a failed attach immediately before it) retains the isolate live and
+    arms _teardown_needed for a retry at the next acquire, instead of nulling
+    the globals -- nulling would let the next initialize() build a second live
+    isolate while the first is still alive."""
+    global _lib, _lib_path, _isolate, _isolate_ref_count, _teardown_needed
     with _isolate_lock:
         if _isolate_ref_count == 0:
             return
@@ -149,23 +178,32 @@ def _release_isolate() -> None:
             return
         # Last release: no thread is persistently attached (the bootstrap was
         # detached at create and every op detaches its own thread), so attach a
-        # fresh thread and tear down. Then clear globals regardless.
+        # fresh thread and tear down.
         lib, isolate = _lib, _isolate
+        worker = GraalIsolateThreadPointer()
+        if lib.graal_attach_thread(isolate, ctypes.byref(worker)) != 0:
+            # Cannot even attach to tear down; retain the isolate and arm a retry.
+            _teardown_needed = True
+            print(
+                "DataWeave: could not attach a thread to tear down the GraalVM "
+                "isolate; teardown will be retried on the next initialize().",
+                file=sys.stderr,
+            )
+            raise DataWeaveError("Failed to attach thread for isolate teardown")
         try:
-            worker = GraalIsolateThreadPointer()
-            if lib.graal_attach_thread(isolate, ctypes.byref(worker)) != 0:
-                raise DataWeaveError("Failed to attach thread for isolate teardown")
             _tear_down(lib, worker)
         except BaseException:
+            # Teardown failed: keep the isolate live, arm a retry, do NOT null
+            # globals (nulling would let the next initialize() build a second
+            # live isolate). Mirrors Node's g_teardown_needed retryable model.
+            _teardown_needed = True
             print(
-                "DataWeave: GraalVM isolate teardown failed; the isolate reference "
-                "has been cleared and a fresh isolate will be created on the next "
-                "initialize().",
+                "DataWeave: GraalVM isolate teardown failed; the isolate is "
+                "retained and teardown will be retried on the next initialize().",
                 file=sys.stderr,
             )
             raise
-        finally:
-            _lib = _lib_path = _isolate = None
+        _lib = _lib_path = _isolate = None
 
 
 def _tear_down(lib, thread) -> None:

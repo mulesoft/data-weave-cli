@@ -604,7 +604,13 @@ def test_engine_create_and_destroy_off_owner_thread_use_an_attached_thread(monke
 
 
 @pytest.mark.unit
-def test_failed_isolate_teardown_surfaces_and_clears_state_for_retry(monkeypatch):
+def test_failed_isolate_teardown_retains_isolate_and_arms_retry(monkeypatch):
+    # Updated for the retryable-teardown contract (review #10 #3, align with
+    # Node): a failed final teardown must NOT null the globals -- nulling would
+    # let the next initialize() build a SECOND live isolate while the first is
+    # still alive. Instead the isolate is retained and a retry is armed; the
+    # retry runs (and must succeed) before any fresh isolate can be built.
+    monkeypatch.setattr(native, "_teardown_needed", False)  # restored after the test regardless of outcome
     library = FakeLibrary()
     library.graal_tear_down_isolate = CallableFunction(lambda _thread: 1)  # non-zero == failure
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
@@ -613,15 +619,67 @@ def test_failed_isolate_teardown_surfaces_and_clears_state_for_retry(monkeypatch
     a.initialize()
     with pytest.raises(native.DataWeaveError):
         a.cleanup()  # last release -> teardown fails -> raises
-    # State cleared regardless, so a fresh isolate is creatable.
-    assert native._isolate is None
-    assert native._isolate_ref_count == 0
-    b = native.NativeRuntime("/tmp/dwlib")
-    b.initialize()  # must succeed against a fresh isolate
+
+    # The isolate is retained live (not nulled) and a retry is armed.
     assert native._isolate is not None
-    # Restore a passing teardown so b.cleanup() doesn't raise on the way out.
+    assert native._isolate_ref_count == 0
+    assert native._teardown_needed is True
+
+    # Restore a passing teardown so the pending retry (run before b's isolate
+    # is built) succeeds.
     library.graal_tear_down_isolate = CallableFunction(lambda _thread: 0)
+
+    b = native.NativeRuntime("/tmp/dwlib")
+    b.initialize()  # retries the pending teardown, then builds a fresh isolate
+    assert native._teardown_needed is False
+    assert native._isolate is not None
     b.cleanup()
+
+
+@pytest.mark.unit
+def test_failed_teardown_retains_isolate_and_retries(monkeypatch):
+    """A failing graal_tear_down_isolate must NOT null the globals or create a
+    second isolate; the next acquire retries the pending teardown."""
+    monkeypatch.setattr(native, "_teardown_needed", False)  # restored after the test regardless of outcome
+    library = FakeLibrary()
+    create_isolate_calls = []
+
+    def create_isolate(_params, _isolate, _thread):
+        create_isolate_calls.append(1)
+        return 0
+
+    tear_down_results = [1, 0]  # the final teardown fails once, then the retry succeeds
+
+    def tear_down(thread):
+        library.tear_down_threads.append(thread)
+        return tear_down_results.pop(0) if tear_down_results else 0
+
+    library.graal_create_isolate = CallableFunction(create_isolate)
+    library.graal_tear_down_isolate = CallableFunction(tear_down)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    lib, isolate = native._acquire_isolate("/tmp/dwlib")
+    assert len(create_isolate_calls) == 1
+
+    with pytest.raises(native.DataWeaveError):
+        native._release_isolate()  # last release -> tear_down fails
+
+    # Isolate retained, retry armed, NOT nulled, no second isolate created.
+    assert native._lib is lib
+    assert native._isolate is isolate
+    assert native._teardown_needed is True
+    assert native._isolate_ref_count == 0
+    assert len(create_isolate_calls) == 1
+
+    # Next acquire retries the pending teardown (which now succeeds) and only
+    # then builds a fresh isolate.
+    lib2, isolate2 = native._acquire_isolate("/tmp/dwlib")
+    assert native._teardown_needed is False
+    assert len(library.tear_down_threads) == 2   # the failed attempt + the retry
+    assert len(create_isolate_calls) == 2        # then a fresh isolate
+    assert isolate2 is not isolate
+
+    native._release_isolate()
 
 
 @pytest.mark.unit
