@@ -73,6 +73,11 @@ public class ScriptRuntime {
                 .build();
     }
 
+    /** Builds an engine with built-in (ClassLoader) modules only — no custom resolver. */
+    public ScriptRuntime() {
+        this(null);
+    }
+
     /**
      * Creates composite resolver: ClassLoader (built-ins) + custom (user modules).
      * If no custom resolver is provided, returns ClassLoader only.

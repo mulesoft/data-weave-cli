@@ -273,7 +273,7 @@ public class NativeLib {
      */
     @CEntryPoint(name = "create_engine")
     public static long createEngine(IsolateThread thread) {
-        return ScriptRuntime.register(new ScriptRuntime(null));
+        return ScriptRuntime.register(new ScriptRuntime());
     }
 
     /**

@@ -6,12 +6,23 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.json.JSONObject;
 import org.junit.jupiter.api.Test;
+import org.mule.weave.v2.parser.ast.variables.NameIdentifier;
+import org.mule.weave.v2.sdk.NameIdentifierHelper;
+import org.mule.weave.v2.sdk.WeaveResource;
+import org.mule.weave.v2.sdk.WeaveResourceResolver;
+import scala.Option;
+import scala.collection.JavaConverters;
+import scala.collection.immutable.Seq;
+import scala.collection.immutable.Seq$;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.Charset;
 import java.util.Base64;
+import java.util.Collections;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -19,7 +30,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runSimpleScript() {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
         
         System.out.println("Running sqrt(144) 10 times with timing:");
         System.out.println("=".repeat(50));
@@ -39,7 +50,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runParseError() {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Running sqrt(144) 10 times with timing:");
         System.out.println("=".repeat(50));
@@ -55,7 +66,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithInputs() {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
         
         System.out.println("Testing runWithInputs with two integer numbers:");
         System.out.println("=".repeat(50));
@@ -129,7 +140,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithXmlInput() {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
         
         System.out.println("Testing runWithInputs with XML input to calculate average age:");
         System.out.println("=".repeat(50));
@@ -181,7 +192,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithJsonObjectInput() {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
         
         System.out.println("Testing runWithInputs with JSON object input:");
         System.out.println("=".repeat(50));
@@ -216,7 +227,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithBinaryResult() {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Running fromBase64 10 times with timing:");
         System.out.println("=".repeat(50));
@@ -239,7 +250,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithInputProperties() {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
         String encodedIn0 = Base64.getEncoder().encodeToString("1234567".getBytes());
         Result result = Result.parse(runtime.run("in0.column_1[0] as Number",
                 "{\"in0\": " +
@@ -252,7 +263,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamSimpleScript() throws IOException {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing streaming simple script:");
         System.out.println("=".repeat(50));
@@ -279,7 +290,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamWithInputs() throws IOException {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing streaming with inputs:");
         System.out.println("=".repeat(50));
@@ -310,7 +321,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamChunkedRead() throws IOException {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing streaming chunked read:");
         System.out.println("=".repeat(50));
@@ -341,7 +352,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamWithStreamingInput() throws Exception {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing streaming with streaming input:");
         System.out.println("=".repeat(50));
@@ -396,7 +407,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamWithLargeStreamingInput() throws Exception {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing streaming with large streaming input:");
         System.out.println("=".repeat(50));
@@ -455,7 +466,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamErrorSession() {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing streaming error session:");
         System.out.println("=".repeat(50));
@@ -474,7 +485,7 @@ class ScriptRuntimeTest {
 
     @Test
     void callbackOutputStreaming() throws IOException {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing callback-based output streaming:");
         System.out.println("=".repeat(50));
@@ -505,7 +516,7 @@ class ScriptRuntimeTest {
 
     @Test
     void callbackInputOutputStreaming() throws Exception {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing callback-based input+output streaming:");
         System.out.println("=".repeat(50));
@@ -566,7 +577,7 @@ class ScriptRuntimeTest {
 
     @Test
     void callbackOutputStreamingError() {
-        ScriptRuntime runtime = new ScriptRuntime(null);
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing callback-based output streaming with error:");
         System.out.println("=".repeat(50));
@@ -585,31 +596,28 @@ class ScriptRuntimeTest {
     /** In-memory WeaveResourceResolver fake — the JVM-constructable seam standing
      *  in for CallbackWeaveResourceResolver (a CFunctionPointer, which cannot be
      *  built in test mode). */
-    static final class MapResolver
-            implements org.mule.weave.v2.sdk.WeaveResourceResolver {
-        private final java.util.Map<String, String> modules;
-        MapResolver(java.util.Map<String, String> modules) { this.modules = modules; }
+    static final class MapResolver implements WeaveResourceResolver {
+        private final Map<String, String> modules;
+        MapResolver(Map<String, String> modules) { this.modules = modules; }
 
         @Override
-        public scala.Option<org.mule.weave.v2.sdk.WeaveResource> resolve(
-                org.mule.weave.v2.parser.ast.variables.NameIdentifier id) {
-            String path = org.mule.weave.v2.sdk.NameIdentifierHelper.toWeaveFilePath(id, "/");
+        public Option<WeaveResource> resolve(NameIdentifier id) {
+            String path = NameIdentifierHelper.toWeaveFilePath(id, "/");
             String key = path.startsWith("/") ? path.substring(1) : path;
             String src = modules.get(key);
-            if (src == null) return scala.Option.empty();
-            return scala.Option.apply(org.mule.weave.v2.sdk.WeaveResource.apply(path, src));
+            if (src == null) return Option.empty();
+            return Option.apply(WeaveResource.apply(path, src));
         }
 
         @Override
-        public scala.collection.immutable.Seq<org.mule.weave.v2.sdk.WeaveResource> resolveAll(
-                org.mule.weave.v2.parser.ast.variables.NameIdentifier id) {
-            scala.Option<org.mule.weave.v2.sdk.WeaveResource> r = resolve(id);
+        public Seq<WeaveResource> resolveAll(NameIdentifier id) {
+            Option<WeaveResource> r = resolve(id);
             if (r.isDefined()) {
-                return scala.collection.JavaConverters
-                        .asScalaBuffer(java.util.Collections.singletonList(r.get())).toList();
+                return JavaConverters
+                        .asScalaBuffer(Collections.singletonList(r.get()))
+                        .toList();
             }
-            return (scala.collection.immutable.Seq<org.mule.weave.v2.sdk.WeaveResource>)
-                    scala.collection.immutable.Seq$.MODULE$.<org.mule.weave.v2.sdk.WeaveResource>empty();
+            return (Seq<WeaveResource>) Seq$.MODULE$.<WeaveResource>empty();
         }
     }
 
@@ -620,9 +628,9 @@ class ScriptRuntimeTest {
 
     @Test
     void twoEnginesResolveOnlyTheirOwnModule() {
-        ScriptRuntime engineA = new ScriptRuntime(new MapResolver(java.util.Map.of(
+        ScriptRuntime engineA = new ScriptRuntime(new MapResolver(Map.of(
                 "org/test/a.dwl", "%dw 2.0\nfun greet(n: String) = \"A:\" ++ n")));
-        ScriptRuntime engineB = new ScriptRuntime(new MapResolver(java.util.Map.of(
+        ScriptRuntime engineB = new ScriptRuntime(new MapResolver(Map.of(
                 "org/test/b.dwl", "%dw 2.0\nfun greet(n: String) = \"B:\" ++ n")));
 
         long hA = ScriptRuntime.register(engineA);
@@ -649,7 +657,7 @@ class ScriptRuntimeTest {
 
     @Test
     void engineWithoutResolverStillRunsBuiltins() {
-        ScriptRuntime engine = new ScriptRuntime(null); // ClassLoader-only
+        ScriptRuntime engine = new ScriptRuntime(); // ClassLoader-only
         long h = ScriptRuntime.register(engine);
         String r = ScriptRuntime.get(h).run(
                 "%dw 2.0\nimport dw::core::Strings\noutput application/json\n---\nStrings::capitalize(\"hello\")");
@@ -692,7 +700,7 @@ class ScriptRuntimeTest {
 
         static Result parse(String json) {
             Result result = new Result();
-            org.json.JSONObject obj = new org.json.JSONObject(json);
+            JSONObject obj = new JSONObject(json);
 
             result.success = obj.getBoolean("success");
             if (result.success) {
