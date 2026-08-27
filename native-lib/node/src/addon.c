@@ -883,6 +883,13 @@ struct streaming_work {
   // for an unknown handle). The completion sentinel calls bridge_end_op on it to
   // balance in_flight and run any deferred destroy (F1).
   engine_bridge_t* bridge;
+  // review #10 (svacas P2): the completion sentinel, pre-allocated in the
+  // synchronous setup path (napi_run_script_streaming_engine) so the worker's
+  // terminal path is allocation-free and can ALWAYS enqueue completion. If it
+  // were malloc'd on the worker instead, a NULL return there forced a return
+  // WITHOUT enqueuing -- but the env is alive on OOM, so the promise would
+  // never settle and the tsfn would never be released: a permanent hang.
+  struct chunk_data* sentinel;
 };
 
 static void call_js_write(napi_env env, napi_value js_callback, void* context, void* data) {
@@ -1017,21 +1024,17 @@ static void streaming_thread_fn(void* arg) {
   // env call, so it is safe on this background worker thread.
   drain_stranded_bridges();
 
-  // Round-9 (#2): if even the sentinel struct cannot be allocated, we cannot
-  // enqueue a completion -- run the SAME native finalize the env-dead
-  // (napi_closing) branch below runs, so g_active_ops (already decremented
-  // above) plus the bridge in-flight hold and w are released and nothing is
-  // stranded. This is the "sentinel malloc NULL -> skip enqueue + unwind like
-  // the env-dead sentinel branch" path.
-  struct chunk_data* sentinel = malloc(sizeof(struct chunk_data));
-  if (sentinel == NULL) {
-    if (meta_result != OOM_JSON) free(meta_result);
-    free(w->script);
-    free(w->inputs_json);
-    bridge_end_op(w->bridge, /*env_still_alive=*/false);
-    free(w);
-    return;
-  }
+  // review #10 (svacas P2): the completion sentinel was pre-allocated in the
+  // synchronous setup path (napi_run_script_streaming_engine) and carried on
+  // w->sentinel, so this terminal path is ALLOCATION-FREE and the completion
+  // enqueue + tsfn release always run. The old code malloc'd the sentinel HERE
+  // and, on NULL, freed w and returned WITHOUT enqueuing -- but the env is
+  // alive on OOM (not the napi_closing case), so the promise never settled and
+  // the tsfn was never released: a permanent hang. Pre-allocating removes that
+  // failure mode entirely. (meta_result above uses the OOM_JSON static fallback
+  // on strdup failure, so it is always a valid C string and never gates the
+  // enqueue either.)
+  struct chunk_data* sentinel = w->sentinel;
   sentinel->buf = meta_result;
   sentinel->len = -1;
   napi_status enq = napi_call_threadsafe_function(w->tsfn, sentinel, napi_tsfn_blocking);
@@ -1198,12 +1201,29 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
     return NULL;
   }
 
+  // review #10 (svacas P2): pre-allocate the completion sentinel HERE, in the
+  // synchronous setup path on the owner JS thread, before the worker is
+  // spawned -- so the worker's terminal completion path is allocation-free and
+  // can ALWAYS enqueue completion + release the tsfn. On NULL, unwind exactly
+  // like the promise-creation path below (release the tsfn, which holds w as
+  // its context; free w + buffers; release the pin and g_active_ops) and throw
+  // synchronously. This mirrors napi_run_script_engine's "OOM" throw.
+  w->sentinel = malloc(sizeof(struct chunk_data));
+  if (w->sentinel == NULL) {
+    napi_release_threadsafe_function(w->tsfn, napi_tsfn_release);
+    free(w->script); free(w->inputs_json); free(w);
+    bridge_end_op(pinned, /*env_still_alive=*/true);
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "OOM");
+    return NULL;
+  }
+
   napi_value promise;
   if (napi_create_promise(env, &w->deferred, &promise) != napi_ok) {
     // The tsfn was created above; release it before freeing w (it holds w as
     // its context). No worker exists yet, so this release is the sole discharge.
     napi_release_threadsafe_function(w->tsfn, napi_tsfn_release);
-    free(w->script); free(w->inputs_json); free(w);
+    free(w->sentinel); free(w->script); free(w->inputs_json); free(w);
     bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "runScriptStreamingEngine: failed to create promise");
@@ -1240,6 +1260,7 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
     napi_create_string_utf8(env, "{\"success\":false,\"error\":\"Failed to spawn streaming worker thread\"}", NAPI_AUTO_LENGTH, &result);
     napi_resolve_deferred(env, w->deferred, result);
 
+    free(w->sentinel);
     free(w->script);
     free(w->inputs_json);
     free(w);
@@ -1266,6 +1287,11 @@ struct transform_work {
   // for an unknown handle). The completion sentinel calls bridge_end_op on it to
   // balance in_flight and run any deferred destroy (F1).
   engine_bridge_t* bridge;
+  // review #10 (svacas P2): the completion sentinel, pre-allocated in the
+  // synchronous setup path (napi_run_script_transform_engine) so the worker's
+  // terminal path is allocation-free and can ALWAYS enqueue completion. See
+  // the same field on struct streaming_work for the hang this prevents.
+  struct chunk_data* sentinel;
 };
 
 struct read_request {
@@ -1519,24 +1545,18 @@ static void transform_thread_fn(void* arg) {
   // env call, so it is safe on this background worker thread.
   drain_stranded_bridges();
 
-  // Round-9 (#2): sentinel malloc NULL -> skip enqueue and run the same native
-  // finalize as the env-dead branch below (release the bridge hold + free w and
-  // all fields), so g_active_ops (already decremented above) and the in-flight
-  // hold are released. No self-join, no env-affine napi call, no tsfn release
-  // (see the env-dead branch's citation for why releasing the tsfns here is
-  // unsafe).
-  struct chunk_data* sentinel = malloc(sizeof(struct chunk_data));
-  if (sentinel == NULL) {
-    if (meta_result != OOM_JSON) free(meta_result);
-    free(w->script);
-    free(w->inputs_json);
-    free(w->input_name);
-    free(w->input_mime_type);
-    free(w->input_charset);
-    bridge_end_op(w->bridge, /*env_still_alive=*/false);
-    free(w);
-    return;
-  }
+  // review #10 (svacas P2): the completion sentinel was pre-allocated in the
+  // synchronous setup path (napi_run_script_transform_engine) and carried on
+  // w->sentinel, so this terminal path is ALLOCATION-FREE and the completion
+  // enqueue + tsfn release always run. The old code malloc'd the sentinel HERE
+  // and, on NULL, freed w and returned WITHOUT enqueuing -- but the env is
+  // alive on OOM (not the napi_closing case), so the promise never settled and
+  // the tsfn was never released: a permanent hang. Removing the allocation
+  // (rather than releasing the tsfn here, which the enq-failure branch below
+  // documents as unsafe) is what makes the enqueue unconditional. (meta_result
+  // above uses the OOM_JSON static fallback on strdup failure, so it is always
+  // a valid C string and never gates the enqueue either.)
+  struct chunk_data* sentinel = w->sentinel;
   sentinel->buf = meta_result;
   sentinel->len = -1;
   napi_status enq = napi_call_threadsafe_function(w->write_tsfn, sentinel, napi_tsfn_blocking);
@@ -1729,11 +1749,29 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
     return NULL;
   }
 
+  // review #10 (svacas P2): pre-allocate the completion sentinel HERE, in the
+  // synchronous setup path on the owner JS thread, before the worker is
+  // spawned -- so the worker's terminal completion path is allocation-free and
+  // can ALWAYS enqueue completion + release the tsfn. On NULL, unwind exactly
+  // like the promise-creation path below (release both tsfns; free w + all five
+  // string buffers; release the pin and g_active_ops) and throw synchronously.
+  // This mirrors napi_run_script_engine's "OOM" throw.
+  w->sentinel = malloc(sizeof(struct chunk_data));
+  if (w->sentinel == NULL) {
+    napi_release_threadsafe_function(w->read_tsfn, napi_tsfn_release);
+    napi_release_threadsafe_function(w->write_tsfn, napi_tsfn_release);
+    free(w->script); free(w->inputs_json); free(w->input_name); free(w->input_mime_type); free(w->input_charset); free(w);
+    bridge_end_op(pinned, /*env_still_alive=*/true);
+    uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+    napi_throw_error(env, NULL, "OOM");
+    return NULL;
+  }
+
   napi_value promise;
   if (napi_create_promise(env, &w->deferred, &promise) != napi_ok) {
     napi_release_threadsafe_function(w->read_tsfn, napi_tsfn_release);
     napi_release_threadsafe_function(w->write_tsfn, napi_tsfn_release);
-    free(w->script); free(w->inputs_json); free(w->input_name); free(w->input_mime_type); free(w->input_charset); free(w);
+    free(w->sentinel); free(w->script); free(w->inputs_json); free(w->input_name); free(w->input_mime_type); free(w->input_charset); free(w);
     bridge_end_op(pinned, /*env_still_alive=*/true);
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     napi_throw_error(env, NULL, "runScriptTransformEngine: failed to create promise");
@@ -1772,6 +1810,7 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
     napi_create_string_utf8(env, "{\"success\":false,\"error\":\"Failed to spawn transform worker thread\"}", NAPI_AUTO_LENGTH, &result);
     napi_resolve_deferred(env, w->deferred, result);
 
+    free(w->sentinel);
     free(w->script);
     free(w->inputs_json);
     free(w->input_name);
