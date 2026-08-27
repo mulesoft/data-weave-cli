@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { packPackages } from "./pack-packages.mjs";
+import { npmCommand, packPackages } from "./pack-packages.mjs";
 
 const tempDirs = [];
 
@@ -41,6 +41,12 @@ after(() => {
   for (const dir of tempDirs) {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("selects the npm executable for each platform", () => {
+  assert.equal(npmCommand("win32"), "npm.cmd");
+  assert.equal(npmCommand("linux"), "npm");
+  assert.equal(npmCommand("darwin"), "npm");
 });
 
 test("packs meta and supported native package staging", async () => {
