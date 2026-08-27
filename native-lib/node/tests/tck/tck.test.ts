@@ -111,7 +111,7 @@ if (!existsSync(SUITES_DIR)) {
       const ignored = isIgnored(c.caseIdentifier);
       for (const scenario of c.scenarios) {
         const expectedFailure = ACCEPTED_BASELINE_MISMATCHES[scenario.name];
-        const testFn = ignored ? it.skip : expectedFailure ? it.fails : it;
+        const testFn = ignored ? it.skip : it;
         const label = ignored
           ? `${scenario.name} [skip: ${ignoreReason(c.caseIdentifier)}]`
           : expectedFailure
@@ -137,7 +137,14 @@ if (!existsSync(SUITES_DIR)) {
             ? readFileSync(encodingFile, "utf-8").trim()
             : null;
           const cmp = compareOutput(scenario.outputExtension, actual, expected, charset);
-          expect(cmp.match, cmp.detail).toBe(true);
+          if (expectedFailure) {
+            expect(
+              cmp.match,
+              `expected baseline mismatch for ${scenario.name} ([xfail: ${expectedFailure}]) but output matched — remove it from ACCEPTED_BASELINE_MISMATCHES`
+            ).toBe(false);
+          } else {
+            expect(cmp.match, cmp.detail).toBe(true);
+          }
         });
       }
     }
