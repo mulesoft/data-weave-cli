@@ -248,16 +248,27 @@ tasks.register('buildNodePackage', Exec) {
   inputs.file("${projectDir}/node/package.json")
   inputs.file("${projectDir}/node/binding.gyp")
   inputs.file("${projectDir}/node/tsconfig.json")
+  inputs.file("${projectDir}/node/scripts/pack-packages.mjs")
   outputs.dir("${projectDir}/node/dist")
   outputs.file("${projectDir}/node/build/Release/dwlib_addon.node")
+  environment 'NATIVE_VERSION', project.version.toString()
   doFirst {
     delete("${projectDir}/node/dist")
   }
   if (System.getProperty('os.name').toLowerCase().contains('windows')) {
-    commandLine('cmd', '/c', 'npm install && npx node-gyp rebuild && npx tsc && npm pack')
+    commandLine('cmd', '/c', 'npm install && npx node-gyp rebuild && npx tsc && node scripts/pack-packages.mjs')
   } else {
-    commandLine('bash', '-c', 'npm install && npx node-gyp rebuild && npx tsc && npm pack')
+    commandLine('bash', '-c', 'npm install && npx node-gyp rebuild && npx tsc && node scripts/pack-packages.mjs')
   }
+}
+
+tasks.register('nodePackTest', Exec) {
+  if (project.findProperty('skipNodeTests')?.toString()?.toBoolean() == true) {
+    enabled = false
+  }
+
+  workingDir("${projectDir}/node")
+  commandLine('node', '--test', 'scripts/pack-packages.test.mjs')
 }
 
 tasks.register('nodeTest', Exec) {
@@ -349,6 +360,7 @@ tasks.register('benchmarkJsUnitTest', Exec) {
 
 tasks.named('test') {
   dependsOn tasks.named('pythonTest')
+  dependsOn tasks.named('nodePackTest')
   dependsOn tasks.named('nodeTest')
   dependsOn tasks.named('benchmarkPythonStatsTest')
   dependsOn tasks.named('benchmarkJsUnitTest')
@@ -361,6 +373,8 @@ tasks.named('clean') {
   delete("${projectDir}/python/src/dataweave_native.egg-info")
   delete("${projectDir}/node/dist")
   delete("${projectDir}/node/build")
+  delete("${projectDir}/node/build/npm")
+  delete fileTree("${projectDir}/node") { include '*.tgz' }
   delete("${projectDir}/node/native")
   delete("${projectDir}/node/node_modules")
 }
