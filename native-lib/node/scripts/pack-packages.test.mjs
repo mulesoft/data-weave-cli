@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { npmCommand, packPackages } from "./pack-packages.mjs";
+import { npmPackInvocation, packPackages } from "./pack-packages.mjs";
 
 const tempDirs = [];
 
@@ -43,10 +43,16 @@ after(() => {
   }
 });
 
-test("selects the npm executable for each platform", () => {
-  assert.equal(npmCommand("win32"), "npm.cmd");
-  assert.equal(npmCommand("linux"), "npm");
-  assert.equal(npmCommand("darwin"), "npm");
+test("selects the npm pack invocation for each platform", () => {
+  const stagingDir = "package staging";
+  const windowsInvocation = npmPackInvocation("win32", stagingDir);
+  assert.equal(windowsInvocation.command, "cmd.exe");
+  assert.deepEqual(windowsInvocation.args.slice(0, 3), ["/d", "/s", "/c"]);
+  assert.match(windowsInvocation.args[3], /^npm pack /);
+  assert.deepEqual(npmPackInvocation("linux", stagingDir), {
+    command: "npm",
+    args: ["pack", stagingDir],
+  });
 });
 
 test("packs meta and supported native package staging", async () => {

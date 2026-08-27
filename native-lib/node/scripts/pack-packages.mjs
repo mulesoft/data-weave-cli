@@ -15,12 +15,17 @@ function nativePackageName(platform, arch) {
   return nativePackages.find((entry) => entry.platform === platform && entry.arch === arch)?.name;
 }
 
-export function npmCommand(platform = process.platform) {
-  return platform === "win32" ? "npm.cmd" : "npm";
+export function npmPackInvocation(platform, stagingDir) {
+  if (platform === "win32") {
+    const quotedStagingDir = `"${stagingDir.replaceAll('"', '""')}"`;
+    return { command: "cmd.exe", args: ["/d", "/s", "/c", `npm pack ${quotedStagingDir}`] };
+  }
+  return { command: "npm", args: ["pack", stagingDir] };
 }
 
 async function defaultRunNpmPack(stagingDir, nodeDir) {
-  await execFileAsync(npmCommand(), ["pack", stagingDir], { cwd: nodeDir });
+  const { command, args } = npmPackInvocation(process.platform, stagingDir);
+  await execFileAsync(command, args, { cwd: nodeDir });
 }
 
 async function copyIfPresent(source, destination) {
