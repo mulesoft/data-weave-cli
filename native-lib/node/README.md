@@ -18,11 +18,21 @@ Node.js N-API bindings for the DataWeave native library. Execute DataWeave scrip
 
 ### Option A: Install from package (recommended)
 
-After building:
+From npm:
+
+```bash
+npm install dataweave-native
+```
+
+Supported platform packages are `dataweave-native-linux-x64`,
+`dataweave-native-win32-x64`, and `dataweave-native-darwin-arm64`.
+
+After building locally, install the meta-package tarball and the matching platform tarball:
 
 ```bash
 ./gradlew :native-lib:buildNodePackage
-npm install native-lib/node/dataweave-native-0.0.1.tgz
+npm install ./native-lib/node/build/npm/dataweave-native-<ver>.tgz \
+  ./native-lib/node/build/npm/dataweave-native-<platform>-<ver>.tgz
 ```
 
 ### Option B: Install for development
@@ -48,7 +58,7 @@ npm run build
 ### Basic Script Execution
 
 ```javascript
-import * as dataweave from '@dataweave/native';
+import * as dataweave from 'dataweave-native';
 
 const result = dataweave.run('2 + 2');
 if (result.success) {
@@ -88,7 +98,7 @@ The module exports convenience functions that use a global singleton instance:
 Execute a DataWeave script and return the complete result.
 
 ```javascript
-import { run } from '@dataweave/native';
+import { run } from 'dataweave-native';
 
 const result = run(
   '%dw 2.0\noutput application/json\n---\npayload.items map $.price',
@@ -122,7 +132,7 @@ if (result.success) {
 Execute a DataWeave script with streaming output.
 
 ```javascript
-import { runStreaming } from '@dataweave/native';
+import { runStreaming } from 'dataweave-native';
 
 const generator = runStreaming(
   '%dw 2.0\noutput application/json\n---\n[1, 2, 3, 4, 5]'
@@ -155,7 +165,7 @@ console.log('MIME type:', meta.value.mimeType);
 Execute a DataWeave script with streaming input and output (bidirectional streaming).
 
 ```javascript
-import { runTransform } from '@dataweave/native';
+import { runTransform } from 'dataweave-native';
 import { createReadStream } from 'fs';
 
 // Transform a large CSV file to JSON without loading it all into memory
@@ -193,7 +203,7 @@ for await (const chunk of generator) {
 Clean up the global DataWeave runtime instance. Called automatically on process exit.
 
 ```javascript
-import { cleanup } from '@dataweave/native';
+import { cleanup } from 'dataweave-native';
 
 // Manual cleanup (usually not needed)
 cleanup();
@@ -204,7 +214,7 @@ cleanup();
 For more control, use the `DataWeave` class directly:
 
 ```javascript
-import { DataWeave } from '@dataweave/native';
+import { DataWeave } from 'dataweave-native';
 
 const dw = new DataWeave();  // Optional: new DataWeave('/custom/path/to/dwlib.dylib')
 dw.initialize();
@@ -229,7 +239,7 @@ try {
 DataWeave scripts can import external modules using the `resolveModule` option. The module-level convenience functions (`run()`, `runStreaming()`, `runTransform()`) operate on a lazily-initialized singleton that cannot be configured with a resolver — you must construct your own `DataWeave` instance:
 
 ```typescript
-import { DataWeave, composeResolvers, modulesFromDirectory, modulesFromJars } from '@dataweave/native';
+import { DataWeave, composeResolvers, modulesFromDirectory, modulesFromJars } from 'dataweave-native';
 
 const dw = new DataWeave({
   resolveModule: composeResolvers(
@@ -310,7 +320,7 @@ run(
 ### JSON Transformation
 
 ```javascript
-import { run } from '@dataweave/native';
+import { run } from 'dataweave-native';
 
 const input = {
   users: [
@@ -336,7 +346,7 @@ console.log(result.getString());
 ### XML Parsing
 
 ```javascript
-import { run } from '@dataweave/native';
+import { run } from 'dataweave-native';
 
 const xmlData = `
 <?xml version="1.0"?>
@@ -365,7 +375,7 @@ console.log(result.getString());  // "300"
 ### Streaming Large Files
 
 ```javascript
-import { runTransform } from '@dataweave/native';
+import { runTransform } from 'dataweave-native';
 import { createReadStream, createWriteStream } from 'fs';
 
 const script = `
@@ -405,7 +415,7 @@ if (!result.success) {
 ### Exception-Based Error Handling
 
 ```javascript
-import { run, DataWeaveScriptError } from '@dataweave/native';
+import { run, DataWeaveScriptError } from 'dataweave-native';
 
 try {
   run('invalid syntax', {}, { raiseOnError: true });

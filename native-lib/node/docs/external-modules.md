@@ -5,7 +5,7 @@ DataWeave scripts can import external modules using the `resolveModule` option. 
 ## Quick Start
 
 ```typescript
-import { DataWeave, modulesFromMap } from '@dataweave/native';
+import { DataWeave, modulesFromMap } from 'dataweave-native';
 
 const dw = new DataWeave({
   resolveModule: modulesFromMap({
@@ -24,7 +24,7 @@ const result = dw.run(`
 console.log(result.getString());  // "Hello World"
 ```
 
-**Important:** The module-level convenience functions (`run()`, `runStreaming()`, `runTransform()` exported directly from `@dataweave/native`) operate on a lazily-initialized singleton that takes no constructor options and therefore cannot be configured with `resolveModule` — you **must** construct your own `DataWeave` instance to use external modules, as shown above.
+**Important:** The module-level convenience functions (`run()`, `runStreaming()`, `runTransform()` exported directly from `dataweave-native`) operate on a lazily-initialized singleton that takes no constructor options and therefore cannot be configured with `resolveModule` — you **must** construct your own `DataWeave` instance to use external modules, as shown above.
 
 Additionally, external module resolution is currently supported only through `.run()` (the synchronous API). `.runStreaming()` and `.runTransform()` do not yet support external modules and will only have access to built-in modules.
 
@@ -35,7 +35,7 @@ Additionally, external module resolution is currently supported only through `.r
 In-memory map of module paths to source code:
 
 ```typescript
-import { DataWeave, modulesFromMap } from '@dataweave/native';
+import { DataWeave, modulesFromMap } from 'dataweave-native';
 
 const dw = new DataWeave({
   resolveModule: modulesFromMap({
@@ -53,7 +53,7 @@ Best for: Small, in-memory module sets; testing and development.
 Read modules from a directory tree on disk:
 
 ```typescript
-import { DataWeave, modulesFromDirectory } from '@dataweave/native';
+import { DataWeave, modulesFromDirectory } from 'dataweave-native';
 
 const dw = new DataWeave({
   resolveModule: modulesFromDirectory('./my-modules'),
@@ -71,7 +71,7 @@ Best for: Development and file-based module repositories.
 Extract modules from JAR files (asynchronous):
 
 ```typescript
-import { DataWeave, modulesFromJars } from '@dataweave/native';
+import { DataWeave, modulesFromJars } from 'dataweave-native';
 
 // modulesFromJars is async and returns a Promise
 const resolver = await modulesFromJars([
@@ -95,7 +95,7 @@ Best for: Packaged dependencies and distributed libraries.
 Combine multiple resolvers with fallback chain (tries each in order, returns first match):
 
 ```typescript
-import { DataWeave, composeResolvers, modulesFromMap, modulesFromDirectory, modulesFromJars } from '@dataweave/native';
+import { DataWeave, composeResolvers, modulesFromMap, modulesFromDirectory, modulesFromJars } from 'dataweave-native';
 
 const resolver = composeResolvers(
   modulesFromMap({ 'override.dwl': '...' }),       // Try first
@@ -281,7 +281,7 @@ dw.initialize();
 ## Complete Example
 
 ```typescript
-import { DataWeave, composeResolvers, modulesFromMap, modulesFromDirectory, modulesFromJars } from '@dataweave/native';
+import { DataWeave, composeResolvers, modulesFromMap, modulesFromDirectory, modulesFromJars } from 'dataweave-native';
 
 async function main() {
   // Combine in-memory, file-based, and JAR-based modules

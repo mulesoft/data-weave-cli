@@ -19,7 +19,7 @@ export function resolveWrapperPath() {
   if (process.env.DW_BENCH_NODE_PACKAGE) {
     throw new Error(
       `DW_BENCH_NODE_PACKAGE=${process.env.DW_BENCH_NODE_PACKAGE} does not contain dist/index.js ` +
-      `(expected an extracted @dataweave/native package)`
+      `(expected an extracted dataweave-native package)`
     );
   }
 
@@ -41,7 +41,7 @@ export function resolveDwlibPath() {
 }
 
 /**
- * Import the built @dataweave/native wrapper. The wrapper locates dwlib itself
+ * Import the built dataweave-native wrapper. The wrapper locates dwlib itself
  * (staged at native-lib/node/native/dwlib.*), so no env var is required here.
  */
 export async function loadWrapper() {

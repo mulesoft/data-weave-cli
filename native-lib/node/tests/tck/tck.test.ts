@@ -1,5 +1,5 @@
 // DataWeave conformance harness: replays the runtime's own TCK corpus against
-// the @dataweave/native binding, in-process via run().
+// the dataweave-native binding, in-process via run().
 //
 // The corpus is staged by Gradle (`stageTckSuites` → tests/tck/suites/<suite>/)
 // and is gitignored. When it is absent (e.g. a source-only run without the
