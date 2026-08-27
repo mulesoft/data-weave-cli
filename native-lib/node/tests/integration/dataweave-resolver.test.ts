@@ -164,8 +164,10 @@ describe('DataWeave with resolver', () => {
     `);
 
     // The test itself completing (no uncaught exception / segfault) is the
-    // crash-check; we don't assert on the internal error message wording.
+    // crash-check. We also assert an error message is surfaced -- but not its
+    // wording, which is an internal detail.
     expect(result.success).toBe(false);
+    expect(result.error).toBeTruthy();
   });
 
   // Regression test for a resolver-backed engine's initialize -> cleanup ->
