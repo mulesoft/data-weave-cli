@@ -41,6 +41,8 @@ class DataWeave:
         self._cleaning_up = False
 
     def initialize(self):
+        if self._native.initialized:
+            return
         if self._resolve_module is not None:
             self._native.install_resolver(self._resolve_module)
         self._native.initialize()
