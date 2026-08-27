@@ -82,3 +82,27 @@ test("packs only the meta package for an unsupported platform and architecture",
 
   assert.deepEqual(packedDirectories, [join(nodeDir, "build", "npm", "dataweave-native")]);
 });
+
+test("falls back to the package version when NATIVE_VERSION is empty", async () => {
+  const nodeDir = makeNodeDir();
+  const originalVersion = process.env.NATIVE_VERSION;
+  process.env.NATIVE_VERSION = "  ";
+
+  try {
+    await packPackages({
+      nodeDir,
+      platform: "darwin",
+      arch: "x64",
+      runNpmPack: async () => {},
+    });
+
+    const meta = readJson(join(nodeDir, "build", "npm", "dataweave-native", "package.json"));
+    assert.equal(meta.version, "0.0.1");
+  } finally {
+    if (originalVersion === undefined) {
+      delete process.env.NATIVE_VERSION;
+    } else {
+      process.env.NATIVE_VERSION = originalVersion;
+    }
+  }
+});

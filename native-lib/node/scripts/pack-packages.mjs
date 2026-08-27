@@ -38,7 +38,8 @@ export async function packPackages({
   runNpmPack = defaultRunNpmPack,
 }) {
   const sourcePackage = JSON.parse(await readFile(join(nodeDir, "package.json"), "utf8"));
-  const packageVersion = version ?? process.env.NATIVE_VERSION ?? sourcePackage.version;
+  const environmentVersion = process.env.NATIVE_VERSION;
+  const packageVersion = version ?? ((environmentVersion && environmentVersion.trim()) || sourcePackage.version);
   const npmBuildDir = join(nodeDir, "build", "npm");
   const metaDir = join(npmBuildDir, "dataweave-native");
   const optionalDependencies = Object.fromEntries(
