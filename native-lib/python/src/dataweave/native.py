@@ -283,34 +283,45 @@ class NativeRuntime:
         self._resolver_active_ident = None
         self._resolver_lock = Lock()
         self._execution_owner = None
+        # Guards this instance's initialize()/cleanup() lifecycle transitions
+        # (the initialized-check -> acquire -> create-engine -> publish
+        # sequence, and cleanup()'s initialized-clearing prologue) so two
+        # threads calling initialize() on the SAME instance cannot both pass
+        # the check, both acquire (refcount over-count), and both create an
+        # engine. Never held across a long native execution call -- only
+        # instance lifecycle transitions.
+        self._init_lock = Lock()
 
     def initialize(self) -> None:
         if self.initialized:
             return
-        acquired = False
-        try:
-            self.lib, self.isolate = _acquire_isolate(self.lib_path)
-            acquired = True
-            self.handle = self._create_engine()
-        except Exception:
-            # Roll back the ref we just took (if any) so a failed init leaks
-            # nothing.
-            self.lib = self.isolate = None
-            # Finding #2: install_resolver() registered a token BEFORE this call.
-            # A failed init must unregister it, or it leaks: self.initialized stays
-            # False, so a later cleanup() returns early and never reaches the pop.
-            if self._resolver_token:
-                with _resolver_lock_global:
-                    _resolver_registry.pop(self._resolver_token, None)
-                self._resolver_token = 0
-            # Release the ref only if _acquire_isolate actually incremented it
-            # (a library-load / isolate-create / bootstrap-detach failure inside
-            # _acquire_isolate never increments the refcount, so releasing here
-            # unconditionally would decrement someone else's live reference).
-            if acquired:
-                _release_isolate()
-            raise
-        self.initialized = True
+        with self._init_lock:
+            if self.initialized:
+                return
+            acquired = False
+            try:
+                self.lib, self.isolate = _acquire_isolate(self.lib_path)
+                acquired = True
+                self.handle = self._create_engine()
+            except Exception:
+                # Roll back the ref we just took (if any) so a failed init leaks
+                # nothing.
+                self.lib = self.isolate = None
+                # Finding #2: install_resolver() registered a token BEFORE this call.
+                # A failed init must unregister it, or it leaks: self.initialized stays
+                # False, so a later cleanup() returns early and never reaches the pop.
+                if self._resolver_token:
+                    with _resolver_lock_global:
+                        _resolver_registry.pop(self._resolver_token, None)
+                    self._resolver_token = 0
+                # Release the ref only if _acquire_isolate actually incremented it
+                # (a library-load / isolate-create / bootstrap-detach failure inside
+                # _acquire_isolate never increments the refcount, so releasing here
+                # unconditionally would decrement someone else's live reference).
+                if acquired:
+                    _release_isolate()
+                raise
+            self.initialized = True
 
     def _create_engine(self) -> int:
         with self._current_thread_attachment(self.thread) as thread:
@@ -460,9 +471,21 @@ class NativeRuntime:
 
     def cleanup(self) -> None:
         with self._serialized_native_operation():
-            if not self.initialized:
-                return
-            self.initialized = False
+            # _init_lock is nested INSIDE _resolver_lock here (never the
+            # reverse -- initialize() only ever takes _init_lock alone, and
+            # never takes _resolver_lock), so there is no lock-ordering
+            # inversion between the two. Only the initialized-clearing flag
+            # flip needs the lock; the actual destroy/release below stays
+            # outside it, guarded by _serialized_native_operation as before.
+            # Mirrors _serialized_native_operation's own hasattr guard below:
+            # some unit tests build a NativeRuntime via __new__ and set
+            # attributes directly, bypassing __init__.
+            if not hasattr(self, "_init_lock"):
+                self._init_lock = Lock()
+            with self._init_lock:
+                if not self.initialized:
+                    return
+                self.initialized = False
             try:
                 if self.handle:
                     with self._current_thread_attachment(self.thread) as thread:

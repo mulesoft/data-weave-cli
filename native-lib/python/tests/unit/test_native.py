@@ -1,6 +1,6 @@
 from pathlib import Path
 import ctypes
-from threading import current_thread, get_ident, Thread
+from threading import Barrier, BrokenBarrierError, current_thread, get_ident, Thread
 
 import pytest
 
@@ -886,3 +886,64 @@ def test_failed_acquire_with_resolver_unregisters_the_token(monkeypatch):
     assert runtime._resolver_token == 0
     assert native._isolate_ref_count == 0
     assert native._isolate is None
+
+
+@pytest.mark.unit
+def test_concurrent_initialize_on_one_instance_creates_a_single_engine(monkeypatch):
+    # Finding (review #10 #2): initialize() has no instance-level lock spanning
+    # the initialized-check -> _acquire_isolate -> _create_engine -> publish
+    # sequence. Two threads calling initialize() on the SAME instance can both
+    # pass the check, both acquire (refcount over-counts), and both create an
+    # engine -- the second self.handle write orphans the first, and cleanup()
+    # then releases only one ref.
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    runtime = native.NativeRuntime("/tmp/dwlib")
+
+    # A 2-party barrier with a timeout, patched into the instance's
+    # _create_engine. On the UNFIXED code both threads pass the `if
+    # self.initialized: return` fast-path concurrently and reach here at
+    # roughly the same time, so the barrier is satisfied and both proceed to
+    # create an engine (reproducing the over-count). On the FIXED
+    # (per-instance-locked) code only one thread is ever inside initialize()
+    # at a time, so the second party never arrives here before the timeout;
+    # the wait times out, the barrier breaks, and the lone thread just
+    # proceeds -- this must NOT deadlock the fixed code.
+    barrier = Barrier(2)
+    orig_create_engine = runtime._create_engine
+
+    def slow_create_engine():
+        try:
+            barrier.wait(timeout=0.5)
+        except BrokenBarrierError:
+            pass
+        return orig_create_engine()
+
+    monkeypatch.setattr(runtime, "_create_engine", slow_create_engine)
+
+    errors = []
+
+    def call_initialize():
+        try:
+            runtime.initialize()
+        except BaseException as error:  # pragma: no cover - surfaced via assert
+            errors.append(error)
+
+    threads = [Thread(target=call_initialize) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+
+    assert not any(thread.is_alive() for thread in threads), "initialize() deadlocked"
+    assert not errors
+    assert runtime.initialized is True
+    # Exactly one acquire, exactly one engine -- no over-count regardless of
+    # how the two calls interleaved.
+    assert native._isolate_ref_count == 1
+    assert len(library.created_engines) == 1
+    assert runtime.handle == library.created_engines[0][0]
+
+    runtime.cleanup()
+    assert native._isolate_ref_count == 0
