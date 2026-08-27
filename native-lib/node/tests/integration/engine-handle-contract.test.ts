@@ -256,6 +256,35 @@ describe("*_engine unknown/destroyed-handle contract (round 11 #6)", () => {
     ffi.destroyEngine(h2);
   });
 
+  it("destroyEngine on an unknown / already-destroyed handle is a safe no-op and leaves the isolate healthy (review #10 #5)", () => {
+    // Drives napi_destroy_engine's `found == NULL` else branch on a LIVE isolate
+    // (the shared beforeAll isolate). Round-10 #5 added a teardown-state guard
+    // there so the direct registry-removal attach reads g_isolate/g_teardown_state
+    // under g_mutex and pins the isolate before fn_attach_thread, mirroring
+    // bridge_finalize_registry. On a live isolate this is a benign no-op; the test
+    // asserts it does not throw or wedge the isolate. (The crash it guards against
+    // -- fn_attach_thread on a NULL or TEARDOWN_TEARING_DOWN isolate -- only arises
+    // when destroyEngine races a concurrent cleanup() teardown, a non-deterministic
+    // cross-thread window not reproducible through this single-threaded public API;
+    // see this file's note above on best-effort race coverage.)
+    expect(() => ffi.destroyEngine(UNKNOWN_HANDLE)).not.toThrow();
+
+    // Double-destroy: the second call finds no record and takes the same
+    // else branch. Must not throw or corrupt the isolate.
+    const handle = ffi.createEngine();
+    expect(() => ffi.destroyEngine(handle)).not.toThrow();
+    expect(() => ffi.destroyEngine(handle)).not.toThrow();
+
+    // Isolate remains fully usable after both no-op destroys.
+    const h2 = ffi.createEngine();
+    const envelope = JSON.parse(
+      ffi.runScriptEngine(h2, "%dw 2.0\noutput application/json\n---\n3 + 4", buildInputsJson({}))
+    );
+    expect(envelope.success).toBe(true);
+    expect(JSON.parse(Buffer.from(envelope.result, "base64").toString("utf-8"))).toBe(7);
+    ffi.destroyEngine(h2);
+  });
+
   it("final cleanup drains the shared isolate (idempotent)", async () => {
     // Exactly one ffi.initialize() ran for this whole file (beforeAll), so
     // this is the ONE balancing ffi.cleanup() that brings the native
@@ -270,6 +299,12 @@ describe("*_engine unknown/destroyed-handle contract (round 11 #6)", () => {
     expect(() =>
       ffi.runScriptEngine(UNKNOWN_HANDLE, "%dw 2.0\noutput application/json\n---\n1", buildInputsJson({}))
     ).toThrow(/not initialized/i);
+
+    // review #10 #5: with the isolate torn down (g_isolate == NULL,
+    // g_initialized == 0), destroyEngine on an unknown handle must be a safe
+    // no-op and must NOT attach to the now-NULL global isolate -- it returns
+    // early at the !g_initialized guard. The process must survive.
+    expect(() => ffi.destroyEngine(UNKNOWN_HANDLE)).not.toThrow();
 
     // A second cleanup() call after the ref count already reached zero must
     // remain a safe no-op, mirroring independent-engines.test.ts's final

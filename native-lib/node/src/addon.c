@@ -2277,11 +2277,40 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
         // the registry removal and the free (see Step 5).
     } else {
         // No record found (should not happen now that every engine has one, but
-        // stay robust to a double-destroy or an unknown handle): fall back to the
-        // pre-round-9 behavior of removing the registry entry directly.
-        if (fn_destroy_engine) {
-            void* thread = NULL;
-            if (fn_attach_thread(g_isolate, &thread) == 0) { fn_destroy_engine(thread, handle); fn_detach_thread(thread); }
+        // stay robust to a double-destroy or an unknown handle): fall back to
+        // removing the Java registry entry directly. That removal requires
+        // attaching to the live isolate, so guard the attach EXACTLY like
+        // bridge_finalize_registry (review #10 #5): read g_isolate/g_teardown_state
+        // under g_mutex and, if the isolate is live, pin it with a TRANSIENT
+        // g_active_ops reservation so graal_tear_down_isolate() cannot run across
+        // the attach (the state check + the g_active_ops++ are one critical
+        // section). If the isolate is already gone (g_isolate == NULL) or the
+        // waiter has committed to physical teardown (TEARDOWN_TEARING_DOWN), the
+        // Java registry died/dies with the isolate -- there is nothing to remove
+        // and attaching would race the teardown, so return early / no-op safely.
+        // Without this guard an unknown-handle (or double-)destroyEngine racing a
+        // concurrent cleanup() teardown could call fn_attach_thread on a NULL or
+        // being-torn-down isolate. The unlocked g_initialized check at the top of
+        // this function is a stale read under concurrency and does NOT close this
+        // window; only the g_mutex-guarded read here does.
+        if (fn_destroy_engine && fn_attach_thread) {
+            uv_mutex_lock(&g_mutex);
+            if (g_teardown_state == TEARDOWN_TEARING_DOWN || g_isolate == NULL) {
+                uv_mutex_unlock(&g_mutex);  // isolate gone/tearing down -> nothing to remove
+            } else {
+                g_active_ops++;  // pins the live isolate against teardown for this attach
+                uv_mutex_unlock(&g_mutex);
+                void* thread = NULL;
+                if (fn_attach_thread(g_isolate, &thread) == 0 && thread != NULL) {
+                    fn_destroy_engine(thread, handle);
+                    fn_detach_thread(thread);
+                }
+                // Verbatim g_active_ops release pattern.
+                uv_mutex_lock(&g_mutex);
+                g_active_ops--;
+                uv_cond_broadcast(&g_teardown_cond);
+                uv_mutex_unlock(&g_mutex);
+            }
         }
     }
     return NULL;
@@ -2540,6 +2569,15 @@ static void teardown_waiter_thread_fn(void* arg) {
     // with nothing to reclaim it (review #6 #4). Mirrors the twin arm in
     // isolate_ref_release_n_locked's waiter-spawn-failure path.
     g_teardown_needed = true;
+    // Observable failure (review #10 #5): the deferred cleanup() promise is still
+    // RESOLVED below (via call_js_teardown_done -- deliberate, exactly as the
+    // synchronous Case 4 path resolves on failure), so emit a diagnostic or a
+    // failed async teardown would be silent. Parity with Python's _release_isolate
+    // stderr notice (native.py).
+    fprintf(stderr,
+            "[DataWeave Node addon] GraalVM isolate teardown failed on deferred "
+            "cleanup(); the isolate is retained and teardown will be retried on the "
+            "next initialize() or op completion.\n");
   }
   // If cancelled: g_isolate/g_initialized/g_ref_count are left exactly as the
   // adopting initialize() set them (it already did g_ref_count++ on the live
@@ -2885,7 +2923,26 @@ static napi_value release_isolate_ref_locked(napi_env env) {
       // if no later op or initialize() ever runs, the isolate lingers to process
       // exit (OS reclaims it) -- benign, no ref-count violation.
       g_teardown_needed = true;
+      // Make the failure OBSERVABLE (review #10 #5): the promise below still
+      // RESOLVES (see the deliberate-resolve note), so without a diagnostic a
+      // failed final teardown would be entirely silent. Mirrors the stderr notice
+      // Python emits in _release_isolate on the same failure (native.py).
+      fprintf(stderr,
+              "[DataWeave Node addon] GraalVM isolate teardown failed on cleanup(); "
+              "the isolate is retained and teardown will be retried on the next "
+              "initialize() or op completion.\n");
     }
+    // Deliberate design (review #10 #5): cleanup() RESOLVES even when the final
+    // Graal teardown failed above -- it does NOT reject. Teardown failure is a
+    // recoverable, retryable condition (the isolate is retained and
+    // g_teardown_needed is armed for a later retry), not a caller error, and this
+    // file never uses napi_reject_deferred: run/streaming/transform failures also
+    // surface as RESOLVED values. Rejecting here would break the isolate
+    // adoption/coalescing contract (a still-live PENDING_WAIT isolate a concurrent
+    // initialize() may adopt) and the existing cleanup() tests. The failure stays
+    // observable via the armed retry + the stderr diagnostic above. Parity:
+    // Python's _release_isolate arms _teardown_needed and logs to stderr on the
+    // same failure rather than surfacing a hard error (native.py).
     uv_mutex_unlock(&g_mutex);
     return already_resolved_promise(env);
   }
