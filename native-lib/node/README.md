@@ -31,8 +31,8 @@ After building locally, install the meta-package tarball and the matching platfo
 
 ```bash
 ./gradlew :native-lib:buildNodePackage
-npm install ./native-lib/node/build/npm/dataweave-native-<ver>.tgz \
-  ./native-lib/node/build/npm/dataweave-native-<platform>-<ver>.tgz
+npm install ./native-lib/node/dataweave-native-<ver>.tgz \
+  ./native-lib/node/dataweave-native-<platform>-<ver>.tgz
 ```
 
 ### Option B: Install for development
@@ -467,10 +467,12 @@ avoid resolver-backed instances in worker pools altogether.
 
 ## Platform Support
 
-Supported platforms:
-- **macOS**: x86_64, arm64 (M1/M2/M3)
+Published npm packages support:
+- **macOS**: arm64 (M1/M2/M3)
 - **Linux**: x86_64 (glibc 2.17+)
 - **Windows**: x86_64
+
+Source builds also support macOS x86_64.
 
 The native library (`dwlib.dylib`/`.so`/`.dll`) must be built for your target platform.
 
