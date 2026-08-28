@@ -152,18 +152,20 @@ describe("owner-env-hook-retained finalization for stranded resolver bridges (re
   );
 
   it(
-    "a deferred destroy (destroyEngine while an op is in flight) finalizes exactly once on the owner thread, hook removed up-front (round-1 double-owner guard)",
+    "SMOKE (env alive): a deferred destroy with the op completing normally finalizes exactly once on the owner thread",
     async () => {
-      // Regression guard for the defer-path double-owner window (round-1 fix):
-      // destroyEngine on a resolver-backed engine WHILE a streaming op is in
-      // flight takes the defer path -- it must remove the env cleanup hook NOW
-      // (owner thread, env alive) so the draining bridge_end_op is the SOLE
-      // finalizer. Deterministic: the round-11 pin is taken atomically at
-      // admission, so firing destroyEngine synchronously after starting the op
-      // lands AFTER in_flight==1 (see engine-handle-contract.test.ts). After the
-      // op drains, bridge_end_op finalizes on the owner thread with the env alive:
-      // resolver_js is deleted EXACTLY once (delta 1 -- not 0=leak, not 2=double
-      // finalize) and the bridge is never stranded.
+      // HONEST SCOPE (round-2): this is a happy-path SMOKE test, NOT a regression
+      // guard for the defer-branch double-owner fix. It runs on the main thread and
+      // lets the op complete with the env alive, so bridge_end_op runs with
+      // env_still_alive=TRUE and bridge_finalize's FREE path removes the hook itself
+      // regardless of whether destroyEngine's defer branch removed it -- so it
+      // passes with OR without the b06b917 defer-branch hook-removal and cannot
+      // catch that regression. The double-owner UAF only manifests when
+      // env_still_alive=FALSE (env torn down mid-flight); that path is exercised by
+      // the Worker test below. What this does verify: the defer path (in_flight>0 at
+      // destroy time; round-11 pin taken atomically at admission) drains cleanly,
+      // finalizes exactly once (resolver_js deleted delta 1 -- not 0=leak, not
+      // 2=double finalize), and never strands.
       addon.initialize(LIB_PATH);
       try {
         const deletesBefore = addon.__test_resolverRefDeleteCount();
@@ -192,5 +194,87 @@ describe("owner-env-hook-retained finalization for stranded resolver bridges (re
       }
     },
     20000
+  );
+
+  it(
+    "ROBUSTNESS (defer then Worker terminate mid-flight): the shared isolate/native state survives; state stays consistent",
+    async () => {
+      // HONEST SCOPE (round-2): this exercises the defer-then-terminate lifecycle
+      // safely, but it is NOT a regression guard for the b06b917 defer-branch
+      // hook-removal fix -- it passes WITH and WITHOUT that fix (verified: see the
+      // report round-2 section for the empirical revert-check). It cannot open the
+      // double-owner window because that window requires bridge_end_op to run with
+      // env_still_alive=FALSE and take its FREE path (which skips the env-gated hook
+      // removal) so a still-registered hook then fires on the freed bridge. Reaching
+      // that free needs EITHER:
+      //   (1) the background compute thread still running at teardown so its sentinel
+      //       enqueue returns napi_closing and it runs bridge_end_op(false) itself --
+      //       but that is an orphaned GraalVM-attached thread which aborts the process
+      //       (SIGABRT) on completion, independent of the hook (see report); OR
+      //   (2) Node draining the queued completion sentinel with env==NULL on the JS
+      //       thread at teardown -- but worker.terminate() DROPS the queued
+      //       threadsafe-function callback rather than draining it, so bridge_end_op
+      //       never runs, in_flight stays pinned, and bridge_env_cleanup hits its
+      //       in_flight>0 branch (addon.c ~L562) which DEFERS instead of freeing --
+      //       no free, no UAF, with or without the fix.
+      // So the env_still_alive=FALSE FREE-then-hook-fire window is not reachable from
+      // JS here without the orthogonal orphaned-thread abort. This test therefore only
+      // asserts that the defer+terminate path leaves the shared isolate and native
+      // registry intact (a real UAF / double fn_destroy_engine that did not crash
+      // outright would corrupt them). The double-owner fix's correctness rests on the
+      // code review of the four invariants (see report), not on this test.
+      //
+      // The op uses a trivial fast script so the background thread finishes and
+      // DETACHES from the isolate well before terminate() -- avoiding the orphaned-
+      // thread abort of variant (1) above -- and the Worker blocks its JS event loop
+      // so the completion sentinel stays queued (never processed while alive).
+      const ITERATIONS = 10;
+      for (let i = 0; i < ITERATIONS; i++) {
+        const body = `
+          const { parentPort, workerData } = require('node:worker_threads');
+          const addon = require(workerData.addonPath);
+          addon.initialize(workerData.libPath);
+          const handle = addon.createEngineWithResolver((p) => null);
+          // Trivial op: the background compute thread finishes and detaches fast,
+          // then enqueues the completion sentinel (queued, not yet processed).
+          addon
+            .runScriptStreamingEngine(handle, "%dw 2.0\\noutput application/json\\n---\\n[1,2,3]", '{}', (c) => {})
+            .then(() => {}, () => {});
+          // destroyEngine synchronously after admission -> in_flight==1 -> DEFER.
+          addon.destroyEngine(handle);
+          parentPort.postMessage('deferred');
+          // Block the JS event loop so the queued sentinel is NOT processed while
+          // the env is alive; the parent terminates us during this window.
+          const end = Date.now() + 500; while (Date.now() < end) {}
+        `;
+        const w = new Worker(body, {
+          eval: true,
+          workerData: { addonPath: ADDON_PATH, libPath: LIB_PATH },
+        });
+        const workerError = new Promise<never>((_, reject) => w.once("error", reject));
+        workerError.catch(() => {}); // avoid unhandled rejection if it fires post-settle
+        await Promise.race([
+          new Promise<void>((resolve) => w.once("message", (m) => { if (m === "deferred") resolve(); })),
+          workerError,
+          new Promise((_, reject) => setTimeout(() => reject(new Error("worker did not signal deferred in time")), 10000)),
+        ]);
+        // Small settle so the background thread has finished and DETACHED (sentinel
+        // queued) before we terminate -- terminate then lands after the isolate is
+        // no longer attached on the worker's compute thread (no orphaned thread).
+        await new Promise((r) => setTimeout(r, 100));
+        const exitCode = await w.terminate();
+        expect(typeof exitCode).toBe("number");
+      }
+
+      // Prove the shared isolate/native state survived every terminate: the main
+      // thread must still initialize + create + destroy an engine cleanly (a UAF or
+      // double fn_destroy_engine that did not crash outright would corrupt the
+      // registry/isolate and break this).
+      addon.initialize(LIB_PATH);
+      const h = addon.createEngineWithResolver((_p) => null);
+      expect(() => addon.destroyEngine(h)).not.toThrow();
+      await addon.cleanup();
+    },
+    60000
   );
 });
