@@ -1,4 +1,6 @@
 import inspect
+import threading
+import time
 
 import pytest
 
@@ -164,7 +166,7 @@ def test_cleanup_is_noop_without_global_runtime():
 
 
 @pytest.mark.unit
-def test_global_cleanup_retains_failed_runtime_for_retry(monkeypatch):
+def test_global_cleanup_clears_global_before_reraising_on_failure(monkeypatch):
     created = []
 
     class FakeRuntime:
@@ -178,11 +180,77 @@ def test_global_cleanup_retains_failed_runtime_for_retry(monkeypatch):
             raise dataweave.DataWeaveError("teardown failed")
 
     monkeypatch.setattr(dataweave, "DataWeave", FakeRuntime)
+    monkeypatch.setattr("atexit.register", lambda _fn: None)
     first = dataweave._get_global_instance()
 
+    # cleanup() nulls the global under _global_lock *before* running the
+    # (potentially slow) instance.cleanup() outside the lock, so a failing
+    # teardown does not strand the lock held nor leave a half-torn-down
+    # instance published. The instance identity is not retained for retry --
+    # that's fine because isolate-level teardown retry lives one layer down
+    # in dataweave.native (_teardown_needed), independent of which Python
+    # DataWeave wrapper object is holding the reference.
     with pytest.raises(dataweave.DataWeaveError, match="teardown failed"):
         dataweave.cleanup()
 
+    assert dataweave._global_instance is None
+
     second = dataweave._get_global_instance()
-    assert second is first
+    assert second is not first
+    assert len(created) == 2
     dataweave._global_instance = None
+
+
+@pytest.mark.unit
+def test_get_global_instance_publishes_exactly_one_instance_under_concurrent_first_use(monkeypatch):
+    thread_count = 8
+    barrier = threading.Barrier(thread_count)
+    counts_lock = threading.Lock()
+    counts = {"created": 0, "initialized": 0}
+
+    class SlowRuntime:
+        def __init__(self):
+            with counts_lock:
+                counts["created"] += 1
+            # Widen the window between the "is it published yet" check and
+            # publication so concurrent first-callers are very likely to
+            # overlap while racing to construct+initialize a candidate.
+            time.sleep(0.05)
+
+        def initialize(self):
+            with counts_lock:
+                counts["initialized"] += 1
+
+        def cleanup(self):
+            pass
+
+    monkeypatch.setattr(dataweave, "DataWeave", SlowRuntime)
+    monkeypatch.setattr("atexit.register", lambda _fn: None)
+
+    results = [None] * thread_count
+    errors = []
+
+    def worker(index):
+        barrier.wait()
+        try:
+            results[index] = dataweave._get_global_instance()
+        except Exception as exc:  # pragma: no cover - defensive, surfaced via `errors`
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(thread_count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    try:
+        assert not errors
+        # Exactly one instance is ever constructed and initialized: creation,
+        # initialization, and publication all happen under _global_lock, so a
+        # losing thread never builds (and leaks) a candidate engine.
+        assert counts["created"] == 1
+        assert counts["initialized"] == 1
+        assert len({id(result) for result in results}) == 1
+        assert results[0] is dataweave._global_instance
+    finally:
+        dataweave._global_instance = None
