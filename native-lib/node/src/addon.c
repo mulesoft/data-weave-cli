@@ -104,6 +104,14 @@ typedef struct engine_bridge {
     // otherwise a resolver-backed engine's ScriptRuntime is left registered with
     // a CallbackWeaveResourceResolver whose ctx points at the freed bridge (UAF).
     bool deferred_registry_remove;
+    // True while THIS bridge's napi_add_env_cleanup_hook(bridge_env_cleanup) is
+    // registered. The env cleanup hook is the only owner-thread finalizer that may
+    // delete resolver_js, so a strand taken on the owner thread (env alive) keeps
+    // the hook instead of enqueuing on g_stranded_bridges (whose off-thread drain
+    // skips napi_delete_reference and would leak the ref). Mutated only on the
+    // owner thread (creation, destroyEngine, bridge_env_cleanup) under the usual
+    // owner-thread-serialization contract.
+    bool hook_registered;
     struct engine_bridge* next;
 } engine_bridge_t;
 static engine_bridge_t* g_bridges = NULL;  // linked list, guarded by g_mutex
@@ -120,6 +128,27 @@ static engine_bridge_t* g_bridges = NULL;  // linked list, guarded by g_mutex
 // confirmed live and attachable -- or, if the isolate went away, free it then
 // (the Java registry died with the isolate). All access under g_mutex.
 static engine_bridge_t* g_stranded_bridges = NULL;  // linked list, guarded by g_mutex
+
+// --- Test-only fault injection & introspection (review #12 #3 / #13) ---
+//
+// These are INERT in production: the __test_* N-API functions are registered
+// only when the process sets DATAWEAVE_TEST_HOOKS to a non-empty value (checked
+// once in Init on the main JS thread, before any engine exists). g_test_hooks
+// gates the two extra branches in the finalize path so a production build never
+// takes an extra lock or check. g_test_force_strand_once starts false and can
+// only be armed via __test_forceStrandOnce().
+//
+// The Node strand regression test uses these to deterministically force a SINGLE
+// live-isolate strand (an fn_attach_thread failure while the isolate is live)
+// inside bridge_finalize_registry and observe the outcome: pre-fix the bridge is
+// enqueued on g_stranded_bridges (resolver_js ref leaked / drained undeleted);
+// post-fix it is kept by its owner-env cleanup hook and the ref is deleted on the
+// owner thread at env teardown (g_test_resolver_ref_deletes counts those deletes).
+// g_test_hooks is written once in Init before any reader runs; g_test_force_strand_once
+// and g_test_resolver_ref_deletes are accessed only under g_mutex.
+static bool g_test_hooks = false;
+static bool g_test_force_strand_once = false;
+static long long g_test_resolver_ref_deletes = 0;
 
 // One record per napi_env that has ever taken an init reference (via
 // initialize()). init_refs is that env's net initialize()-minus-cleanup()
@@ -341,6 +370,19 @@ static int env_init_refs_total_locked(void) {
 // the bridge (bridge_retain_stranded) and retry later (round-15, svacas P1).
 static bool bridge_finalize_registry(engine_bridge_t* b) {
     if (b == NULL || fn_destroy_engine == NULL) return true;
+    // Test-only: force ONE live-isolate strand (simulate fn_attach_thread failing
+    // while the isolate is live -> destroy SKIPPED). Inert unless a test both
+    // enabled the hooks (DATAWEAVE_TEST_HOOKS) and armed it via
+    // __test_forceStrandOnce(); one-shot, so exactly one finalize is diverted.
+    if (g_test_hooks) {
+        uv_mutex_lock(&g_mutex);
+        if (g_test_force_strand_once) {
+            g_test_force_strand_once = false;
+            uv_mutex_unlock(&g_mutex);
+            return false;  // caller must retain/keep the bridge (ctx still live in Java)
+        }
+        uv_mutex_unlock(&g_mutex);
+    }
     uv_mutex_lock(&g_mutex);
     // If the waiter already committed to physical teardown (TEARING_DOWN) or the
     // isolate is already gone, the Java registry died/dies with it -- nothing to
@@ -377,6 +419,11 @@ static bool bridge_finalize_registry(engine_bridge_t* b) {
     return destroyed;
 }
 
+// Forward declaration: the env cleanup hook. bridge_finalize re-registers/keeps
+// it on an owner-thread live-isolate strand (may_rehook) and removes it on the
+// owner-thread free path; the definition is below (after drain_stranded_bridges).
+static void bridge_env_cleanup(void* arg);
+
 // The non-isolate finalize phase: delete the resolver napi_ref (owner JS thread
 // only, and only while its env is alive -- resolver-gated), free tracked result
 // buffers, free the record. Touches no GraalVM isolate state, so it is safe to
@@ -385,6 +432,14 @@ static void bridge_finalize_free(engine_bridge_t* b, bool env_still_alive) {
     if (b == NULL) return;
     if (env_still_alive && b->resolver_js != NULL && b->env != NULL) {
         napi_delete_reference(b->env, b->resolver_js);
+        // Test-only: count owner-thread resolver-ref deletions so the strand
+        // regression test can prove the ref was finalized (not leaked / not
+        // drained undeleted). Inert unless DATAWEAVE_TEST_HOOKS is set.
+        if (g_test_hooks) {
+            uv_mutex_lock(&g_mutex);
+            g_test_resolver_ref_deletes++;
+            uv_mutex_unlock(&g_mutex);
+        }
     }
     resolver_results_free_all(b);
     free(b);
@@ -400,11 +455,42 @@ static void bridge_finalize_free(engine_bridge_t* b, bool env_still_alive) {
 // and a later drain retries the destroy and frees it. When do_registry_remove is
 // false there is nothing registered (handle <= 0 construction failures), so the
 // free is unconditional as before.
-static void bridge_finalize(engine_bridge_t* b, bool env_still_alive, bool do_registry_remove) {
+// `may_rehook` is true only when the caller is on the bridge's OWNER thread with
+// the env alive and continuing (destroyEngine's immediate path, bridge_end_op on
+// the owner env). On a live-isolate strand there, ownership of resolver_js's
+// deletion stays with the env cleanup hook: keep (or re-register) the hook and
+// return WITHOUT enqueuing on g_stranded_bridges, so the OWNER thread deletes the
+// ref and frees the record at env teardown -- never the off-thread drain (which
+// skips napi_delete_reference and would leak the ref). When may_rehook is false
+// (env tearing down, or a creation abort) there is no live owner hook to keep, so
+// a strand falls back to bridge_retain_stranded and the drain frees it later.
+static void bridge_finalize(engine_bridge_t* b, bool env_still_alive,
+                            bool do_registry_remove, bool may_rehook) {
     if (b == NULL) return;
     if (do_registry_remove && !bridge_finalize_registry(b)) {
-        bridge_retain_stranded(b);  // keep ctx valid; retry destroy + free later
+        // Strand: isolate live, attach failed, registry entry NOT removed.
+        if (may_rehook && env_still_alive && b->env != NULL) {
+            // On the owner thread with the env alive & continuing. Give the bridge
+            // to its env cleanup hook (still registered here, since the strand
+            // paths no longer pre-remove it) so the OWNER thread deletes
+            // resolver_js and frees at env teardown -- never the off-thread drain.
+            if (!b->hook_registered
+                && napi_add_env_cleanup_hook(b->env, bridge_env_cleanup, b) == napi_ok) {
+                b->hook_registered = true;
+            }
+            if (b->hook_registered) {
+                return;  // single owner = the hook; NOT on g_stranded_bridges
+            }
+            // hook unavailable: fall through to drain (best effort).
+        }
+        bridge_retain_stranded(b);  // env dead / hook gone: drain frees (ref auto-reclaimed or none)
         return;
+    }
+    // Free path: remove the hook first (owner thread only) so Node never invokes
+    // it on freed memory, then delete the ref (env alive) + free.
+    if (env_still_alive && b->hook_registered && b->env != NULL) {
+        napi_remove_env_cleanup_hook(b->env, bridge_env_cleanup, b);
+        b->hook_registered = false;
     }
     bridge_finalize_free(b, env_still_alive);
 }
@@ -455,6 +541,11 @@ static void bridge_env_cleanup(void* arg) {
     engine_bridge_t* b = (engine_bridge_t*)arg;
     if (b == NULL) return;
 
+    // Node auto-removes this hook as it fires it, so it is no longer registered.
+    // Clear the flag first so bridge_finalize (may_rehook=false below, but also
+    // the deferred bridge_end_op path) never tries to remove an already-gone hook.
+    b->hook_registered = false;
+
     uv_mutex_lock(&g_mutex);
     // Unlink from g_bridges if still present (destroyEngine may have already
     // unlinked it while deferring a free — see below).
@@ -500,7 +591,10 @@ static void bridge_env_cleanup(void* arg) {
     // guards on g_isolate for the main-env-after-isolate-teardown corner). Not
     // removing it would leave a CallbackWeaveResourceResolver whose ctx is the
     // freed bridge -> UAF on a later invocation of this handle.
-    bridge_finalize(b, /*env_still_alive=*/true, /*do_registry_remove=*/true);
+    // may_rehook=false: the env is tearing down, so do NOT re-register the hook on
+    // a strand -- a strand here falls back to g_stranded_bridges (Node reclaims the
+    // ref at env teardown; the off-thread drain frees the record later).
+    bridge_finalize(b, /*env_still_alive=*/true, /*do_registry_remove=*/true, /*may_rehook=*/false);
 }
 
 // Increment this engine's in_flight while g_mutex is ALREADY held. Used by the
@@ -549,7 +643,12 @@ static void bridge_end_op(engine_bridge_t* b, bool env_still_alive) {
     // cleanup hook (round-10 #1) deferred the registry removal while this op was
     // in flight; the draining op performs it exactly once here. bridge_finalize
     // guards the call on g_isolate, so a teardown that raced ahead is a no-op.
-    if (finalize) bridge_finalize(b, env_still_alive, /*do_registry_remove=*/remove_registry);
+    // env_still_alive here means we are draining on the owner thread with the env
+    // alive, so a live-isolate strand may keep the env cleanup hook (may_rehook).
+    // When env_still_alive is false (env == NULL sentinel path) a strand falls back
+    // to the drain, which is correct: the owner env is gone.
+    if (finalize) bridge_finalize(b, env_still_alive, /*do_registry_remove=*/remove_registry,
+                                  /*may_rehook=*/env_still_alive);
 }
 
 // --- Initialization ---
@@ -2082,7 +2181,9 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
     // destroyEngine removes this hook before an early free so Node never invokes
     // it on freed memory.
     napi_status hook_st = napi_add_env_cleanup_hook(env, bridge_env_cleanup, rec);
-    if (hook_st != napi_ok) {
+    if (hook_st == napi_ok) {
+        rec->hook_registered = true;
+    } else {
         // Creation must be all-or-nothing (round-12 #6): without a cleanup hook a
         // Worker that abandons this engine would strand the record and the Java
         // registry entry. Unlink, remove the registry entry, free, and throw --
@@ -2105,7 +2206,9 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
         // round-15 (svacas P1): go through bridge_finalize (do_registry_remove=true)
         // so a destroy skipped on a transient attach failure retains the record for
         // retry instead of freeing it while the Java registry still references it.
-        bridge_finalize(rec, /*env_still_alive=*/true, /*do_registry_remove=*/true);
+        // may_rehook=false: this hook never registered (hook_registered stayed
+        // false), and creation is aborting all-or-nothing -- do not (re-)hook.
+        bridge_finalize(rec, /*env_still_alive=*/true, /*do_registry_remove=*/true, /*may_rehook=*/false);
         uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
         napi_throw_error(env, NULL, "Failed to register engine cleanup hook");
         return NULL;
@@ -2167,8 +2270,10 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
     // tracked buffers too, so nothing is dropped on the floor.
     if (handle <= 0) {
         uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
-        // Synchronous call on the JS thread -- env is live here.
-        bridge_finalize(bridge, /*env_still_alive=*/true, /*do_registry_remove=*/false);
+        // Synchronous call on the JS thread -- env is live here. may_rehook=false:
+        // no hook was ever registered for this bridge and creation is aborting; with
+        // do_registry_remove=false there is nothing registered to strand on anyway.
+        bridge_finalize(bridge, /*env_still_alive=*/true, /*do_registry_remove=*/false, /*may_rehook=*/false);
         napi_throw_error(env, NULL, "create_engine_with_resolver returned an invalid handle");
         return NULL;
     }
@@ -2180,7 +2285,9 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
     // no longer touches bridge refs. destroyEngine removes this hook before an
     // early free so Node never calls it on freed memory.
     napi_status hook_st = napi_add_env_cleanup_hook(env, bridge_env_cleanup, bridge);
-    if (hook_st != napi_ok) {
+    if (hook_st == napi_ok) {
+        bridge->hook_registered = true;
+    } else {
         // Creation must be all-or-nothing (round-12 #6): without a cleanup hook a
         // Worker that abandons this engine would strand the record and the Java
         // registry entry. Unlink, remove the registry entry, free, and throw --
@@ -2205,7 +2312,9 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
         // round-15 (svacas P1): go through bridge_finalize (do_registry_remove=true)
         // so a destroy skipped on a transient attach failure retains the bridge for
         // retry instead of freeing it while the Java registry still references it.
-        bridge_finalize(bridge, /*env_still_alive=*/true, /*do_registry_remove=*/true);
+        // may_rehook=false: this hook never registered (hook_registered stayed
+        // false), and creation is aborting all-or-nothing -- do not (re-)hook.
+        bridge_finalize(bridge, /*env_still_alive=*/true, /*do_registry_remove=*/true, /*may_rehook=*/false);
         uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
         napi_throw_error(env, NULL, "Failed to register engine cleanup hook");
         return NULL;
@@ -2276,22 +2385,28 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
     uv_mutex_unlock(&g_mutex);
 
     if (found != NULL) {
-        // Drop the env cleanup hook. Round-11 (#1): every engine now registers
-        // one at creation (napi_create_engine / napi_create_engine_with_resolver),
-        // so this removal must run unconditionally, not just for resolver-backed
-        // engines. Whether we finalize now or defer, the free happens explicitly,
-        // so Node must never invoke the hook on this (soon-to-be or already)
-        // freed record.
-        napi_remove_env_cleanup_hook(env, bridge_env_cleanup, found);
+        // Do NOT pre-remove the env cleanup hook here (review #12 #3, #13). The two
+        // finalize paths now own the hook themselves: bridge_finalize's FREE path
+        // removes it (owner thread, before the free) so Node never invokes it on
+        // freed memory, while its live-isolate STRAND path KEEPS the hook so the
+        // owner env deletes resolver_js at teardown instead of the off-thread drain
+        // (which skips napi_delete_reference and would leak the ref). Removing it
+        // unconditionally here would strand the bridge with the ref undeleted AND no
+        // hook to delete it -> a guaranteed resolver-ref leak on the strand path.
         if (!defer) {
             // Not in flight: remove the registry entry AND finalize now, on this
             // owner thread (env live). do_registry_remove=true folds the
             // fn_destroy_engine call into bridge_finalize so it happens exactly
-            // once regardless of path.
-            bridge_finalize(found, /*env_still_alive=*/true, /*do_registry_remove=*/true);
+            // once regardless of path. may_rehook=true: we are on the owner thread
+            // with the env alive, so a live-isolate strand keeps the hook (owner
+            // env finalizes resolver_js later) rather than enqueuing on the drain.
+            bridge_finalize(found, /*env_still_alive=*/true, /*do_registry_remove=*/true, /*may_rehook=*/true);
         }
-        // else: the draining op's bridge_end_op -> bridge_finalize performs both
-        // the registry removal and the free (see Step 5).
+        // else: in flight -> leave the hook in place (do NOT remove it). The
+        // draining op's bridge_end_op -> bridge_finalize performs both the registry
+        // removal and the free (or keeps the hook on its own strand) on the owner
+        // thread. Should the owner env instead tear down first while still in
+        // flight, bridge_env_cleanup fires and takes over the deferred finalize.
     } else {
         // No record found (should not happen now that every engine has one, but
         // stay robust to a double-destroy or an unknown handle): fall back to
@@ -3046,6 +3161,39 @@ static void init_g_mutex(void) {
   uv_cond_init(&g_teardown_cond);
 }
 
+// --- Test-only N-API entrypoints (review #12 #3 / #13) ---
+// Registered only when DATAWEAVE_TEST_HOOKS is set (see Init). They let the Node
+// strand regression test arm a single forced live-isolate strand and inspect the
+// resulting bookkeeping. None of these touch thread-affine napi state beyond
+// creating a plain return value on the calling env, so they are callable from any
+// JS thread (main or Worker) that loaded this addon.
+static napi_value napi_test_force_strand_once(napi_env env, napi_callback_info info) {
+    (void)info;
+    uv_mutex_lock(&g_mutex);
+    g_test_force_strand_once = true;
+    uv_mutex_unlock(&g_mutex);
+    return NULL;
+}
+
+static napi_value napi_test_stranded_count(napi_env env, napi_callback_info info) {
+    (void)info;
+    long long n = 0;
+    uv_mutex_lock(&g_mutex);
+    for (engine_bridge_t* b = g_stranded_bridges; b != NULL; b = b->next) n++;
+    uv_mutex_unlock(&g_mutex);
+    napi_value out; napi_create_int64(env, (int64_t)n, &out);
+    return out;
+}
+
+static napi_value napi_test_resolver_ref_delete_count(napi_env env, napi_callback_info info) {
+    (void)info;
+    uv_mutex_lock(&g_mutex);
+    long long n = g_test_resolver_ref_deletes;
+    uv_mutex_unlock(&g_mutex);
+    napi_value out; napi_create_int64(env, (int64_t)n, &out);
+    return out;
+}
+
 static napi_value Init(napi_env env, napi_value exports) {
   uv_once(&g_mutex_once, init_g_mutex);
 
@@ -3074,6 +3222,21 @@ static napi_value Init(napi_env env, napi_value exports) {
 
   napi_create_function(env, "cleanup", NAPI_AUTO_LENGTH, napi_cleanup, NULL, &fn);
   napi_set_named_property(env, exports, "cleanup", fn);
+
+  // Test-only entrypoints, registered only when the process opts in via
+  // DATAWEAVE_TEST_HOOKS (non-empty). getenv() is safe here: Init runs once per
+  // env on the main JS thread at module load, before any engine/finalize can run,
+  // so this write-once flag is visible to every later reader without a barrier.
+  const char* test_hooks = getenv("DATAWEAVE_TEST_HOOKS");
+  if (test_hooks != NULL && test_hooks[0] != '\0') {
+    g_test_hooks = true;
+    napi_create_function(env, "__test_forceStrandOnce", NAPI_AUTO_LENGTH, napi_test_force_strand_once, NULL, &fn);
+    napi_set_named_property(env, exports, "__test_forceStrandOnce", fn);
+    napi_create_function(env, "__test_strandedCount", NAPI_AUTO_LENGTH, napi_test_stranded_count, NULL, &fn);
+    napi_set_named_property(env, exports, "__test_strandedCount", fn);
+    napi_create_function(env, "__test_resolverRefDeleteCount", NAPI_AUTO_LENGTH, napi_test_resolver_ref_delete_count, NULL, &fn);
+    napi_set_named_property(env, exports, "__test_resolverRefDeleteCount", fn);
+  }
 
   return exports;
 }
