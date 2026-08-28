@@ -733,6 +733,58 @@ def test_bootstrap_detach_and_teardown_both_failing_arms_retry_instead_of_leakin
     assert len(library.tear_down_threads) == 1
 
 
+@pytest.mark.unit
+def test_retry_after_double_failure_reuses_retained_bootstrap_thread(monkeypatch):
+    """Review #13 (finding D): when a bootstrap-thread detach AND the immediate
+    teardown BOTH fail in _acquire_isolate, the isolate was NOT destroyed and the
+    bootstrap thread is still attached. GraalVM teardown can never succeed while
+    that thread stays attached, so the retry must reuse the RETAINED bootstrap
+    thread -- attaching a fresh worker would leave the bootstrap attached and
+    teardown could never succeed."""
+    monkeypatch.setattr(native, "_teardown_needed", False)
+    monkeypatch.setattr(native, "_pending_teardown_thread", None)
+    library = FakeLibrary()
+
+    # graal_create_isolate hands out a distinct, non-null bootstrap thread so we
+    # can prove the retry tears down using THAT thread, not a fresh attach (a
+    # fresh attach via FakeLibrary would produce a different worker pointer).
+    def create_isolate(_params, _isolate, thread_ptr):
+        bootstrap = ctypes.cast(ctypes.c_void_p(0x1000), native.GraalIsolateThreadPointer)
+        ctypes.cast(
+            thread_ptr, ctypes.POINTER(native.GraalIsolateThreadPointer)
+        )[0] = bootstrap
+        return 0
+
+    def failing_detach(_thread):
+        return 1  # bootstrap detach always fails
+
+    teardown_calls = {"threads": []}
+
+    def teardown(thread):
+        teardown_calls["threads"].append(ctypes.cast(thread, ctypes.c_void_p).value)
+        return 1 if len(teardown_calls["threads"]) == 1 else 0  # fail first, succeed on retry
+
+    library.graal_create_isolate = CallableFunction(create_isolate)
+    library.graal_detach_thread = CallableFunction(failing_detach)
+    library.graal_tear_down_isolate = CallableFunction(teardown)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    with pytest.raises(native.DataWeaveError):
+        native._acquire_isolate("/tmp/dwlib")
+    assert native._teardown_needed is True
+    assert native._pending_teardown_thread is not None
+    bootstrap_addr = ctypes.cast(native._pending_teardown_thread, ctypes.c_void_p).value
+    assert bootstrap_addr == 0x1000
+
+    # Retry: teardown must reuse the retained bootstrap thread and succeed.
+    with native._isolate_lock:
+        native._retry_pending_teardown_locked()
+    assert native._teardown_needed is False
+    assert native._pending_teardown_thread is None
+    # Two teardown attempts total, both on the SAME retained bootstrap thread.
+    assert teardown_calls["threads"] == [bootstrap_addr, bootstrap_addr]
+
+
 class RetryTeardownFake:
     """Fake native lib for the failed-teardown / cross-thread-retry scenario.
 
