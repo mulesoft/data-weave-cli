@@ -92,8 +92,20 @@ def test_python_readme_documents_module_resolver_contract():
     normalized = " ".join(readme.split())
     assert "without a leading path separator" in normalized
     assert "without a leading slash or separator" not in normalized
-    assert "Each initialized explicit Python `DataWeave` instance owns a dedicated Graal isolate." in normalized
-    assert "retains the resolver callback until successful isolate teardown" in normalized
+    # Lifecycle: one process-wide, reference-counted isolate with per-instance
+    # handle-addressed engines (review #12 #4 / #13 finding E). The stale
+    # "dedicated Graal isolate per instance" claim must stay gone.
+    assert (
+        "There is a single process-wide GraalVM isolate, reference-counted by the "
+        "number of live engines across all `DataWeave` instances" in normalized
+    )
+    assert (
+        "Each `DataWeave` instance owns its own handle-addressed engine within "
+        "that shared isolate." in normalized
+    )
+    assert "owns a dedicated Graal isolate" not in normalized
+    assert "retains the resolver callback until its engine is destroyed" in normalized
+    assert "until successful isolate teardown" not in normalized
 
 
 @pytest.mark.unit
