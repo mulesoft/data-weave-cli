@@ -158,6 +158,18 @@ public class NativeLib {
                 session.closeStream();
             }
 
+            // The feeder ran concurrently; by the time output streaming reached EOF it has
+            // finished. If it stopped on a read-callback contract violation (out-of-range
+            // length), the input was truncated — surface that as an error rather than presenting
+            // a success envelope built on partial input. Safe to read here: cleanupFeeder (in the
+            // finally) does not null feederRunnable. The engine usually errors first via
+            // session.isError(); this catches the case where it tolerated the truncated input.
+            String feederError = feederRunnable.getError();
+            if (feederError != null) {
+                return toUnmanagedCString("{\"success\":false,\"error\":\""
+                        + escapeJsonString(feederError) + "\"}");
+            }
+
             return toUnmanagedCString("{\"success\":true"
                     + ",\"mimeType\":\"" + session.getMimeType() + "\""
                     + ",\"charset\":\"" + session.getCharset() + "\""
@@ -338,6 +350,7 @@ public class NativeLib {
         private final long ctxAddr;
         private final InputStreamSession inputSession;
         private volatile boolean cancelled = false;
+        private volatile String feederError;
 
         InputCallbackFeeder(long readCallbackAddr, long ctxAddr,
                             InputStreamSession inputSession) {
@@ -356,6 +369,29 @@ public class NativeLib {
         }
 
         /**
+         * The read-callback contract violation that stopped the feeder as an error, or
+         * {@code null} if the feeder reached a clean EOF (or never ran). Read by
+         * {@link NativeLib#transformViaCallbacks} after the output loop so a truncated input
+         * caused by a misbehaving callback is reported as {@code success:false} rather than
+         * presented as a successful transform.
+         */
+        String getError() {
+            return feederError;
+        }
+
+        /**
+         * Records an out-of-range read-callback length as a feeder error and maps it to the
+         * error return code ({@code -1}). Per the read convention {@code 0} = EOF, {@code >0} =
+         * bytes read, {@code -1} = error; any length outside {@code [-1, max]} is a contract
+         * violation.
+         */
+        private int rejectOutOfRange(int n, int max) {
+            feederError = "Input read callback returned out-of-range length " + n
+                    + " (max " + max + ")";
+            return -1;
+        }
+
+        /**
          * Pulls the next input chunk from the caller-owned read callback into {@code dest},
          * returning the number of bytes read ({@code 0} = EOF, negative = error).
          *
@@ -369,6 +405,12 @@ public class NativeLib {
             CCharPointer buf = UnmanagedMemory.malloc(max);
             try {
                 int n = cb.invoke(ctx, buf, max);
+                // Reject a contract violation BEFORE the copy loop: n > max would index past
+                // dest[] / the native buf (an out-of-bounds copy that used to silently kill the
+                // feeder and present the engine with a clean EOF on truncated input).
+                if (n > max || n < -1) {
+                    return rejectOutOfRange(n, max);
+                }
                 if (n > 0) {
                     for (int i = 0; i < n; i++) {
                         dest[i] = buf.read(i);
@@ -386,6 +428,13 @@ public class NativeLib {
             try {
                 while (!cancelled) {
                     int n = readChunk(tmp, CALLBACK_BUFFER_SIZE);
+                    // Defence in depth for the overridable readChunk seam: reject any length
+                    // outside [-1, max] here too, so an out-of-range value can never reach the
+                    // write below (which would throw IndexOutOfBounds out of run()). In
+                    // production readChunk has already recorded this and returned -1.
+                    if (n > CALLBACK_BUFFER_SIZE || n < -1) {
+                        n = rejectOutOfRange(n, CALLBACK_BUFFER_SIZE);
+                    }
                     if (n <= 0) {
                         break; // 0 = EOF, negative = error
                     }
