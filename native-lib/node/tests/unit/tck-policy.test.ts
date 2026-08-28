@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACCEPTED_BASELINE_MISMATCHES,
   CAPABILITY_EXCLUSIONS,
+  EXPECTED_EXECUTION_FAILURES,
   IGNORED_CASES,
   REENABLED_CASES,
   STRUCTURAL_MODULE_CASES,
@@ -43,9 +44,10 @@ describe("TCK ignore policy", () => {
     ]);
   });
 
-  it("reconciles exclusions into capability skips and strict xfails", () => {
-    expect(Object.keys(CAPABILITY_EXCLUSIONS)).toHaveLength(38);
+  it("reconciles exclusions into capability skips, strict xfails, and strict exec-xfails", () => {
+    expect(Object.keys(CAPABILITY_EXCLUSIONS)).toHaveLength(32);
     expect(Object.keys(ACCEPTED_BASELINE_MISMATCHES)).toHaveLength(15);
+    expect(Object.keys(EXPECTED_EXECUTION_FAILURES)).toHaveLength(6);
     expect(REENABLED_CASES).toHaveLength(6);
     expect(CAPABILITY_EXCLUSIONS).toHaveProperty("runtime/big_intersection-out.json");
     expect(IGNORED_CASES).toBe(CAPABILITY_EXCLUSIONS);
@@ -53,6 +55,8 @@ describe("TCK ignore policy", () => {
       CAPABILITY_EXCLUSIONS,
       ACCEPTED_BASELINE_MISMATCHES,
       REENABLED_CASES,
+      undefined,
+      EXPECTED_EXECUTION_FAILURES,
     )).toEqual([]);
   });
 

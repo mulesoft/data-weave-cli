@@ -14,10 +14,13 @@ import { hasAdjacentDwlModule, parseCase, MAIN_TRANSFORM, type TckScenario } fro
 import { compareOutput } from "./compare";
 import {
   ACCEPTED_BASELINE_MISMATCHES,
+  EXPECTED_EXECUTION_FAILURES,
   IGNORED_CASES,
   REENABLED_CASES,
   STRUCTURAL_MODULE_CASES,
   isIgnored,
+  isExpectedExecutionFailure,
+  isExpectedExecutionFailureCase,
   ignoreReason,
   validateIgnorePolicy,
   validateInventoryPolicy,
@@ -110,7 +113,13 @@ if (!existsSync(SUITES_DIR)) {
     const policyErrors = [
       ...validateInventoryPolicy(cases.length, skipped),
       ...validateIgnorePolicy(IGNORED_CASES, runnableCases),
-      ...validateReconciledPolicy(IGNORED_CASES, ACCEPTED_BASELINE_MISMATCHES, REENABLED_CASES, runnableScenarios),
+      ...validateReconciledPolicy(
+        IGNORED_CASES,
+        ACCEPTED_BASELINE_MISMATCHES,
+        REENABLED_CASES,
+        runnableScenarios,
+        EXPECTED_EXECUTION_FAILURES,
+      ),
       ...validateStructuralModulePolicy(STRUCTURAL_MODULE_CASES, structuralModuleCases),
     ];
     if (policyErrors.length > 0) {
@@ -128,20 +137,32 @@ if (!existsSync(SUITES_DIR)) {
       console.log(
         `TCK: ${cases.length} runnable cases, ${skipped} structurally skipped, `
         + `${structuralModuleCases.size} structural module cases, ${Object.keys(IGNORED_CASES).length} exclusions, `
-        + `${Object.keys(ACCEPTED_BASELINE_MISMATCHES).length} expected failures`
+        + `${Object.keys(ACCEPTED_BASELINE_MISMATCHES).length} expected output-mismatch failures, `
+        + `${Object.keys(EXPECTED_EXECUTION_FAILURES).length} expected execution failures`
       );
       dw.initialize();
 
       for (const c of cases) {
-        const ignored = isIgnored(c.caseIdentifier);
+        // Cases with an expected execution failure must run — the harness
+        // asserts result.success === false plus a stable error discriminator
+        // for them, so they are never skipped even though they're also
+        // recorded in the legacy ignore registry for suite-routing purposes.
+        const ignored = isIgnored(c.caseIdentifier) && !isExpectedExecutionFailureCase(c.caseIdentifier);
         for (const scenario of c.scenarios) {
           const expectedFailure = ACCEPTED_BASELINE_MISMATCHES[scenario.name];
+          const execFail = isExpectedExecutionFailure(scenario.name);
           const testFn = ignored ? it.skip : it;
           const label = ignored
             ? `${scenario.name} [skip: ${ignoreReason(c.caseIdentifier)}]`
-            : expectedFailure
-              ? `${scenario.name} [xfail: ${expectedFailure}]`
-              : scenario.name;
+            : execFail
+              // Reuse the "[xfail:" marker (not "[exec-xfail:") so the TCK
+              // accounting reporter's `scenarioIdentifier`/xfailed detection
+              // (tests/tck/reporter.ts), which only recognizes the literal
+              // "skip:"/"xfail:" prefixes, still classifies these correctly.
+              ? `${scenario.name} [xfail: execution failure: ${execFail.errorMatch}]`
+              : expectedFailure
+                ? `${scenario.name} [xfail: ${expectedFailure}]`
+                : scenario.name;
           testFn(label, () => {
             const script = readFileSync(join(c.dir, MAIN_TRANSFORM), "utf-8");
 
@@ -153,6 +174,19 @@ if (!existsSync(SUITES_DIR)) {
             );
 
             const result = dw.run(script, inputs);
+
+            if (execFail) {
+              expect(
+                result.success,
+                `${scenario.name}: expected execution failure but it succeeded — remove it from EXPECTED_EXECUTION_FAILURES`
+              ).toBe(false);
+              expect(
+                result.error ?? "",
+                `${scenario.name}: execution failed but error changed — update the errorMatch discriminator`
+              ).toContain(execFail.errorMatch);
+              return;
+            }
+
             expect(result.success, `script failed: ${result.error}`).toBe(true);
 
             const actual = result.getBytes()!;
