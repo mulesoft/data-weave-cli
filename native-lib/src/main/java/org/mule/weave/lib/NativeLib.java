@@ -158,12 +158,13 @@ public class NativeLib {
                 session.closeStream();
             }
 
-            // The feeder ran concurrently; by the time output streaming reached EOF it has
-            // finished. If it stopped on a read-callback contract violation (out-of-range
-            // length), the input was truncated — surface that as an error rather than presenting
-            // a success envelope built on partial input. Safe to read here: cleanupFeeder (in the
-            // finally) does not null feederRunnable. The engine usually errors first via
-            // session.isError(); this catches the case where it tolerated the truncated input.
+            // The feeder ran concurrently. If it stopped on a read-callback contract violation
+            // (out-of-range length), the input was truncated — surface that as an error rather
+            // than presenting a success envelope built on partial input. getError() is a volatile
+            // read, correct to observe here regardless of exactly when the feeder finished; and
+            // cleanupFeeder (in the finally) does not null feederRunnable, so the reference stays
+            // valid. The engine usually errors first via session.isError(); this catches the case
+            // where it tolerated the truncated input.
             String feederError = feederRunnable.getError();
             if (feederError != null) {
                 return toUnmanagedCString("{\"success\":false,\"error\":\""
