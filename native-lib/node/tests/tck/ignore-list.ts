@@ -91,10 +91,10 @@ const LEGACY_IGNORED_CASES: Readonly<Record<string, { reason: string }>> = {
   "multipart-binary-out.multipart": { reason: "multipart: boundary nondeterminism + binary part encoding" },
   "multipart-class-cast-issue-out.multipart": { reason: "multipart: boundary nondeterminism" },
   "multipart-empty-part-out.multipart": { reason: "multipart: boundary nondeterminism + empty part handling" },
-  "multipart-mixed-message-out.multipart": { reason: "multipart: empty parts / structural" },
+  "multipart-mixed-message-out.multipart": { reason: "multipart: execution fails — 'Multipart Object has empty `parts`' (skip, not an output-mismatch xfail)" },
   "multipart-write-binary-out.json": { reason: "multipart: binary part write" },
-  "multipart-write-message-out.multipart": { reason: "multipart: empty parts / structural" },
-  "multipart-write-subtype-override-out.multipart": { reason: "multipart: subtype override" },
+  "multipart-write-message-out.multipart": { reason: "multipart: execution fails — 'Multipart Object has empty `parts`' (skip, not an output-mismatch xfail)" },
+  "multipart-write-subtype-override-out.multipart": { reason: "multipart: execution fails — 'Multipart Object has empty `parts`' (skip, not an output-mismatch xfail)" },
 
   // slow — passes but risks exceeding the 30s test timeout on CI
   "big_intersection-out.json": { reason: "slow: 500-way intersection type exceeds the test timeout" },
