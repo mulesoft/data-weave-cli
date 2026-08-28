@@ -269,4 +269,54 @@ class NativeLibFeederTest {
     private static final class NativeLibFeederConstants {
         static final int BUFFER = 8 * 1024;
     }
+
+    // ── Join-before-getError ordering contract (review #12 #1, High) ─────
+
+    /**
+     * Contract test for the ordering {@code transformViaCallbacks} relies on: a terminal feeder
+     * error set by an in-flight {@code readChunk} is only guaranteed visible <em>after</em>
+     * {@code cleanupFeeder} has joined the feeder thread, not before. Before the round-12 fix,
+     * {@code transformViaCallbacks} read {@code getError()} before joining the feeder in its
+     * in-try path, so a callback that was still running when output reached EOF and failed only
+     * after returning could have its failure missed and a {@code success:true} envelope returned
+     * instead. This test proves the invariant the fix depends on: pre-join the error is not yet
+     * observable, and {@code cleanupFeeder} does not return until the join completes and the
+     * error becomes visible.
+     */
+    @Test
+    void getErrorReflectsLateFailureOnlyAfterJoin() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        InputStreamSession session = new InputStreamSession("application/json", null);
+        long handle = session.register();
+        // A feeder whose read callback blocks until released, then reports an out-of-range
+        // length (the "in-flight callback fails after output EOF" case). Returning the
+        // out-of-range value directly (rather than calling the private rejectOutOfRange helper,
+        // which isn't visible to this subclass) exercises run()'s own defence-in-depth check,
+        // exactly like readCallbackLengthAboveMaxIsRejectedAsError above.
+        NativeLib.InputCallbackFeeder feeder = new NativeLib.InputCallbackFeeder(0L, 0L, session) {
+            @Override
+            int readChunk(byte[] dest, int max) {
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return max + 1; // one past the buffer: recorded as a feeder error, loop breaks
+            }
+        };
+        Thread t = new Thread(feeder, "dw-input-callback-feeder-test");
+        t.setDaemon(true);
+        t.start();
+
+        // Pre-join: the callback is still blocked, so no terminal error is visible yet.
+        assertNull(feeder.getError());
+
+        // Releasing + joining (via cleanupFeeder) must wait for run() to finish and make the
+        // late failure observable.
+        release.countDown();
+        NativeLib.cleanupFeeder(feeder, t, handle);
+
+        assertFalse(t.isAlive());
+        assertNotNull(feeder.getError());
+    }
 }

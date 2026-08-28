@@ -116,6 +116,7 @@ public class NativeLib {
 
         InputCallbackFeeder feederRunnable = null;
         Thread feeder = null;
+        boolean cleaned = false;
         try {
             // Start a background thread that calls the readCallback and feeds data into the pipe.
             // Word types (CCharPointer, CFunctionPointer, PointerBase) cannot be captured in
@@ -158,13 +159,18 @@ public class NativeLib {
                 session.closeStream();
             }
 
-            // The feeder ran concurrently. If it stopped on a read-callback contract violation
-            // (out-of-range length), the input was truncated — surface that as an error rather
-            // than presenting a success envelope built on partial input. getError() is a volatile
-            // read, correct to observe here regardless of exactly when the feeder finished; and
-            // cleanupFeeder (in the finally) does not null feederRunnable, so the reference stays
-            // valid. The engine usually errors first via session.isError(); this catches the case
-            // where it tolerated the truncated input.
+            // Stop and JOIN the feeder BEFORE reading its terminal error: an in-flight read
+            // callback that fails *after* output reached EOF sets feederError only once it
+            // returns, so we must wait for run() to finish or a late failure would be missed and
+            // success returned. cleanupFeeder cancels, closes the input session (unblocking a
+            // feeder parked on pipe backpressure so the join cannot hang), and joins. If it
+            // stopped on a read-callback contract violation (out-of-range length), the input was
+            // truncated — surface that as an error rather than presenting a success envelope
+            // built on partial input. The engine usually errors first via session.isError(); this
+            // catches the case where it tolerated the truncated input.
+            cleanupFeeder(feederRunnable, feeder, inputHandle);
+            cleaned = true;
+
             String feederError = feederRunnable.getError();
             if (feederError != null) {
                 return toUnmanagedCString("{\"success\":false,\"error\":\""
@@ -185,9 +191,12 @@ public class NativeLib {
             return toUnmanagedCString("{\"success\":false,\"error\":\""
                     + escapeJsonString(m) + "\"}");
         } finally {
-            // Sole close of the input handle for every path once the feeder region is entered.
-            // Safe (and a no-op cancel/join) when the feeder never started.
-            cleanupFeeder(feederRunnable, feeder, inputHandle);
+            // Sole close of the input handle + feeder join for every path that did not already
+            // clean up in-try (exception paths and the early error returns). Safe (and a no-op
+            // cancel/join) when the feeder never started.
+            if (!cleaned) {
+                cleanupFeeder(feederRunnable, feeder, inputHandle);
+            }
         }
     }
 
