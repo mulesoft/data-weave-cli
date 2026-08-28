@@ -34,6 +34,12 @@ interface TestAddon {
   initialize(libPath: string): void;
   createEngineWithResolver(resolver: (p: string) => string | null): number;
   destroyEngine(handle: number): void;
+  runScriptStreamingEngine(
+    handle: number,
+    script: string,
+    inputsJson: string,
+    chunkCb: (chunk: Buffer) => void
+  ): Promise<string>;
   cleanup(): Promise<void>;
   __test_forceStrandOnce(): void;
   __test_strandedCount(): number;
@@ -137,6 +143,49 @@ describe("owner-env-hook-retained finalization for stranded resolver bridges (re
         // Worker's owner thread at env teardown -> exactly one net delete.
         // PRE-FIX: destroyEngine removed the hook and stranded the bridge, so the
         // off-thread drain freed it with env_still_alive=false -> 0 deletes (leak).
+        expect(deletesAfter - deletesBefore).toBe(1);
+      } finally {
+        await addon.cleanup();
+      }
+    },
+    20000
+  );
+
+  it(
+    "a deferred destroy (destroyEngine while an op is in flight) finalizes exactly once on the owner thread, hook removed up-front (round-1 double-owner guard)",
+    async () => {
+      // Regression guard for the defer-path double-owner window (round-1 fix):
+      // destroyEngine on a resolver-backed engine WHILE a streaming op is in
+      // flight takes the defer path -- it must remove the env cleanup hook NOW
+      // (owner thread, env alive) so the draining bridge_end_op is the SOLE
+      // finalizer. Deterministic: the round-11 pin is taken atomically at
+      // admission, so firing destroyEngine synchronously after starting the op
+      // lands AFTER in_flight==1 (see engine-handle-contract.test.ts). After the
+      // op drains, bridge_end_op finalizes on the owner thread with the env alive:
+      // resolver_js is deleted EXACTLY once (delta 1 -- not 0=leak, not 2=double
+      // finalize) and the bridge is never stranded.
+      addon.initialize(LIB_PATH);
+      try {
+        const deletesBefore = addon.__test_resolverRefDeleteCount();
+        const strandedBefore = addon.__test_strandedCount();
+
+        const handle = addon.createEngineWithResolver((_p) => null);
+        const chunks: Buffer[] = [];
+        const resultPromise = addon.runScriptStreamingEngine(
+          handle,
+          "%dw 2.0\noutput application/json\n---\n[1, 2, 3]",
+          "{}",
+          (chunk) => chunks.push(chunk)
+        );
+        // Fire destroy synchronously after admission -> defer path (in_flight==1).
+        expect(() => addon.destroyEngine(handle)).not.toThrow();
+        const raw = await resultPromise;
+        // Pin held at admission -> the op completes successfully.
+        expect(JSON.parse(raw).success).toBe(true);
+
+        const deletesAfter = addon.__test_resolverRefDeleteCount();
+        const strandedAfter = addon.__test_strandedCount();
+        expect(strandedAfter - strandedBefore).toBe(0);
         expect(deletesAfter - deletesBefore).toBe(1);
       } finally {
         await addon.cleanup();

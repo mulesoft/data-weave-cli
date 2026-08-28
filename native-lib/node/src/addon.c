@@ -2385,14 +2385,6 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
     uv_mutex_unlock(&g_mutex);
 
     if (found != NULL) {
-        // Do NOT pre-remove the env cleanup hook here (review #12 #3, #13). The two
-        // finalize paths now own the hook themselves: bridge_finalize's FREE path
-        // removes it (owner thread, before the free) so Node never invokes it on
-        // freed memory, while its live-isolate STRAND path KEEPS the hook so the
-        // owner env deletes resolver_js at teardown instead of the off-thread drain
-        // (which skips napi_delete_reference and would leak the ref). Removing it
-        // unconditionally here would strand the bridge with the ref undeleted AND no
-        // hook to delete it -> a guaranteed resolver-ref leak on the strand path.
         if (!defer) {
             // Not in flight: remove the registry entry AND finalize now, on this
             // owner thread (env live). do_registry_remove=true folds the
@@ -2400,13 +2392,32 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
             // once regardless of path. may_rehook=true: we are on the owner thread
             // with the env alive, so a live-isolate strand keeps the hook (owner
             // env finalizes resolver_js later) rather than enqueuing on the drain.
+            // Do NOT pre-remove the hook here (review #12 #3, #13): bridge_finalize
+            // owns it -- its FREE path removes it before freeing (so Node never
+            // invokes it on freed memory), and its STRAND path KEEPS it so the owner
+            // env deletes resolver_js at teardown instead of the off-thread drain
+            // (which skips napi_delete_reference and would leak the ref).
             bridge_finalize(found, /*env_still_alive=*/true, /*do_registry_remove=*/true, /*may_rehook=*/true);
+        } else {
+            // In flight -> DEFER the finalize to the draining op's bridge_end_op.
+            // Remove the env cleanup hook NOW (round-1 fix to reviews #12 #3/#13):
+            // this is legal here (owner thread, env alive) and makes bridge_end_op
+            // the SOLE finalizer after this destroy. Leaving the hook registered
+            // reopens a double-owner window: destroy_pending only keeps
+            // bridge_env_cleanup and bridge_end_op mutually exclusive for ABANDONED
+            // (never-destroyed) engines, because bridge_env_cleanup's in_flight==0
+            // branch finalizes WITHOUT checking destroy_pending. So if the env is
+            // torn down while this op is still in flight (e.g. worker.terminate()),
+            // the op's bridge_end_op(env_still_alive=false) frees the bridge on its
+            // FREE path (which skips the hook-remove -- gated on env_still_alive),
+            // and the later env-cleanup-hook fire would run bridge_env_cleanup on
+            // freed memory -> UAF / double-free / double fn_destroy_engine.
+            // bridge_end_op re-registers the hook (may_rehook=env_still_alive) only
+            // if its later finalize STRANDS on the owner thread with the env alive,
+            // keeping resolver_js deletion on the owner thread -> the leak fix holds.
+            napi_remove_env_cleanup_hook(env, bridge_env_cleanup, found);
+            found->hook_registered = false;
         }
-        // else: in flight -> leave the hook in place (do NOT remove it). The
-        // draining op's bridge_end_op -> bridge_finalize performs both the registry
-        // removal and the free (or keeps the hook on its own strand) on the owner
-        // thread. Should the owner env instead tear down first while still in
-        // flight, bridge_env_cleanup fires and takes over the deferred finalize.
     } else {
         // No record found (should not happen now that every engine has one, but
         // stay robust to a double-destroy or an unknown handle): fall back to
