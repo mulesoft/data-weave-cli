@@ -341,8 +341,7 @@ After `:native-lib:buildNodePackage`, install the local meta-package tarball and
 matching platform tarball:
 
 ```bash
-npm install ./native-lib/node/dataweave-native-<ver>.tgz \
-  ./native-lib/node/dataweave-native-<platform>-<ver>.tgz
+npm install ./native-lib/node/dataweave-native-<ver>.tgz ./native-lib/node/dataweave-native-<platform>-<ver>.tgz
 ```
 
 ### Option B: Development install (link)
