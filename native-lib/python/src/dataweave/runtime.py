@@ -39,25 +39,44 @@ class DataWeave:
         self._stream_workers = set()
         self._stream_workers_lock = Lock()
         self._cleaning_up = False
+        self._lifecycle_lock = Lock()
 
     def initialize(self):
-        if self._native.initialized:
-            return
-        if self._resolve_module is not None:
-            self._native.install_resolver(self._resolve_module)
-        self._native.initialize()
+        # Holds the lock across the whole install-resolver + native-init
+        # transition so two concurrent initialize() calls on this instance
+        # cannot both pass the `initialized` guard and both call
+        # install_resolver(), which would mint and register a second resolver
+        # token in the module-global registry and orphan it (review #12 #2).
+        # Always the outermost lock: NativeRuntime._init_lock and the module-
+        # global _resolver_lock_global are only ever taken INSIDE
+        # self._native.initialize()/cleanup(), nested within this one.
+        with self._lifecycle():
+            if self._native.initialized:
+                return
+            if self._resolve_module is not None:
+                self._native.install_resolver(self._resolve_module)
+            self._native.initialize()
 
     def cleanup(self):
-        workers, lock = self._worker_registry()
-        with lock:
-            if workers:
-                raise DataWeaveError("Cannot clean up DataWeave runtime while an active streaming worker is attached.")
-            self._cleaning_up = True
-        try:
-            self._native.cleanup()
-        finally:
+        # Symmetric with initialize(): install_resolver() and
+        # NativeRuntime.cleanup() both mutate the module-global resolver
+        # registry, so cleanup() takes the same instance-level lock.
+        with self._lifecycle():
+            workers, lock = self._worker_registry()
             with lock:
-                self._cleaning_up = False
+                if workers:
+                    raise DataWeaveError("Cannot clean up DataWeave runtime while an active streaming worker is attached.")
+                self._cleaning_up = True
+            try:
+                self._native.cleanup()
+            finally:
+                with lock:
+                    self._cleaning_up = False
+
+    def _lifecycle(self):
+        if not hasattr(self, "_lifecycle_lock"):
+            self._lifecycle_lock = Lock()
+        return self._lifecycle_lock
 
     def _worker_registry(self):
         if not hasattr(self, "_stream_workers"):
