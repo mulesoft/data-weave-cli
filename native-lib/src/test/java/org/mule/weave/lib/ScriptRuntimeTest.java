@@ -690,6 +690,68 @@ class ScriptRuntimeTest {
                 NativeLib.UNKNOWN_ENGINE_HANDLE_JSON);
     }
 
+    // ── Fail-closed input parsing (review #11 #5) ──────────────────────────
+
+    /** (a) Malformed inputs JSON must fail closed, not silently run on empty bindings. */
+    @Test
+    void runMalformedInputsJsonFailsClosed() {
+        ScriptRuntime runtime = new ScriptRuntime();
+        // Script has no input dependency, so pre-fix the swallowed parse error
+        // would let this run on empty bindings and return success:true.
+        String result = runtime.run("1 + 1", "{not json");
+        assertTrue(result.contains("\"success\":false"),
+                "Expected success:false for malformed inputs JSON, got: " + result);
+        assertFalse(Result.parse(result).success);
+    }
+
+    /**
+     * (b) A malformed SECOND entry (invalid base64 content) must fail the whole run,
+     * not silently drop the entry and execute bound to only the first entry.
+     */
+    @Test
+    void runMalformedSecondEntryFailsClosed() {
+        ScriptRuntime runtime = new ScriptRuntime();
+
+        // First entry valid; second entry has invalid base64 content.
+        String inputsJson = String.format(
+                "{\"num1\": {\"content\": \"%s\", \"mimeType\": \"application/json\"}, " +
+                "\"num2\": {\"content\": \"@@@not-valid-base64@@@\", \"mimeType\": \"application/json\"}}",
+                encode(10));
+
+        // Script references only the first binding: pre-fix the second (malformed)
+        // entry would be silently dropped and this would wrongly succeed on num1 alone.
+        String result = runtime.run("num1", inputsJson);
+        assertFalse(Result.parse(result).success,
+                "Expected fail-closed on malformed second entry, got: " + result);
+        assertNotNull(Result.parse(result).error);
+
+        // And a script that references the malformed binding must not run on a missing var.
+        String result2 = runtime.run("num1 + num2", inputsJson);
+        assertFalse(Result.parse(result2).success,
+                "Expected fail-closed when referencing malformed binding, got: " + result2);
+    }
+
+    /** (c) A valid single-entry inputs doc must still run successfully (no regression). */
+    @Test
+    void runValidSingleEntryStillSucceeds() {
+        ScriptRuntime runtime = new ScriptRuntime();
+        String inputsJson = String.format(
+                "{\"num1\": {\"content\": \"%s\", \"mimeType\": \"application/json\"}}",
+                encode(41));
+        String result = runtime.run("num1 + 1", inputsJson);
+        assertTrue(Result.parse(result).success, "Expected success for valid inputs, got: " + result);
+        assertEquals("42", Result.parse(result).result);
+    }
+
+    /** runStreaming must return an error session on malformed inputs JSON. */
+    @Test
+    void runStreamingMalformedInputsJsonReturnsErrorSession() {
+        ScriptRuntime runtime = new ScriptRuntime();
+        StreamSession session = runtime.runStreaming("1 + 1", "{not json");
+        assertTrue(session.isError(), "Expected error session for malformed inputs JSON");
+        assertNotNull(session.getError());
+    }
+
     static class Result {
         boolean success;
         String result;

@@ -120,10 +120,10 @@ public class ScriptRuntime {
      * @return a JSON string describing either the successful result or an error
      */
     public String run(String script, String inputsJson) {
-        ScriptingBindings bindings = parseJsonInputsToBindings(inputsJson);
-        String[] inputs = bindings.bindingNames();
-
         try {
+            ScriptingBindings bindings = parseJsonInputsToBindings(inputsJson);
+            String[] inputs = bindings.bindingNames();
+
             DWScript compiled = engine.compileDWScript(script, inputs);
             DWResult dwResult = compiled.writeDWResult(bindings);
 
@@ -168,10 +168,10 @@ public class ScriptRuntime {
      * @return a {@link StreamSession} with the result stream and metadata, or an error session
      */
     public StreamSession runStreaming(String script, String inputsJson) {
-        ScriptingBindings bindings = parseJsonInputsToBindings(inputsJson);
-        String[] inputs = bindings.bindingNames();
-
         try {
+            ScriptingBindings bindings = parseJsonInputsToBindings(inputsJson);
+            String[] inputs = bindings.bindingNames();
+
             DWScript compiled = engine.compileDWScript(script, inputs);
             DWResult dwResult = compiled.writeDWResult(bindings);
 
@@ -201,48 +201,48 @@ public class ScriptRuntime {
             return bindings;
         }
 
-        try {
-            JSONObject root = new JSONObject(inputsJson);
+        // Fail closed: any malformed entry (bad JSON / base64 / charset / streamHandle /
+        // properties) must propagate so the caller returns an error result rather than
+        // silently executing on partial/empty bindings. Because `bindings` is only
+        // returned after the loop completes, a propagated exception discards any
+        // partially-built bindings automatically.
+        JSONObject root = new JSONObject(inputsJson);
 
-            for (String name : root.keySet()) {
-                JSONObject entry = root.getJSONObject(name);
+        for (String name : root.keySet()) {
+            JSONObject entry = root.getJSONObject(name);
 
-                if (entry.has("streamHandle")) {
-                    long streamHandle = Long.parseLong(entry.getString("streamHandle"));
-                    InputStreamSession inputSession = InputStreamSession.get(streamHandle);
-                    if (inputSession == null) {
-                        throw new RuntimeException("Invalid streamHandle " + streamHandle + " for input '" + name + "'");
-                    }
-                    String mimeTypeRaw = entry.optString("mimeType", inputSession.getMimeType());
-                    String charsetRaw = entry.optString("charset", inputSession.getCharset());
-                    Charset charset = Charset.forName(charsetRaw);
-                    Option<String> mimeType = Option.apply(mimeTypeRaw);
-
-                    BindingValue bindingValue = new BindingValue(inputSession.getInputStream(), mimeType, Map$.MODULE$.empty(), charset);
-                    bindings.addBinding(name, bindingValue);
-
-                } else if (entry.has("content")) {
-                    String contentRaw = entry.getString("content");
-                    String mimeTypeRaw = entry.optString("mimeType", null);
-                    String charsetRaw = entry.optString("charset", "UTF-8");
-
-                    Map<String, Object> properties = Map$.MODULE$.empty();
-                    if (entry.has("properties") && !entry.isNull("properties")) {
-                        JSONObject propsObj = entry.getJSONObject("properties");
-                        properties = parseJsonProperties(propsObj);
-                    }
-
-                    Charset charset = Charset.forName(charsetRaw);
-                    Option<String> mimeType = Option.apply(mimeTypeRaw);
-
-                    byte[] content = Base64.getDecoder().decode(contentRaw);
-                    BindingValue bindingValue = new BindingValue(content, mimeType, properties, charset);
-                    bindings.addBinding(name, bindingValue);
+            if (entry.has("streamHandle")) {
+                long streamHandle = Long.parseLong(entry.getString("streamHandle"));
+                InputStreamSession inputSession = InputStreamSession.get(streamHandle);
+                if (inputSession == null) {
+                    throw new RuntimeException("Invalid streamHandle " + streamHandle + " for input '" + name + "'");
                 }
+                String mimeTypeRaw = entry.optString("mimeType", inputSession.getMimeType());
+                String charsetRaw = entry.optString("charset", inputSession.getCharset());
+                Charset charset = Charset.forName(charsetRaw);
+                Option<String> mimeType = Option.apply(mimeTypeRaw);
+
+                BindingValue bindingValue = new BindingValue(inputSession.getInputStream(), mimeType, Map$.MODULE$.empty(), charset);
+                bindings.addBinding(name, bindingValue);
+
+            } else if (entry.has("content")) {
+                String contentRaw = entry.getString("content");
+                String mimeTypeRaw = entry.optString("mimeType", null);
+                String charsetRaw = entry.optString("charset", "UTF-8");
+
+                Map<String, Object> properties = Map$.MODULE$.empty();
+                if (entry.has("properties") && !entry.isNull("properties")) {
+                    JSONObject propsObj = entry.getJSONObject("properties");
+                    properties = parseJsonProperties(propsObj);
+                }
+
+                Charset charset = Charset.forName(charsetRaw);
+                Option<String> mimeType = Option.apply(mimeTypeRaw);
+
+                byte[] content = Base64.getDecoder().decode(contentRaw);
+                BindingValue bindingValue = new BindingValue(content, mimeType, properties, charset);
+                bindings.addBinding(name, bindingValue);
             }
-        } catch (Exception e) {
-            System.err.println("Error parsing JSON inputs: " + e.getMessage());
-            e.printStackTrace();
         }
 
         return bindings;
