@@ -5,7 +5,7 @@ import { join } from "node:path";
  * Optional npm packages that ship a prebuilt `dwlib_addon.node` for one
  * `process.platform` / `process.arch` pair. These are the only hosts the
  * published `dataweave-native` meta package can load without a local gyp
- * rebuild.
+ * rebuild. Keep in sync with `nativePackages` in `scripts/pack-packages.mjs`.
  */
 export const SUPPORTED_NATIVE_PACKAGES = [
   { platform: "linux", arch: "x64", name: "dataweave-native-linux-x64" },
@@ -22,8 +22,9 @@ export interface ResolveAddonPathOptions {
   /** Override of `process.arch` (tests). */
   arch?: string;
   /**
-   * Injected `require` used to load an optional platform package.
-   * Production uses Node's `require`; tests pass a stub.
+   * Resolves an optional platform package to a filesystem path.
+   * Production uses `require.resolve` so this step does not `dlopen` the addon;
+   * `ffi` loads the `.node` afterward. Tests pass a stub.
    */
   requireFn?: (id: string) => { filename?: string } | string;
 }
@@ -46,7 +47,7 @@ export function nativePackageName(platform: string, arch: string): string | unde
  * Resolution is attempted in priority order:
  * 1. In-tree / source build — `<packageRoot>/build/Release/dwlib_addon.node`.
  * 2. Same-package layout — `<packageRoot>/native/dwlib_addon.node`.
- * 3. Optional dependency `dataweave-native-<platform>-<arch>` via `require`.
+ * 3. Optional dependency `dataweave-native-<platform>-<arch>` via `require.resolve`.
  *
  * @param opts - Overrides for tests or an explicit package root.
  * @returns The absolute path of the `.node` file (or the resolved package main).
@@ -70,7 +71,7 @@ export function resolveAddonPath(opts?: ResolveAddonPathOptions): string {
       `unsupported platform ${platform}-${arch} for dataweave-native. Supported: ${supported}.`
     );
   }
-  const requireFn = opts?.requireFn ?? ((id: string) => require(id));
+  const requireFn = opts?.requireFn ?? ((id: string) => require.resolve(id));
   try {
     const loaded = requireFn(name);
     if (typeof loaded === "string") return loaded;

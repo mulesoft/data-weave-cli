@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+// Keep in sync with SUPPORTED_NATIVE_PACKAGES in src/addon-path.ts.
 const nativePackages = [
   { platform: "linux", arch: "x64", name: "dataweave-native-linux-x64" },
   { platform: "win32", arch: "x64", name: "dataweave-native-win32-x64" },
@@ -58,6 +59,8 @@ export async function packPackages({
     name: "dataweave-native",
     version: packageVersion,
     files: ["dist/", "docs/"],
+    // Source package.json pins 0.0.1 so local npm install can resolve optionals
+    // after a registry publish; this rewrite is the real packed version.
     optionalDependencies,
   };
   delete metaPackage.gypfile;
