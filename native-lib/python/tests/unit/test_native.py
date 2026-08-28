@@ -733,6 +733,108 @@ def test_bootstrap_detach_and_teardown_both_failing_arms_retry_instead_of_leakin
     assert len(library.tear_down_threads) == 1
 
 
+class RetryTeardownFake:
+    """Fake native lib for the failed-teardown / cross-thread-retry scenario.
+
+    Each graal_attach_thread hands out a distinct, non-null worker pointer so we
+    can prove WHICH worker is detached. graal_tear_down_isolate fails on the
+    first call and succeeds afterwards, modelling a transient teardown failure.
+    """
+
+    def __init__(self):
+        self.attach_workers = []   # worker addr for every attach, in order
+        self.detached = []         # worker addr passed to every detach
+        self.tear_down_workers = []  # worker addr passed to every teardown
+        self.attached = set()      # addrs currently attached (naive bookkeeping)
+        self._next_worker = 1
+        self._tear_down_calls = 0
+
+    def graal_attach_thread(self, _isolate, thread_ptr):
+        addr = self._next_worker * 0x1000
+        self._next_worker += 1
+        fake_worker = ctypes.cast(ctypes.c_void_p(addr), native.GraalIsolateThreadPointer)
+        ctypes.cast(
+            thread_ptr, ctypes.POINTER(native.GraalIsolateThreadPointer)
+        )[0] = fake_worker
+        self.attach_workers.append(addr)
+        self.attached.add(addr)
+        return 0
+
+    def graal_detach_thread(self, thread):
+        addr = ctypes.cast(thread, ctypes.c_void_p).value
+        self.detached.append(addr)
+        self.attached.discard(addr)
+        return 0
+
+    def graal_tear_down_isolate(self, thread):
+        self._tear_down_calls += 1
+        self.tear_down_workers.append(ctypes.cast(thread, ctypes.c_void_p).value)
+        return 1 if self._tear_down_calls == 1 else 0  # fail once, then succeed
+
+
+@pytest.mark.unit
+def test_failed_teardown_detaches_worker_so_cross_thread_retry_succeeds(monkeypatch):
+    """Finding #2 (review #11): a FAILED final teardown must detach the freshly-
+    attached teardown worker before arming the retry. Otherwise a later cross-
+    thread retry attaches a SECOND worker while the first stays attached, and the
+    leftover attached worker blocks graal_tear_down_isolate forever.
+
+    A SUCCESSFUL teardown must NOT detach its worker (the isolate is gone and the
+    thread pointer is invalid), so detaches == attaches - 1 across the scenario.
+    """
+    fake = RetryTeardownFake()
+    # Set up as if one engine already acquired the shared isolate. Bypass real
+    # library loading -- drive the globals directly (unit/conftest resets them).
+    monkeypatch.setattr(native, "_lib", fake)
+    monkeypatch.setattr(native, "_lib_path", "/tmp/dwlib")
+    monkeypatch.setattr(native, "_isolate", native.GraalIsolatePointer())
+    monkeypatch.setattr(native, "_isolate_ref_count", 1)
+    monkeypatch.setattr(native, "_teardown_needed", False)
+
+    # Last release on the main thread -> teardown fails once -> retry armed.
+    with pytest.raises(native.DataWeaveError):
+        native._release_isolate()
+
+    # The isolate is retained live and a retry is armed.
+    assert native._isolate is not None
+    assert native._isolate_ref_count == 0
+    assert native._teardown_needed is True
+    # Exactly one worker was attached to attempt teardown, and it WAS detached
+    # (the bug: it stayed attached). No worker is left dangling attached.
+    assert fake.attach_workers == [0x1000]
+    assert fake.detached == [0x1000]
+    assert fake.attached == set()
+
+    # A cross-thread retry (another OS thread) must now tear down cleanly with a
+    # fresh worker and no leftover attached worker blocking it.
+    errors = []
+
+    def run_retry():
+        try:
+            with native._isolate_lock:
+                native._retry_pending_teardown_locked()
+        except BaseException as error:  # pragma: no cover - surfaced via assert
+            errors.append(error)
+
+    thread = Thread(target=run_retry)
+    thread.start()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert not errors
+    # Retry succeeded: flag cleared and globals nulled.
+    assert native._teardown_needed is False
+    assert native._isolate is None
+    assert native._lib is None
+    # A second, fresh worker was attached for the retry and used for the
+    # successful teardown. Its worker is intentionally NOT detached (isolate
+    # destroyed -> pointer invalid), so only the FAILED-teardown worker (0x1000)
+    # is ever detached.
+    assert fake.attach_workers == [0x1000, 0x2000]
+    assert fake.tear_down_workers == [0x1000, 0x2000]
+    assert fake.detached == [0x1000]  # success path does not detach
+
+
 @pytest.mark.unit
 def test_two_engines_dispatch_to_their_own_resolver(monkeypatch):
     library = FakeLibrary()
