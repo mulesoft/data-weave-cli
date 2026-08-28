@@ -17,8 +17,7 @@ function nativePackageName(platform, arch) {
 
 export function npmPackInvocation(platform, stagingDir) {
   if (platform === "win32") {
-    const quotedStagingDir = `"${stagingDir.replaceAll('"', '""')}"`;
-    return { command: "cmd.exe", args: ["/d", "/s", "/c", `npm pack ${quotedStagingDir}`] };
+    return { command: "cmd.exe", args: ["/d", "/s", "/c", "npm", "pack", stagingDir] };
   }
   return { command: "npm", args: ["pack", stagingDir] };
 }

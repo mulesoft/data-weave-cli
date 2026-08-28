@@ -46,9 +46,10 @@ after(() => {
 test("selects the npm pack invocation for each platform", () => {
   const stagingDir = "package staging";
   const windowsInvocation = npmPackInvocation("win32", stagingDir);
-  assert.equal(windowsInvocation.command, "cmd.exe");
-  assert.deepEqual(windowsInvocation.args.slice(0, 3), ["/d", "/s", "/c"]);
-  assert.match(windowsInvocation.args[3], /^npm pack /);
+  assert.deepEqual(windowsInvocation, {
+    command: "cmd.exe",
+    args: ["/d", "/s", "/c", "npm", "pack", stagingDir],
+  });
   assert.deepEqual(npmPackInvocation("linux", stagingDir), {
     command: "npm",
     args: ["pack", stagingDir],
