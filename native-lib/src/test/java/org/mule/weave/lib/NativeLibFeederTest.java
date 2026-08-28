@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -318,5 +319,65 @@ class NativeLibFeederTest {
 
         assertFalse(t.isAlive());
         assertNotNull(feeder.getError());
+    }
+
+    /**
+     * Regression guard for review #12 #1 round 1 follow-up: {@code getErrorReflectsLateFailureOnlyAfterJoin}
+     * above only proves {@code cleanupFeeder}'s own join contract — it does not touch
+     * {@code transformViaCallbacks}'s (now {@link NativeLib#selectTransformResult}'s) ordering of
+     * "join, then read {@code getError()}". This test drives {@code selectTransformResult}
+     * itself: a read callback blocks (models an in-flight {@code cb.invoke}) and is only released
+     * from a background thread strictly after the call under test has begun, so the feeder is
+     * guaranteed still running — and its error not yet recorded — at the moment
+     * {@code selectTransformResult} is invoked.
+     *
+     * <p>If {@code selectTransformResult} ever read {@code getError()} before joining the feeder
+     * (i.e. reintroduced the exact round-12 #1 bug inside the extracted method), this test would
+     * observe a frozen {@code success:true} envelope decided before the late failure was recorded
+     * — this assertion is what would catch that regression.</p>
+     */
+    @Test
+    void selectTransformResultObservesLateFailureOnlyAfterJoin() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        InputStreamSession inputSession = new InputStreamSession("application/json", null);
+        long inputHandle = inputSession.register();
+        NativeLib.InputCallbackFeeder feeder = new NativeLib.InputCallbackFeeder(0L, 0L, inputSession) {
+            @Override
+            int readChunk(byte[] dest, int max) {
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return max + 1; // one past the buffer: recorded as a feeder error once this returns
+            }
+        };
+        Thread t = new Thread(feeder, "dw-select-result-test");
+        t.setDaemon(true);
+        t.start();
+
+        // Release the blocked callback ~100ms from now, on a separate thread, so the call under
+        // test below begins while the feeder is still guaranteed to be blocked (no error
+        // recorded yet). A correct implementation's join (inside cleanupFeeder) then waits for
+        // this release before reading getError(); a buggy re-ordering would read getError() -- and
+        // freeze the (wrong) success decision -- immediately, before the release even fires.
+        Thread releaser = new Thread(() -> {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException ignored) {
+            }
+            release.countDown();
+        });
+        releaser.setDaemon(true);
+        releaser.start();
+
+        StreamSession outputSession = new StreamSession(
+                new ByteArrayInputStream(new byte[0]), "application/json", "UTF-8", false);
+
+        String resultJson = NativeLib.selectTransformResult(feeder, t, inputHandle, outputSession);
+
+        assertFalse(t.isAlive());
+        assertTrue(resultJson.contains("\"success\":false"),
+                "selectTransformResult must observe the feeder's late failure, was: " + resultJson);
     }
 }

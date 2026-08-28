@@ -159,29 +159,12 @@ public class NativeLib {
                 session.closeStream();
             }
 
-            // Stop and JOIN the feeder BEFORE reading its terminal error: an in-flight read
-            // callback that fails *after* output reached EOF sets feederError only once it
-            // returns, so we must wait for run() to finish or a late failure would be missed and
-            // success returned. cleanupFeeder cancels, closes the input session (unblocking a
-            // feeder parked on pipe backpressure so the join cannot hang), and joins. If it
-            // stopped on a read-callback contract violation (out-of-range length), the input was
-            // truncated — surface that as an error rather than presenting a success envelope
-            // built on partial input. The engine usually errors first via session.isError(); this
-            // catches the case where it tolerated the truncated input.
-            cleanupFeeder(feederRunnable, feeder, inputHandle);
+            // Join the feeder and select the success/error envelope. Delegated to a helper that
+            // returns a plain String (rather than inlined here) so a JVM unit test can assert the
+            // join-before-getError() ordering directly against the exact production code path.
+            String resultJson = selectTransformResult(feederRunnable, feeder, inputHandle, session);
             cleaned = true;
-
-            String feederError = feederRunnable.getError();
-            if (feederError != null) {
-                return toUnmanagedCString("{\"success\":false,\"error\":\""
-                        + escapeJsonString(feederError) + "\"}");
-            }
-
-            return toUnmanagedCString("{\"success\":true"
-                    + ",\"mimeType\":\"" + session.getMimeType() + "\""
-                    + ",\"charset\":\"" + session.getCharset() + "\""
-                    + ",\"binary\":" + session.isBinary()
-                    + "}");
+            return toUnmanagedCString(resultJson);
         } catch (Exception e) {
             // No Java exception may escape this @CEntryPoint: convert to an error envelope.
             String m = e.getMessage();
@@ -198,6 +181,44 @@ public class NativeLib {
                 cleanupFeeder(feederRunnable, feeder, inputHandle);
             }
         }
+    }
+
+    /**
+     * Joins the input feeder — via {@link #cleanupFeeder} — and only <em>then</em> reads its
+     * terminal error, returning the {@code success:false} envelope if it failed or the
+     * {@code success:true} envelope built from {@code outputSession} otherwise.
+     *
+     * <p><strong>Ordering is the entire point of this method:</strong> an in-flight read
+     * callback that fails <em>after</em> output reached EOF sets {@link InputCallbackFeeder}'s
+     * terminal error only once it returns, so {@link InputCallbackFeeder#getError()} must not be
+     * read until {@code cleanupFeeder} has cancelled, unblocked (by closing the input session),
+     * and joined the feeder thread to completion — otherwise a late failure is missed and
+     * {@code success:true} is returned over truncated input. The engine usually errors first via
+     * {@code StreamSession.isError()} (checked by the caller before this method runs); this
+     * covers the case where it tolerated the truncated input instead.</p>
+     *
+     * <p>Package-private (rather than folded inline into {@link #transformViaCallbacks}) so a JVM
+     * unit test can assert the join-then-read ordering against this exact code path:
+     * {@code transformViaCallbacks} itself returns a GraalVM {@code CCharPointer}, which cannot be
+     * exercised from a hosted JVM, but this method returns a plain {@link String}. A test driving
+     * an in-flight failing read callback through this method would observe {@code success:true}
+     * instead of the feeder's error if {@code getError()} were ever read before the join — the
+     * exact regression this method's ordering prevents.</p>
+     */
+    static String selectTransformResult(InputCallbackFeeder feederRunnable, Thread feeder,
+                                         long inputHandle, StreamSession outputSession) {
+        cleanupFeeder(feederRunnable, feeder, inputHandle);
+
+        String feederError = feederRunnable.getError();
+        if (feederError != null) {
+            return "{\"success\":false,\"error\":\"" + escapeJsonString(feederError) + "\"}";
+        }
+
+        return "{\"success\":true"
+                + ",\"mimeType\":\"" + outputSession.getMimeType() + "\""
+                + ",\"charset\":\"" + outputSession.getCharset() + "\""
+                + ",\"binary\":" + outputSession.isBinary()
+                + "}";
     }
 
     /**
