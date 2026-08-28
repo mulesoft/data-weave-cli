@@ -204,11 +204,15 @@ source, credentials, and local paths are not exposed. Set
 `DATAWEAVE_RESOLVER_DEBUG=1` only in a trusted debugging environment to include
 the exception type, message, and traceback.
 
-Each initialized explicit Python `DataWeave` instance owns a dedicated Graal
-isolate. Its first resolver-backed run installs that instance's resolver; later
-runs reuse it. The instance retains the resolver callback until successful
-isolate teardown, then releases callback references during `cleanup()`.
-Different live instances can therefore use different resolvers.
+There is a single process-wide GraalVM isolate, reference-counted by the
+number of live engines across all `DataWeave` instances; it is created on the
+first engine and torn down when the last one is released (with a retryable
+teardown fallback if that final teardown fails). Each `DataWeave` instance
+owns its own handle-addressed engine within that shared isolate. Its first
+resolver-backed run installs that instance's resolver; later runs reuse it.
+The instance retains the resolver callback until its engine is destroyed,
+then releases callback references during `cleanup()`. Different live
+instances can therefore use different resolvers.
 
 ### Custom module resolution scope
 

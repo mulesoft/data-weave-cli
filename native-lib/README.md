@@ -22,13 +22,28 @@ The main purpose is to allow non-JVM consumers (most notably the Python package 
 │  ┌────────────────────────────────────────┐ │
 │  │  Native Shared Library (dwlib)         │ │
 │  │  ┌──────────────────────────────────┐  │ │
-│  │  │  GraalVM Isolate                 │  │ │
-│  │  │  - NativeLib.run_script()        │  │ │
+│  │  │  GraalVM Isolate (process-wide)  │  │ │
+│  │  │  - create_engine /                │  │ │
+│  │  │    create_engine_with_resolver    │  │ │
+│  │  │  - run_script_engine /            │  │ │
+│  │  │    run_script_callback_engine /   │  │ │
+│  │  │    run_script_input_output_       │  │ │
+│  │  │    callback_engine                │  │ │
+│  │  │  - destroy_engine                 │  │ │
 │  │  │  - DataWeave script execution    │  │ │
 │  │  └──────────────────────────────────┘  │ │
 │  └────────────────────────────────────────┘ │
 └─────────────────────────────────────────────┘
 ```
+
+Each engine is a handle-addressed object created with `create_engine` (or
+`create_engine_with_resolver`, which additionally registers a module-resolve
+callback) and run via `run_script_engine`, `run_script_callback_engine`, or
+`run_script_input_output_callback_engine`, then released with
+`destroy_engine`. The underlying GraalVM isolate is a single process-wide
+isolate, created and attached via `graal_create_isolate` / `graal_attach_thread`
+on first use and torn down via `graal_tear_down_isolate` once the last engine
+across the process has been destroyed.
 
 ## Building with Gradle
 
