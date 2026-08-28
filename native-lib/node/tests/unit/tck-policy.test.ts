@@ -95,6 +95,27 @@ describe("TCK ignore policy", () => {
       "expected 193 structurally skipped cases, discovered 194",
     ]);
   });
+
+  const EXEC_FAILURE_TABLE = [
+    ["core-modules/multipart-mixed-message-out.multipart:out.multipart", "Multipart Object has empty `parts`"],
+    ["core-modules/multipart-write-message-out.multipart:out.multipart", "Multipart Object has empty `parts`"],
+    ["core-modules/multipart-write-subtype-override-out.multipart:out.multipart", "Multipart Object has empty `parts`"],
+    ["runtime/access_raw_value-out.json:out.json", "Cannot coerce Null to String"],
+    ["runtime/read-concat-out.json:out.json", "Cannot coerce Null to String"],
+    ["runtime/update-op-out.dwl:out.dwl", "Cannot coerce Null (null) to Number"],
+  ] as const;
+
+  it("has exactly the expected 6 execution-failure scenario identifiers", () => {
+    expect(Object.keys(EXPECTED_EXECUTION_FAILURES)).toEqual(EXEC_FAILURE_TABLE.map(([scenarioId]) => scenarioId));
+  });
+
+  it.each(EXEC_FAILURE_TABLE)("classifies %s as a strict expected execution failure", (scenarioId, errorMatch) => {
+    expect(EXPECTED_EXECUTION_FAILURES).toHaveProperty([scenarioId]);
+    expect(EXPECTED_EXECUTION_FAILURES[scenarioId].errorMatch).toBe(errorMatch);
+    const caseId = scenarioId.slice(0, scenarioId.lastIndexOf(":"));
+    expect(CAPABILITY_EXCLUSIONS).not.toHaveProperty([caseId]);
+    expect(ACCEPTED_BASELINE_MISMATCHES).not.toHaveProperty([scenarioId]);
+  });
 });
 
 describe("TCK structural-module policy", () => {
