@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { resolveAddonPath } from "../../src/addon-path";
 import * as ffi from "../../src/ffi";
 import { DataWeave } from "../../src/dataweave";
@@ -22,8 +23,8 @@ const mockedInitialize = vi.mocked(ffi.initialize);
 describe("DataWeave addon path resolution", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedResolveAddonPath.mockReturnValue("/opt/plat/dwlib_addon.node");
-    mockedExistsSync.mockImplementation((path) => String(path) === "/opt/plat/dwlib.so");
+    mockedResolveAddonPath.mockReturnValue(join("/opt/plat", "dwlib_addon.node"));
+    mockedExistsSync.mockImplementation((path) => String(path) === join("/opt/plat", "dwlib.so"));
   });
 
   it("uses platform-package addon and library artifacts together", () => {
@@ -33,8 +34,8 @@ describe("DataWeave addon path resolution", () => {
 
     expect(mockedResolveAddonPath).toHaveBeenCalledOnce();
     expect(mockedInitialize).toHaveBeenCalledWith(
-      "/opt/plat/dwlib.so",
-      "/opt/plat/dwlib_addon.node"
+      join("/opt/plat", "dwlib.so"),
+      join("/opt/plat", "dwlib_addon.node")
     );
   });
 
@@ -46,7 +47,7 @@ describe("DataWeave addon path resolution", () => {
     expect(mockedResolveAddonPath).toHaveBeenCalledOnce();
     expect(mockedInitialize).toHaveBeenCalledWith(
       "/custom/dwlib.so",
-      "/opt/plat/dwlib_addon.node"
+      join("/opt/plat", "dwlib_addon.node")
     );
   });
 });

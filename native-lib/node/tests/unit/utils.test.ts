@@ -121,13 +121,15 @@ describe("findLibrary", () => {
 
   it("returns the DATAWEAVE_NATIVE_LIB path when it exists", () => {
     process.env.DATAWEAVE_NATIVE_LIB = "/custom/dwlib.dylib";
-    mockedExistsSync.mockImplementation((p) => p === "/custom/dwlib.dylib");
+    mockedExistsSync.mockImplementation((p) => String(p) === "/custom/dwlib.dylib");
     expect(findLibrary()).toBe("/custom/dwlib.dylib");
   });
 
   it("prefers dwlib next to a resolved addon path", () => {
-    mockedExistsSync.mockImplementation((p) => String(p) === "/opt/plat/dwlib.so");
-    expect(findLibrary("/opt/plat/dwlib_addon.node")).toBe("/opt/plat/dwlib.so");
+    const { join } = require("node:path") as typeof import("node:path");
+    const expected = join("/opt/plat", "dwlib.so");
+    mockedExistsSync.mockImplementation((p) => String(p) === expected);
+    expect(findLibrary(join("/opt/plat", "dwlib_addon.node"))).toBe(expected);
   });
 
   it("ignores the env var when the path does not exist and falls through", () => {
