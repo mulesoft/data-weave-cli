@@ -104,80 +104,146 @@ public class NativeLib {
             NativeCallbacks.ReadCallback readCallback, NativeCallbacks.WriteCallback writeCallback,
             PointerBase ctx) {
 
-        // Create a piped input stream session for the callback-supplied input
-        InputStreamSession inputSession = new InputStreamSession(inMime, inCharset);
-        long inputHandle = inputSession.register();
-
-        // Merge the stream handle into the inputs JSON
-        String streamEntry = "{\"streamHandle\":\"" + inputHandle + "\",\"mimeType\":\"" + inMime + "\""
-                + (inCharset != null ? ",\"charset\":\"" + inCharset + "\"" : "") + "}";
-        String mergedInputs = mergeInputEntry(inputs, inName, streamEntry);
-
-        // Start a background thread that calls the readCallback and feeds data into the pipe.
-        // Word types (CCharPointer, CFunctionPointer, PointerBase) cannot be captured in
-        // lambdas in GraalVM Native Image, so we use an explicit Runnable that stores their
-        // raw addresses and reconstitutes them via WordFactory.
-        final long readCallbackAddr = readCallback.rawValue();
-        final long ctxAddr = ctx.rawValue();
-        InputCallbackFeeder feederRunnable = new InputCallbackFeeder(
-                readCallbackAddr, ctxAddr, inputSession);
-        Thread feeder = new Thread(feederRunnable, "dw-input-callback-feeder");
-        feeder.setDaemon(true);
-        feeder.start();
-
-        // Execute the script and stream output via the writeCallback
-        StreamSession session = runtime.runStreaming(dwScript, mergedInputs);
-
-        if (session.isError()) {
-            cleanupFeeder(feederRunnable, feeder, inputHandle);
-            return toUnmanagedCString("{\"success\":false,\"error\":\""
-                    + escapeJsonString(session.getError()) + "\"}");
+        // Register the input session and merge its stream-handle entry into the inputs JSON.
+        // This setup can throw on a malformed `inputs` string; setUpInputSession closes the
+        // handle and yields an error envelope in that case, so nothing leaks and no exception
+        // escapes this @CEntryPoint before the feeder is even started.
+        InputSetup setup = setUpInputSession(inputs, inName, inMime, inCharset);
+        if (setup.errorEnvelope != null) {
+            return toUnmanagedCString(setup.errorEnvelope);
         }
+        long inputHandle = setup.handle;
 
+        InputCallbackFeeder feederRunnable = null;
+        Thread feeder = null;
         try {
-            byte[] buf = new byte[CALLBACK_BUFFER_SIZE];
-            CCharPointer writeBuf = UnmanagedMemory.malloc(CALLBACK_BUFFER_SIZE);
+            // Start a background thread that calls the readCallback and feeds data into the pipe.
+            // Word types (CCharPointer, CFunctionPointer, PointerBase) cannot be captured in
+            // lambdas in GraalVM Native Image, so we use an explicit Runnable that stores their
+            // raw addresses and reconstitutes them via WordFactory.
+            final long readCallbackAddr = readCallback.rawValue();
+            final long ctxAddr = ctx.rawValue();
+            feederRunnable = new InputCallbackFeeder(readCallbackAddr, ctxAddr, setup.session);
+            feeder = new Thread(feederRunnable, "dw-input-callback-feeder");
+            feeder.setDaemon(true);
+            feeder.start();
+
+            // Execute the script and stream output via the writeCallback
+            StreamSession session = runtime.runStreaming(dwScript, setup.mergedInputs);
+
+            if (session.isError()) {
+                return toUnmanagedCString("{\"success\":false,\"error\":\""
+                        + escapeJsonString(session.getError()) + "\"}");
+            }
+
             try {
-                int n;
-                while ((n = session.read(buf, buf.length)) > 0) {
-                    for (int i = 0; i < n; i++) {
-                        writeBuf.write(i, buf[i]);
+                byte[] buf = new byte[CALLBACK_BUFFER_SIZE];
+                CCharPointer writeBuf = UnmanagedMemory.malloc(CALLBACK_BUFFER_SIZE);
+                try {
+                    int n;
+                    while ((n = session.read(buf, buf.length)) > 0) {
+                        for (int i = 0; i < n; i++) {
+                            writeBuf.write(i, buf[i]);
+                        }
+                        int rc = writeCallback.invoke(ctx, writeBuf, n);
+                        if (rc != 0) {
+                            return toUnmanagedCString("{\"success\":false,\"error\":\""
+                                    + "Write callback returned error: " + rc + "\"}");
+                        }
                     }
-                    int rc = writeCallback.invoke(ctx, writeBuf, n);
-                    if (rc != 0) {
-                        cleanupFeeder(feederRunnable, feeder, inputHandle);
-                        return toUnmanagedCString("{\"success\":false,\"error\":\""
-                                + "Write callback returned error: " + rc + "\"}");
-                    }
+                } finally {
+                    UnmanagedMemory.free(writeBuf);
                 }
             } finally {
-                UnmanagedMemory.free(writeBuf);
+                session.closeStream();
             }
-        } catch (IOException e) {
-            cleanupFeeder(feederRunnable, feeder, inputHandle);
+
+            return toUnmanagedCString("{\"success\":true"
+                    + ",\"mimeType\":\"" + session.getMimeType() + "\""
+                    + ",\"charset\":\"" + session.getCharset() + "\""
+                    + ",\"binary\":" + session.isBinary()
+                    + "}");
+        } catch (Exception e) {
+            // No Java exception may escape this @CEntryPoint: convert to an error envelope.
+            String m = e.getMessage();
+            if (m == null || m.trim().isEmpty()) {
+                m = e.toString();
+            }
             return toUnmanagedCString("{\"success\":false,\"error\":\""
-                    + escapeJsonString(e.getMessage()) + "\"}");
+                    + escapeJsonString(m) + "\"}");
         } finally {
-            session.closeStream();
+            // Sole close of the input handle for every path once the feeder region is entered.
+            // Safe (and a no-op cancel/join) when the feeder never started.
+            cleanupFeeder(feederRunnable, feeder, inputHandle);
         }
+    }
 
-        cleanupFeeder(feederRunnable, feeder, inputHandle);
+    /**
+     * Registers a new {@link InputStreamSession} for the callback-supplied input and merges its
+     * stream-handle entry into {@code inputs}.
+     *
+     * <p>Package-private (rather than {@code private}) so a JVM unit test can drive this
+     * leak-prone setup region directly: {@link #transformViaCallbacks} itself takes GraalVM
+     * {@code Word}-typed callbacks and returns a {@code CCharPointer}, neither of which resolves in
+     * a hosted JVM. This helper uses only plain-Java types.</p>
+     *
+     * <p>On success, {@link InputSetup#errorEnvelope} is {@code null}, {@link InputSetup#session}
+     * and {@link InputSetup#mergedInputs} are populated, and the session is left registered and
+     * open for the feeder — its handle must ultimately be closed via {@link #cleanupFeeder}. On a
+     * malformed {@code inputs} string the handle is already closed and
+     * {@link InputSetup#errorEnvelope} carries the {@code success:false} payload to return
+     * verbatim, so nothing leaks and no {@code JSONException} escapes.</p>
+     */
+    static InputSetup setUpInputSession(String inputs, String inName, String inMime, String inCharset) {
+        InputStreamSession inputSession = new InputStreamSession(inMime, inCharset);
+        long inputHandle = inputSession.register();
+        try {
+            org.json.JSONObject streamEntry = new org.json.JSONObject();
+            streamEntry.put("streamHandle", Long.toString(inputHandle));
+            streamEntry.put("mimeType", inMime);
+            if (inCharset != null) {
+                streamEntry.put("charset", inCharset);
+            }
+            String mergedInputs = mergeInputEntry(inputs, inName, streamEntry);
+            return new InputSetup(inputSession, inputHandle, mergedInputs, null);
+        } catch (Exception e) {
+            InputStreamSession.close(inputHandle);
+            String m = e.getMessage();
+            if (m == null || m.trim().isEmpty()) {
+                m = e.toString();
+            }
+            return new InputSetup(null, inputHandle, null,
+                    "{\"success\":false,\"error\":\"" + escapeJsonString(m) + "\"}");
+        }
+    }
 
-        return toUnmanagedCString("{\"success\":true"
-                + ",\"mimeType\":\"" + session.getMimeType() + "\""
-                + ",\"charset\":\"" + session.getCharset() + "\""
-                + ",\"binary\":" + session.isBinary()
-                + "}");
+    /**
+     * Outcome of {@link #setUpInputSession}: either a live registered session plus its merged
+     * inputs ({@link #errorEnvelope} {@code null}), or a {@code success:false} error envelope with
+     * the handle already closed ({@link #session}/{@link #mergedInputs} {@code null}).
+     */
+    static final class InputSetup {
+        final InputStreamSession session;
+        final long handle;
+        final String mergedInputs;
+        final String errorEnvelope;
+
+        InputSetup(InputStreamSession session, long handle, String mergedInputs, String errorEnvelope) {
+            this.session = session;
+            this.handle = handle;
+            this.mergedInputs = mergedInputs;
+            this.errorEnvelope = errorEnvelope;
+        }
     }
 
     /**
      * Merges a single input entry into an existing JSON inputs string.
      */
-    private static String mergeInputEntry(String existingJson, String name, String entryJson) {
+    private static String mergeInputEntry(String existingJson, String name, org.json.JSONObject entry) {
         org.json.JSONObject obj = (existingJson == null || existingJson.trim().isEmpty())
                 ? new org.json.JSONObject()
                 : new org.json.JSONObject(existingJson);
-        obj.put(name, new org.json.JSONObject(entryJson));
+        obj.put(name, entry);
         return obj.toString();
     }
 
@@ -209,6 +275,11 @@ public class NativeLib {
      *       interrupt and keep waiting.</li>
      * </ol>
      *
+     * <p><strong>Null-safety:</strong> when the feeder never started — a setup failure threw
+     * before {@code feeder.start()} — {@code feederRunnable} and/or {@code thread} may be
+     * {@code null}. The cancel and join are then no-ops, but the input handle is <em>always</em>
+     * closed so a failed setup cannot leak the session.</p>
+     *
      * <p><strong>Documented trade-off:</strong> cancellation guarantees we wait only for the
      * <em>in-flight</em> {@code readCallback} to return — no signal can interrupt native code
      * parked inside the caller's callback. A callback that blocks <em>forever</em> inside a single
@@ -217,9 +288,15 @@ public class NativeLib {
      * use-after-free this method exists to prevent.</p>
      */
     static void cleanupFeeder(InputCallbackFeeder feederRunnable, Thread thread, long inputHandle) {
-        feederRunnable.cancel();
-        // Unblock a feeder parked on a full pipe and drop the session from the registry.
+        if (feederRunnable != null) {
+            feederRunnable.cancel();
+        }
+        // Always drop the session from the registry (and unblock a feeder parked on a full pipe).
+        // This runs even when the feeder never started, so the input handle is never leaked.
         InputStreamSession.close(inputHandle);
+        if (thread == null) {
+            return;
+        }
         boolean joined = false;
         while (!joined) {
             try {

@@ -2,6 +2,8 @@ package org.mule.weave.lib;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -94,5 +96,53 @@ class NativeLibFeederTest {
 
         System.out.printf("cleanupFeeder returned after %d ms; invocations=%d, alive=%b%n",
                 elapsedMs, invocations.get(), thread.isAlive());
+    }
+
+    /**
+     * Leak + exception-escape guard for the {@code transformViaCallbacks} setup region
+     * (review #11 #1, High): a malformed {@code inputs} JSON string must not leak the registered
+     * {@link InputStreamSession} handle and must not let the {@link org.json.JSONException} escape
+     * the {@code @CEntryPoint}. It must instead resolve to a {@code success:false} envelope with the
+     * handle already closed.
+     *
+     * <p>Driven through the package-private {@link NativeLib#setUpInputSession} seam because
+     * {@code transformViaCallbacks} itself takes GraalVM {@code Word}-typed callbacks and returns a
+     * {@code CCharPointer}, neither of which resolves in a hosted JVM.</p>
+     */
+    @Test
+    void setUpInputSessionMalformedInputsReturnsErrorEnvelopeAndClosesHandle() {
+        NativeLib.InputSetup setup =
+                NativeLib.setUpInputSession("{not json", "payload", "application/json", "UTF-8");
+
+        assertNotNull(setup.errorEnvelope, "malformed inputs must yield an error envelope");
+        assertTrue(setup.errorEnvelope.contains("\"success\":false"),
+                "envelope must be success:false, was: " + setup.errorEnvelope);
+        assertNull(setup.mergedInputs, "no merged inputs on the error path");
+        assertNull(InputStreamSession.get(setup.handle),
+                "input session handle leaked after malformed inputs");
+    }
+
+    /**
+     * Happy-path guard: valid {@code inputs} register the session, merge the stream-handle entry
+     * structurally, and leave the handle live for the feeder (no behavior change). The caller
+     * (via {@code cleanupFeeder}) is responsible for the eventual close.
+     */
+    @Test
+    void setUpInputSessionValidInputsMergesEntryAndKeepsHandleLive() {
+        NativeLib.InputSetup setup = NativeLib.setUpInputSession(
+                "{\"other\":{\"x\":1}}", "payload", "application/json", "UTF-8");
+
+        assertNull(setup.errorEnvelope, "valid inputs must not produce an error envelope");
+        assertNotNull(setup.mergedInputs, "valid inputs must produce merged inputs");
+        assertTrue(setup.mergedInputs.contains("streamHandle"),
+                "merged inputs must carry the stream handle entry, was: " + setup.mergedInputs);
+        assertTrue(setup.mergedInputs.contains("payload"),
+                "merged inputs must carry the input binding name, was: " + setup.mergedInputs);
+        assertNotNull(InputStreamSession.get(setup.handle),
+                "session must remain live for the feeder on the success path");
+
+        // Clean up the still-live session so the test leaves no handle behind.
+        InputStreamSession.close(setup.handle);
+        assertNull(InputStreamSession.get(setup.handle));
     }
 }
