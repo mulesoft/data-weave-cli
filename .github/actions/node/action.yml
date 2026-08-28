@@ -52,10 +52,11 @@ runs:
 
     - name: Run Node.js TCK Conformance
       if: always() && inputs.run-tck == 'true'
-      # This is the dedicated (master-only) TCK lane. The corpus is staged
-      # earlier in the job (native-lib:stageTckSuites). Set the require-corpus
-      # flag so a missing/empty staged corpus fails this job loudly instead of
-      # skipping silently (review #10 #7); local dev without the flag still skips.
+      # This is the dedicated (master-only) TCK lane. The corpus is staged once
+      # by the shared TCK staging step earlier in the job (see main.yml). Set the
+      # require-corpus flag so a missing/empty staged corpus fails this job loudly
+      # instead of skipping silently (review #10 #7); local dev without the flag
+      # still skips.
       env:
         DATAWEAVE_TCK_REQUIRE_CORPUS: '1'
       run: |
