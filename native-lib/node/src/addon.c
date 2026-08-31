@@ -732,7 +732,13 @@ static void init_thread_fn(void* arg) {
   uv_dlsym(&g_lib, "run_script_callback_engine", (void**)&fn_run_script_callback_engine);
   uv_dlsym(&g_lib, "run_script_input_output_callback_engine", (void**)&fn_run_script_input_output_callback_engine);
 
-  if (!fn_create_isolate || !fn_free_cstring) {
+  // graal_detach_thread and graal_tear_down_isolate are required, not optional:
+  // the bootstrap-detach failure path below (review #20 #1) tears the isolate
+  // down with boot_thread on a failed detach, and its guard short-circuits when
+  // these pointers are NULL. Gating them here makes that guard's guarantee
+  // unconditional -- a dwlib missing them fails init fast with a clear message
+  // instead of publishing an isolate whose bootstrap thread was never detached.
+  if (!fn_create_isolate || !fn_free_cstring || !fn_detach_thread || !fn_tear_down_isolate) {
     snprintf(args->error, sizeof(args->error), "Missing required symbols in library");
     args->result = -2;
     return;
