@@ -162,8 +162,8 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     // `cleanupPromise` coalescing check, a second overlapping call would see
     // state already left "ready" and resolve immediately -- never actually
     // awaiting the first call's in-flight native teardown. That would
-    // contradict cleanup()'s documented contract ("resolves once the
-    // underlying native isolate has actually finished tearing down") and
+    // contradict cleanup()'s documented contract ("resolves once that
+    // [teardown] attempt completes") and
     // silently regress round-4's coalescing timing. This test asserts the
     // second call's promise has NOT settled while ffi.cleanup() is still
     // pending, by racing it against a marker that only resolves after

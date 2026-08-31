@@ -505,8 +505,11 @@ try {
 } finally {
   // cleanup() returns a Promise; await it. When this releases the FINAL shared
   // native reference in the process, it drains any in-flight streaming/transform
-  // op and completes isolate teardown before resolving (so a subsequent
-  // initialize() does not race a still-tearing-down isolate). When other
+  // op, attempts isolate teardown, and resolves once that attempt completes --
+  // guaranteeing logical release, not necessarily physical reclamation: an
+  // ordinary teardown failure retains the live isolate and retries where safe,
+  // and an unrecoverable teardown-plus-detach double failure intentionally
+  // leaks it until process exit (with a diagnostic on stderr). When other
   // initialized instances remain, it resolves as soon as this instance is
   // released, leaving the shared isolate live for them.
   await dw.cleanup();

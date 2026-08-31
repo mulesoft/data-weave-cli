@@ -143,14 +143,19 @@ export class DataWeave {
    * cleanup the instance can be re-initialized via {@link DataWeave.initialize}.
    *
    * Resolution depends on whether this call releases the FINAL shared native
-   * reference in the process. When it does, it resolves once the underlying
-   * native isolate has actually finished tearing down; if a streaming/transform
-   * operation on this or any other instance is still in flight at that point,
-   * native teardown waits for it to drain before resolving — awaiting this
-   * rather than firing-and-forgetting avoids racing a subsequent
-   * {@link initialize} against an isolate that is still tearing down. When other
-   * initialized instances remain, it resolves as soon as this instance's engine
-   * is released, leaving the shared isolate live for them.
+   * reference in the process. When it does, it first drains any in-flight
+   * streaming/transform operation on this or any other instance, then attempts
+   * isolate teardown and resolves once that attempt completes. The promise thus
+   * guarantees logical release and that teardown was attempted — not
+   * necessarily physical reclamation of the isolate: an ordinary teardown
+   * failure retains the live isolate and is retried where safe (at a later
+   * initialization or async op-completion drain), and an unrecoverable
+   * teardown-plus-detach double failure intentionally leaks the isolate until
+   * process exit (with a diagnostic on stderr). Awaiting this rather than
+   * firing-and-forgetting lets the drain complete before a subsequent
+   * {@link initialize}. When other initialized instances remain, it resolves as
+   * soon as this instance's engine is released, leaving the shared isolate live
+   * for them.
    */
   async cleanup(): Promise<void> {
     // Coalesce first: doCleanup() flips `state` to "cleaning-up" synchronously
@@ -158,8 +163,9 @@ export class DataWeave {
     // `state` has already left "ready". If the not-ready guard below ran
     // first, that second caller would resolve immediately instead of
     // awaiting the first caller's in-flight native teardown -- contradicting
-    // this method's contract of resolving only once the isolate has actually
-    // finished tearing down (round-6 review, task-1 fix round 1). Checking
+    // this method's contract of resolving only once the in-flight native
+    // teardown attempt has completed (round-6 review, task-1 fix round 1).
+    // Checking
     // `cleanupPromise` first ensures every concurrent caller that overlaps
     // with an in-flight doCleanup() awaits that SAME promise, so the native
     // teardown (ffi.destroyEngine/ffi.cleanup) still happens exactly once.
