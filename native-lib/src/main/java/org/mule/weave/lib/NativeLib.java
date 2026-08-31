@@ -475,8 +475,20 @@ public class NativeLib {
                     if (n > CALLBACK_BUFFER_SIZE || n < -1) {
                         n = rejectOutOfRange(n, CALLBACK_BUFFER_SIZE);
                     }
-                    if (n <= 0) {
-                        break; // 0 = EOF, negative = error
+                    if (n == 0) {
+                        break; // clean EOF
+                    }
+                    if (n < 0) {
+                        // n == -1: the read callback signalled an input error (the documented
+                        // error code, produced e.g. when a Python read callback raises). Record a
+                        // terminal feeder error so complete-but-then-failed input can never be
+                        // reported as success:true. rejectOutOfRange already set a more specific
+                        // message for out-of-range values funnelled to -1, so only fill in the
+                        // generic error when none was recorded.
+                        if (feederError == null) {
+                            feederError = "Input read callback signalled an error (returned -1)";
+                        }
+                        break;
                     }
                     // Check AFTER the callback returns and BEFORE re-invoking / writing: once
                     // cancelled, a slow-but-returning in-flight callback must not be re-entered

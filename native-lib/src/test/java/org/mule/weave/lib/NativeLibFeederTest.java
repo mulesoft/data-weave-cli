@@ -269,6 +269,40 @@ class NativeLibFeederTest {
         assertNull(ref.get().getError(), "clean EOF must leave getError() == null");
     }
 
+    /**
+     * A read callback that supplies a complete chunk and then returns {@code -1} (the documented
+     * input-error code) must be recorded as a terminal feeder error, NOT treated as a clean EOF.
+     * Otherwise DataWeave can parse the already-supplied input and the transform reports
+     * success:true, silently converting an input failure into success (review #16 #1).
+     */
+    @Test
+    void readCallbackErrorMinusOneAfterCompleteInputIsRecordedAsFeederError() throws Exception {
+        AtomicReference<NativeLib.InputCallbackFeeder> ref = new AtomicReference<>();
+        AtomicInteger calls = new AtomicInteger(0);
+        Throwable escaped = runFeederCapturingEscapedError(new ReadChunkStub() {
+            @Override
+            public int readChunk(byte[] dest, int max) {
+                // First read supplies a complete, syntactically valid input; the second signals -1.
+                if (calls.getAndIncrement() == 0) {
+                    dest[0] = '{';
+                    dest[1] = '}';
+                    return 2;
+                }
+                return -1; // documented input-error code (in range, so rejectOutOfRange won't fire)
+            }
+
+            @Override
+            public void setFeeder(NativeLib.InputCallbackFeeder feeder) {
+                ref.set(feeder);
+            }
+        });
+
+        assertNull(escaped, "no exception may escape run() on a -1 read: " + escaped);
+        assertEquals(2, calls.get(), "feeder must stop after the -1 read");
+        assertNotNull(ref.get().getError(),
+                "a -1 read after complete input must be recorded as a feeder error, not a clean EOF");
+    }
+
     /** Mirrors the package-private {@code CALLBACK_BUFFER_SIZE} used as the read {@code max}. */
     private static final class NativeLibFeederConstants {
         static final int BUFFER = 8 * 1024;
