@@ -206,8 +206,13 @@ the exception type, message, and traceback.
 
 There is a single process-wide GraalVM isolate, reference-counted by the
 number of live engines across all `DataWeave` instances; it is created on the
-first engine and torn down when the last one is released (with a retryable
-teardown fallback if that final teardown fails). Each `DataWeave` instance
+first engine and torn down when the last one is released. If that final
+teardown fails but the worker thread detaches cleanly, the live isolate is
+retained and teardown is retried on the next initialization; if teardown and
+detachment both fail (or the bootstrap attach path hits a detach-plus-teardown
+double failure), the isolate is unrecoverable — the binding clears its module
+state, leaks the isolate for the process lifetime, and a later initialization
+builds a fresh one. Each `DataWeave` instance
 owns its own handle-addressed engine within that shared isolate.
 Initialization binds the resolver to that engine — `DataWeave.initialize()`
 creates the engine via `create_engine_with_resolver`, so the resolver is

@@ -56,8 +56,14 @@ policy on top of the raw ABI: each maintains a single process-wide GraalVM
 isolate, reference-counted by the number of live engines across all instances.
 The isolate is created and attached on first use and torn down via
 `graal_tear_down_isolate` only after the final engine in the process has been
-released (with a retryable-teardown fallback if teardown fails). This
-ref-counting lives in the binding code, not in the dwlib engine ABI.
+released. Teardown failure has two contracts: an **ordinary** failure (teardown
+fails but the worker thread detaches cleanly) retains the live isolate and
+retries teardown on the next initialization or engine release; a
+**teardown-plus-detach double failure** (or a bootstrap detach-plus-teardown
+double failure) is treated as **unrecoverable** — the binding resets its
+published state, deliberately leaks the isolate for the process lifetime, and
+lets a future initialization build a fresh isolate. This ref-counting and
+teardown policy lives in the binding code, not in the dwlib engine ABI.
 
 ## Building with Gradle
 
