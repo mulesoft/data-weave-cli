@@ -765,8 +765,32 @@ static void init_thread_fn(void* arg) {
   // never will). Subsequent calls (run/streaming/transform, and cleanup) attach
   // their own OS thread on demand and detach when done. Mirrors the Go binding,
   // which likewise detaches the bootstrap thread after graal_create_isolate.
-  if (fn_detach_thread) {
-    fn_detach_thread(boot_thread);
+  //
+  // If the detach FAILS, boot_thread stays attached while this init OS thread is
+  // about to be joined and exit -- a phantom attached thread that would wedge a
+  // later graal_tear_down_isolate() forever (review #20 #1). We must not publish
+  // such a poisoned isolate. boot_thread is still valid and current here, so use
+  // it to tear the isolate down immediately and fail initialization. If teardown
+  // ALSO fails, the isolate can never be reclaimed: leak it, emit the diagnostic,
+  // and still fail without publishing. Either way we leave g_isolate == NULL so
+  // the caller's `args->result != 0` path (addon.c ~955) sees the recoverable
+  // "no isolate" state, exactly like every other init failure path.
+  if (fn_detach_thread && fn_detach_thread(boot_thread) != 0) {
+    int td_rc = fn_tear_down_isolate ? fn_tear_down_isolate(boot_thread) : -1;
+    if (td_rc != 0) {
+      fprintf(stderr,
+              "[DataWeave Node addon] bootstrap thread detach AND isolate "
+              "teardown both failed during initialize(); the isolate can never "
+              "be torn down and is being leaked for the process lifetime. "
+              "Initialization was aborted.\n");
+    }
+    g_isolate = NULL;  // preserve the "nonzero result => g_isolate == NULL" contract
+    g_thread = NULL;
+    snprintf(args->error, sizeof(args->error),
+             "graal_detach_thread failed after isolate creation; "
+             "initialization aborted to avoid a poisoned isolate");
+    args->result = -3;
+    return;
   }
   g_thread = NULL;
 
