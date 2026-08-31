@@ -3104,7 +3104,7 @@ static napi_value release_isolate_ref_locked(napi_env env) {
     }
     // Only clear global state if the isolate was actually torn down (or there
     // was nothing to tear down). If spawn failed, the thread never ran and
-    // torn_down stays 0 -- leave the globals set rather than orphaning a live
+    // result stays CLEANUP_RETAIN -- leave the globals set rather than orphaning a live
     // isolate (unreachable via these globals, could never be torn down), which
     // is a strict improvement over unconditionally clearing them here. Same
     // reasoning for cleanup_thread_fn's internal attach-failure path: the
