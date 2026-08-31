@@ -143,7 +143,12 @@ The isolate lives while any env holds an init reference. The governing invariant
 
 > **`g_ref_count` == Σ `init_refs` over all live per-env records.**
 
-`g_ref_count` is a derived total, not a bare global that any code path may drive to zero.
+`g_ref_count` is a derived total, not a bare global that any code path may drive to zero. A
+**positive** count requires a live isolate; a **zero** count normally means no isolate, but may
+temporarily retain a live one pending a teardown retry (`g_teardown_needed`, §6.2) or leave one
+leaked for the process lifetime after an unrecoverable teardown path (§6.2's teardown-plus-detach
+double failure). The count is thus proof of outstanding ownership, not proof of physical isolate
+existence — mirroring the Python invariant in §7.1.
 Reference accounting is **per `napi_env`**, tracked in a `g_mutex`-guarded linked list of
 `env_init_rec_t { napi_env env; int init_refs; next; }`:
 
@@ -227,6 +232,20 @@ live; exiting attached would leave a phantom thread that blocks later retries). 
 accepted residual: if teardown fails *and* no later `initialize()` or op ever occurs, the isolate
 lingers until process exit — benign (one process-lifetime isolate, no invariant violation), the
 deliberate tradeoff for not adding event-loop-affine async retry infrastructure to this code.
+
+**Unrecoverable teardown-plus-detach double failure.** The retry signal above covers the *ordinary*
+failure where `graal_tear_down_isolate` fails but the helper's follow-up `fn_detach_thread`
+succeeds — the isolate is left live and reachable, so arming the retry is safe. If that **detach
+itself also fails** (a teardown-plus-detach *double* failure), the exiting worker stays stuck-attached
+and the isolate can never again obtain the sole-attached, current-OS-thread IsolateThread teardown
+requires — retrying is futile and would only attach *more* stuck workers. So instead of arming the
+retry the binding treats the isolate as **unrecoverable**: it clears the published globals
+(`g_isolate`/`g_thread`/`g_initialized`/`g_ref_count`), does *not* arm `g_teardown_needed`, emits a
+stderr diagnostic, and deliberately **leaks** the old isolate for the process lifetime, letting the
+next `initialize()` build a fresh one (GraalVM allows multiple isolates per process; the stuck
+worker is bound to the leaked isolate and never impedes the new one). `napi_initialize`'s own
+build-then-teardown failure path applies the same leak-and-continue. This is the Node twin
+(review #17 #1) of the Python policy in §7.2 / §10.
 
 ### 6.3 Per-engine records, admission pinning, and deferred destroy
 
