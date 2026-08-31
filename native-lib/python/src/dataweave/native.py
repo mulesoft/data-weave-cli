@@ -132,13 +132,30 @@ def _retry_pending_teardown_locked() -> None:
     try:
         _tear_down(lib, worker)  # raises on failure -> flag stays armed
     except BaseException:
-        # Teardown failed again. Detach the fresh worker (best-effort) so it does
-        # not stay attached and block the NEXT retry, then re-raise with the flag
-        # still armed and globals not nulled.
+        # Teardown failed again. Detach the fresh worker so it does not stay
+        # attached and block the NEXT retry. graal_detach_thread returns a nonzero
+        # STATUS on failure (it does not raise), so inspect it.
+        detach_failed = False
         try:
-            lib.graal_detach_thread(worker)
+            detach_failed = lib.graal_detach_thread(worker) != 0
         except Exception:
-            pass
+            detach_failed = True
+        if detach_failed:
+            # Double failure: another retry would stack a second stuck worker and
+            # block teardown forever. Treat the isolate as UNRECOVERABLE (review
+            # #16 #2, leak-and-continue): null the globals, disarm the retry, retain
+            # no thread. A later initialize() builds a fresh isolate.
+            _lib = _lib_path = _isolate = None
+            _teardown_needed = False
+            print(
+                "DataWeave: GraalVM isolate teardown retry failed and the worker "
+                "could not be detached; the isolate is unrecoverable and is leaked "
+                "(a later initialize() will build a fresh one).",
+                file=sys.stderr,
+            )
+            raise
+        # Detach succeeded: leave the flag armed and the globals intact, and
+        # propagate so the caller does not build a second racing isolate.
         raise
     # Success: the isolate (and every thread pointer into it) is now invalid, so
     # the worker must NOT be detached.
@@ -240,18 +257,36 @@ def _release_isolate() -> None:
         try:
             _tear_down(lib, worker)
         except BaseException:
-            # Teardown failed: detach the worker we just attached FIRST (best-
-            # effort) so it does not stay attached and block a later retry, which
-            # attaches its own fresh worker. Then keep the isolate live, arm a
-            # retry, and do NOT null globals (nulling would let the next
-            # initialize() build a second live isolate). Mirrors Node's
-            # g_teardown_needed retryable model. On the SUCCESS path below the
-            # worker is intentionally left undetached -- after _tear_down returns
-            # the isolate is gone and the worker pointer is invalid.
+            # Teardown failed. Detach the worker we just attached so it does not
+            # stay attached and block a later retry. graal_detach_thread returns a
+            # nonzero STATUS on failure (it does not raise), so inspect it: a
+            # still-attached worker permanently blocks any future teardown, which
+            # needs the SOLE attached thread.
+            detach_failed = False
             try:
-                lib.graal_detach_thread(worker)
+                detach_failed = lib.graal_detach_thread(worker) != 0
             except Exception:
-                pass
+                detach_failed = True
+            if detach_failed:
+                # Teardown AND detach both failed. Arming a retry would attach yet
+                # another worker on top of the stuck one and block teardown forever,
+                # so treat the isolate as UNRECOVERABLE (review #16 #2, leak-and-
+                # continue): null the globals, do NOT arm a retry, retain no thread.
+                # A later initialize() builds a fresh isolate. Mirrors the bootstrap
+                # double-failure policy in _acquire_isolate.
+                _lib = _lib_path = _isolate = None
+                _teardown_needed = False
+                print(
+                    "DataWeave: GraalVM isolate teardown failed and the teardown "
+                    "worker could not be detached; the isolate is unrecoverable and "
+                    "is leaked (a later initialize() will build a fresh one).",
+                    file=sys.stderr,
+                )
+                raise
+            # Detach succeeded: keep the isolate live, arm a retry, do NOT null the
+            # globals (nulling would let the next initialize() build a second, racing
+            # isolate). On the SUCCESS path below the worker is intentionally left
+            # undetached -- after _tear_down returns the isolate and worker are gone.
             _teardown_needed = True
             print(
                 "DataWeave: GraalVM isolate teardown failed; the isolate is "

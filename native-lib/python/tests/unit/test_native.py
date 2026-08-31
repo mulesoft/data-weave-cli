@@ -1109,3 +1109,72 @@ def test_concurrent_initialize_on_one_instance_creates_a_single_engine(monkeypat
 
     runtime.cleanup()
     assert native._isolate_ref_count == 0
+
+
+@pytest.mark.unit
+def test_release_teardown_and_detach_both_failing_leaks_isolate_without_arming_retry(monkeypatch):
+    """review #16 #2 (leak-and-continue): if the last-release teardown fails AND
+    detaching the just-attached worker also fails, re-arming a retry would attach
+    yet another worker on top of the stuck one and permanently block teardown
+    (which needs the SOLE attached thread). So the isolate is treated as
+    UNRECOVERABLE: globals nulled, NO retry armed, no thread retained -- a later
+    initialize() builds a fresh isolate. Mirrors the bootstrap double-failure policy."""
+    monkeypatch.setattr(native, "_teardown_needed", False)  # restored after the test regardless
+    library = FakeLibrary()  # bootstrap detach succeeds (default) so acquire publishes cleanly
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    lib, isolate = native._acquire_isolate("/tmp/dwlib")
+
+    # Now make the last-release teardown fail AND the subsequent detach fail.
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 1)
+    library.graal_detach_thread = CallableFunction(lambda _thread: 1)  # nonzero == failed detach
+
+    with pytest.raises(native.DataWeaveError):
+        native._release_isolate()  # last release -> teardown fails -> detach fails -> leak
+
+    # Leaked: globals nulled, NO retry armed (the crux of #16 #2), refcount at 0.
+    assert native._isolate is None
+    assert native._lib is None
+    assert native._isolate_ref_count == 0
+    assert native._teardown_needed is False
+
+    # The module is NOT wedged: a healthy library builds a fresh isolate.
+    healthy = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: healthy)
+    lib2, isolate2 = native._acquire_isolate("/tmp/dwlib")
+    assert lib2 is healthy
+    assert native._isolate is not None
+    native._release_isolate()  # clean up the fresh isolate
+
+
+@pytest.mark.unit
+def test_retry_teardown_and_detach_both_failing_leaks_isolate_without_arming_retry(monkeypatch):
+    """review #16 #2: the retry path (_retry_pending_teardown_locked) attaches a
+    fresh worker. If its teardown fails AND detaching that worker fails, arming
+    another retry would stack a second stuck worker -> permanent block. So it
+    leaks-and-continues: globals nulled, retry disarmed, no thread retained."""
+    monkeypatch.setattr(native, "_teardown_needed", False)  # restored after the test regardless
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    # Acquire cleanly, then arm a pending teardown by hand and point the retry at
+    # a library whose teardown and detach both fail.
+    lib, isolate = native._acquire_isolate("/tmp/dwlib")
+    monkeypatch.setattr(native, "_teardown_needed", True)
+    monkeypatch.setattr(native, "_isolate_ref_count", 0)
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 1)
+    library.graal_detach_thread = CallableFunction(lambda _thread: 1)
+
+    # Next acquire runs _retry_pending_teardown_locked, which double-fails.
+    with pytest.raises(native.DataWeaveError):
+        native._acquire_isolate("/tmp/dwlib")
+
+    assert native._isolate is None
+    assert native._lib is None
+    assert native._teardown_needed is False
+
+    healthy = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: healthy)
+    lib2, isolate2 = native._acquire_isolate("/tmp/dwlib")
+    assert native._isolate is not None
+    native._release_isolate()
