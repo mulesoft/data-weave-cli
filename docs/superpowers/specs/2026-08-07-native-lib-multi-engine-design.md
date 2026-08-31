@@ -617,10 +617,23 @@ dwB.cleanup()  → join workers; destroy_engine(handleB); ref 1→0 → attach f
   `_isolate` stays None; `create_engine` failure after isolate create → release the ref (tearing
   down if this call created it) and unregister any resolver token, then raise. `run`/stream after
   `cleanup()` → instance guard raises `DataWeaveError` (handle already cleared).
-- **Teardown failure (Python `graal_tear_down_isolate` returns nonzero):** surface a warning and
-  re-raise `DataWeaveError`, and clear the isolate globals (`_lib`/`_lib_path`/`_isolate` → None,
-  count already 0) so the next `initialize()` builds a fresh isolate rather than reusing one whose
-  teardown just failed.
+- **Teardown failure (Python `graal_tear_down_isolate` returns nonzero):** the
+  last-release teardown attaches a fresh worker on the releasing OS thread; if it
+  (or the attach immediately before it) fails, the isolate is **retained live**
+  and `_teardown_needed` is armed rather than nulling the globals — nulling would
+  let the next `initialize()` build a second, racing isolate. The next
+  `initialize()` (on any OS thread) retries by attaching a **fresh** worker on the
+  current thread and tearing down; on success it clears the flag and nulls the
+  globals. GraalVM `IsolateThread` handles are OS-thread-affine, so the retry
+  never reuses a thread attached on another OS thread — it always attaches its own.
+- **Bootstrap-thread double failure (Python, `_acquire_isolate`):** if the just-
+  created isolate's bootstrap thread can be neither detached **nor** used to tear
+  the isolate down, only the creating OS thread could ever tear it down (teardown
+  needs the sole attached thread, on its own OS thread). Rather than retain that
+  OS-thread-affine bootstrap thread for a cross-thread retry (which would risk the
+  wrong-thread fatal path), the isolate is treated as **unrecoverable**: the
+  globals are left unset (the isolate leaks until process exit) and a later
+  `initialize()` on any thread builds a fresh isolate.
 - **Intended breaking changes (pre-GA, no shims):** the dwlib C ABI drops the exported
   `run_script` / `run_script_callback` / `run_script_input_output_callback` legacy singleton
   entrypoints **and** the `run_script[...]_with_resolver` entrypoints, keeping only the `*_engine`
