@@ -290,6 +290,7 @@ class NativeLibFeederTest {
     @Test
     void getErrorReflectsLateFailureOnlyAfterJoin() throws Exception {
         CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch entered = new CountDownLatch(1);
         InputStreamSession session = new InputStreamSession("application/json", null);
         long handle = session.register();
         // A feeder whose read callback blocks until released, then reports an out-of-range
@@ -300,6 +301,13 @@ class NativeLibFeederTest {
         NativeLib.InputCallbackFeeder feeder = new NativeLib.InputCallbackFeeder(0L, 0L, session) {
             @Override
             int readChunk(byte[] dest, int max) {
+                // Signal that the feeder is inside readChunk -- i.e. run() is past its
+                // while(!cancelled) guard -- BEFORE blocking, so the test can guarantee the
+                // loop body is running before cleanupFeeder's cancel() fires. Without this
+                // barrier a slow-to-schedule feeder thread could observe cancelled==true first,
+                // skip readChunk entirely, and exit with no error recorded (the race that made
+                // this test flaky under real CI thread scheduling).
+                entered.countDown();
                 try {
                     release.await();
                 } catch (InterruptedException e) {
@@ -311,6 +319,11 @@ class NativeLibFeederTest {
         Thread t = new Thread(feeder, "dw-input-callback-feeder-test");
         t.setDaemon(true);
         t.start();
+
+        // Wait until the feeder is actually inside readChunk (past run()'s while(!cancelled)
+        // guard) before doing anything that cancels it, so the out-of-range return is always
+        // processed into a feeder error rather than skipped by an early cancel.
+        assertTrue(entered.await(5, TimeUnit.SECONDS), "feeder never entered readChunk");
 
         // Pre-join: the callback is still blocked, so no terminal error is visible yet.
         assertNull(feeder.getError());
@@ -342,11 +355,16 @@ class NativeLibFeederTest {
     @Test
     void selectTransformResultObservesLateFailureOnlyAfterJoin() throws Exception {
         CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch entered = new CountDownLatch(1);
         InputStreamSession inputSession = new InputStreamSession("application/json", null);
         long inputHandle = inputSession.register();
         NativeLib.InputCallbackFeeder feeder = new NativeLib.InputCallbackFeeder(0L, 0L, inputSession) {
             @Override
             int readChunk(byte[] dest, int max) {
+                // See getErrorReflectsLateFailureOnlyAfterJoin: signal readChunk entry (run()
+                // past its while(!cancelled) guard) before blocking, so selectTransformResult's
+                // internal cancel() cannot win a scheduling race and skip readChunk.
+                entered.countDown();
                 try {
                     release.await();
                 } catch (InterruptedException e) {
@@ -358,6 +376,10 @@ class NativeLibFeederTest {
         Thread t = new Thread(feeder, "dw-select-result-test");
         t.setDaemon(true);
         t.start();
+
+        // Guarantee the feeder is inside readChunk (past run()'s while(!cancelled) guard) before
+        // selectTransformResult below can cancel it, so the late failure is always recorded.
+        assertTrue(entered.await(5, TimeUnit.SECONDS), "feeder never entered readChunk");
 
         // Release the blocked callback ~100ms from now, on a separate thread, so the call under
         // test below begins while the feeder is still guaranteed to be blocked (no error
