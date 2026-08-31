@@ -14,7 +14,7 @@ import { findLibrary, buildInputsJson } from "../../src/utils";
 // about -- against handles that were never registered and against handles
 // that were registered and then destroyed.
 //
-// Confirmed empirically (see task-6-report.md) against the real addon:
+// Confirmed empirically against the real addon:
 //   - sync `runScriptEngine` RETURNS the JSON string
 //     `{"success":false,"error":"Unknown engine handle"}` -- it does not throw.
 //   - `runScriptStreamingEngine` / `runScriptTransformEngine` RESOLVE (never

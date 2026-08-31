@@ -332,7 +332,8 @@ let cleanupStarted = false;
 // instance-level DataWeave.cleanupPromise. Without it, the second of two
 // overlapping module cleanup() calls sees globalInstance already nulled and
 // resolves immediately -- before the first call's native teardown finishes,
-// violating cleanup()'s "resolves once native teardown has finished" contract
+// violating cleanup()'s "resolves once the native teardown attempt has
+// completed" contract
 // for the last reference. (round 12 #5)
 let cleanupPromise: Promise<void> | null = null;
 // The instance that `cleanupPromise` is currently draining. Needed because

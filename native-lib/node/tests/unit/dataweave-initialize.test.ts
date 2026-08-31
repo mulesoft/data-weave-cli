@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // project in vitest.config.ts). This covers a ref-count leak that is only
 // observable in the sequencing of calls into ffi.ts, not in any externally
 // visible native state, so a real end-to-end native failure isn't a
-// practical way to assert on it (see task-4-report.md's fix report for why).
+// practical way to assert on it.
 vi.mock("../../src/ffi", () => ({
   initialize: vi.fn(),
   createEngine: vi.fn(),
@@ -41,8 +41,9 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     expect(() => dw.initialize()).toThrow(DataWeaveError);
 
     // ffi.initialize() already succeeded, incrementing the native library's
-    // ref count. Since `initialized` never became true, cleanup()'s
-    // early-return guard means nothing else would ever call ffi.cleanup() --
+    // ref count. Since the instance never reached the "ready" state,
+    // cleanup()'s early-return guard means nothing else would ever call
+    // ffi.cleanup() --
     // initialize()'s own catch block must have released it.
     expect(ffi.cleanup).toHaveBeenCalledTimes(1);
   });
@@ -80,8 +81,8 @@ describe("DataWeave.initialize() native ref-count safety", () => {
 
     // A later initialize() call (e.g. once the transient failure clears)
     // must succeed cleanly -- the failed attempt must not have left the
-    // instance permanently "half-initialized" (this.initialized stuck true
-    // without an engine handle, or vice versa).
+    // instance permanently "half-initialized" (state stuck "ready" without an
+    // engine handle, or vice versa).
     vi.mocked(ffi.cleanup).mockClear();
     dw.initialize();
     expect(ffi.createEngine).toHaveBeenCalledTimes(2);
@@ -105,7 +106,7 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     expect(ffi.cleanup).toHaveBeenCalledTimes(1);
   });
 
-  it("still clears `initialized` when ffi.cleanup() rejects, so the instance is re-initializable", async () => {
+  it("still resets state to \"uninitialized\" when ffi.cleanup() rejects, so the instance is re-initializable", async () => {
     vi.mocked(ffi.initialize).mockImplementation(() => {});
     vi.mocked(ffi.createEngine).mockImplementation(() => 7);
     vi.mocked(ffi.cleanup).mockRejectedValueOnce(new Error("native cleanup boom"));
@@ -116,9 +117,9 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     await expect(dw.cleanup()).rejects.toThrow("native cleanup boom");
 
     // Even though ffi.cleanup() rejected, the engine handle was already
-    // destroyed and nulled -- `initialized` must not stay stuck `true`, or a
+    // destroyed and nulled -- state must not stay stuck "ready", or a
     // later initialize() call becomes a permanent no-op (the early-return
-    // guard `if (this.initialized) return;`) and the instance is stranded
+    // guard `if (this.state === "ready") return;`) and the instance is stranded
     // with a null engineHandle.
     vi.mocked(ffi.initialize).mockClear();
     vi.mocked(ffi.createEngine).mockClear();
