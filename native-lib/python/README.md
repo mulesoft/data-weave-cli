@@ -208,11 +208,14 @@ There is a single process-wide GraalVM isolate, reference-counted by the
 number of live engines across all `DataWeave` instances; it is created on the
 first engine and torn down when the last one is released (with a retryable
 teardown fallback if that final teardown fails). Each `DataWeave` instance
-owns its own handle-addressed engine within that shared isolate. Its first
-resolver-backed run installs that instance's resolver; later runs reuse it.
-The instance retains the resolver callback until its engine is destroyed,
-then releases callback references during `cleanup()`. Different live
-instances can therefore use different resolvers.
+owns its own handle-addressed engine within that shared isolate.
+Initialization binds the resolver to that engine — `DataWeave.initialize()`
+creates the engine via `create_engine_with_resolver`, so the resolver is
+installed once, up front, not on first use. Subsequent runs reuse the same
+resolver and its compiled-module cache. The instance retains the resolver
+callback until its engine is destroyed, then releases callback references
+during `cleanup()`. Different live instances can therefore use different
+resolvers.
 
 ### Custom module resolution scope
 

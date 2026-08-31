@@ -262,34 +262,50 @@ describe("DataWeave.initialize() native ref-count safety", () => {
   });
 
   it("does not publish a poisoned singleton when the first module-level init fails", async () => {
-    // Isolate module state: a fresh import gives a null globalInstance so this
-    // test controls the very first getGlobalInstance() call.
-    vi.resetModules();
-    const ffiMod = await import("../../src/ffi");
-    const dwMod = await import("../../src/dataweave");
+    // This drives the module-level run() through getGlobalInstance(), which
+    // constructs a DataWeave directly and so hits the real findLibrary() lookup
+    // (findLibrary is in the DataWeave constructor and is NOT mocked by the
+    // vi.mock("../../src/ffi") at the top of this file). Point
+    // DATAWEAVE_NATIVE_LIB at this test file (guaranteed to exist) so that
+    // lookup succeeds without depending on a staged/built dwlib -- ffi is
+    // mocked, so the path's contents are never touched. Without this the test
+    // fails with "Could not find DataWeave native library" whenever no dwlib is
+    // present (review #14 #2).
+    const prevEnvLib = process.env.DATAWEAVE_NATIVE_LIB;
+    process.env.DATAWEAVE_NATIVE_LIB = __filename;
+    try {
+      // Isolate module state: a fresh import gives a null globalInstance so this
+      // test controls the very first getGlobalInstance() call.
+      vi.resetModules();
+      const ffiMod = await import("../../src/ffi");
+      const dwMod = await import("../../src/dataweave");
 
-    // First module-level run(): ffi.initialize() throws (e.g. bad lib path).
-    vi.mocked(ffiMod.initialize).mockImplementationOnce(() => {
-      throw new Error("library not found");
-    });
-    expect(() => dwMod.run("%dw 2.0\noutput application/json\n---\n1")).toThrow();
+      // First module-level run(): ffi.initialize() throws (e.g. bad lib path).
+      vi.mocked(ffiMod.initialize).mockImplementationOnce(() => {
+        throw new Error("library not found");
+      });
+      expect(() => dwMod.run("%dw 2.0\noutput application/json\n---\n1")).toThrow();
 
-    // The fault is corrected; the NEXT module-level run() must build a fresh,
-    // working singleton -- not reuse a poisoned, uninitialized one that fails
-    // "not initialized" forever (review #6 #1).
-    vi.mocked(ffiMod.initialize).mockImplementation(() => {});
-    vi.mocked(ffiMod.createEngine).mockReturnValue(1);
-    vi.mocked(ffiMod.runScriptEngine).mockReturnValue(
-      JSON.stringify({
-        success: true,
-        result: Buffer.from("1").toString("base64"),
-        mimeType: "application/json",
-        charset: "utf-8",
-        binary: false,
-      })
-    );
-    const result = dwMod.run("%dw 2.0\noutput application/json\n---\n1");
-    expect(result.success).toBe(true);
+      // The fault is corrected; the NEXT module-level run() must build a fresh,
+      // working singleton -- not reuse a poisoned, uninitialized one that fails
+      // "not initialized" forever (review #6 #1).
+      vi.mocked(ffiMod.initialize).mockImplementation(() => {});
+      vi.mocked(ffiMod.createEngine).mockReturnValue(1);
+      vi.mocked(ffiMod.runScriptEngine).mockReturnValue(
+        JSON.stringify({
+          success: true,
+          result: Buffer.from("1").toString("base64"),
+          mimeType: "application/json",
+          charset: "utf-8",
+          binary: false,
+        })
+      );
+      const result = dwMod.run("%dw 2.0\noutput application/json\n---\n1");
+      expect(result.success).toBe(true);
+    } finally {
+      if (prevEnvLib === undefined) delete process.env.DATAWEAVE_NATIVE_LIB;
+      else process.env.DATAWEAVE_NATIVE_LIB = prevEnvLib;
+    }
   });
 
   it("gates re-initialization on the in-flight rollback when engine creation fails", async () => {

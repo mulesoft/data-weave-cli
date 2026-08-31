@@ -39,11 +39,25 @@ The main purpose is to allow non-JVM consumers (most notably the Python package 
 Each engine is a handle-addressed object created with `create_engine` (or
 `create_engine_with_resolver`, which additionally registers a module-resolve
 callback) and run via `run_script_engine`, `run_script_callback_engine`, or
-`run_script_input_output_callback_engine`, then released with
-`destroy_engine`. The underlying GraalVM isolate is a single process-wide
-isolate, created and attached via `graal_create_isolate` / `graal_attach_thread`
-on first use and torn down via `graal_tear_down_isolate` once the last engine
-across the process has been destroyed.
+`run_script_input_output_callback_engine`, then released with `destroy_engine`.
+
+**Raw C ABI (caller-managed isolate).** At the C level the isolate lifecycle is
+the caller's responsibility. A direct consumer creates and attaches the GraalVM
+isolate itself via `graal_create_isolate` / `graal_attach_thread`, creates and
+destroys any number of engines within it (`create_engine` /
+`create_engine_with_resolver` … `destroy_engine`), and tears the isolate down
+with `graal_tear_down_isolate` when done. `destroy_engine` only unregisters that
+engine from the runtime; it never tears down the isolate. There is no built-in
+reference counting at the ABI — the C consumer decides when the isolate is no
+longer needed.
+
+**Node / Python bindings (reference-counted isolate).** The bindings layer this
+policy on top of the raw ABI: each maintains a single process-wide GraalVM
+isolate, reference-counted by the number of live engines across all instances.
+The isolate is created and attached on first use and torn down via
+`graal_tear_down_isolate` only after the final engine in the process has been
+released (with a retryable-teardown fallback if teardown fails). This
+ref-counting lives in the binding code, not in the dwlib engine ABI.
 
 ## Building with Gradle
 
