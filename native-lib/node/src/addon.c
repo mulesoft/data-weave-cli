@@ -197,6 +197,26 @@ typedef enum {
   TEARDOWN_PENDING_WAIT,
   TEARDOWN_TEARING_DOWN,
 } teardown_state_t;
+// Outcome of an attempted reached-zero isolate teardown, reported by
+// cleanup_thread_fn to its synchronous callers and computed inline by
+// teardown_waiter_thread_fn. Three-way (review #17 #1) so the callers can
+// distinguish the unrecoverable double failure from an ordinary retryable one:
+//   CLEANUP_TORN_DOWN     -- isolate destroyed (or nothing to tear down):
+//                            clear g_thread/g_isolate/g_initialized/g_ref_count.
+//   CLEANUP_RETAIN        -- teardown could not run or failed but the worker
+//                            detached cleanly (or the spawn never happened): the
+//                            isolate is still live AND reachable -- retain the
+//                            globals and arm the retry (g_teardown_needed).
+//   CLEANUP_UNRECOVERABLE -- graal_tear_down_isolate AND the follow-up detach
+//                            BOTH failed: an exiting worker is stuck attached, so
+//                            this isolate can never be torn down. Leak it -- see
+//                            abandon_unrecoverable_isolate_locked(). Mirrors
+//                            Python native.py's double-failure leak-and-continue.
+typedef enum {
+  CLEANUP_TORN_DOWN = 0,
+  CLEANUP_RETAIN,
+  CLEANUP_UNRECOVERABLE,
+} cleanup_result_t;
 static teardown_state_t g_teardown_state = TEARDOWN_NONE;
 // Set by an adopting initialize() to tell the waiter thread to abort its
 // queued teardown and leave the live isolate intact. Read/reset by the waiter.
@@ -212,6 +232,29 @@ static bool g_teardown_cancelled = false;
 // teardown once ops reach 0 (retry_stranded_teardown_locked).
 static bool g_teardown_needed = false;
 static uv_cond_t g_teardown_cond;
+
+// teardown+detach double failure (review #17 #1): an exiting worker is stuck
+// attached to this isolate, so graal_tear_down_isolate can never again get the
+// sole-attached, current-OS-thread IsolateThread it requires -- retrying is
+// futile and would only attach MORE stuck workers. Abandon the isolate: clear
+// the PUBLISHED globals so the next initialize() builds a FRESH isolate (GraalVM
+// allows multiple isolates per process; the stuck worker is bound to the OLD,
+// leaked isolate and never impedes the new one), do NOT arm g_teardown_needed,
+// and leak the old isolate for the process lifetime. Emit a diagnostic so the
+// leak is observable. Mirrors Python native.py's leak-and-continue
+// (_release_isolate / _retry_pending_teardown_locked). Caller holds g_mutex.
+static void abandon_unrecoverable_isolate_locked(void) {
+  g_thread = NULL;
+  g_isolate = NULL;
+  g_initialized = 0;
+  g_ref_count = 0;
+  g_teardown_needed = false;
+  fprintf(stderr,
+          "[DataWeave Node addon] GraalVM isolate teardown AND worker detach both "
+          "failed; the isolate can never be torn down and is being leaked for the "
+          "process lifetime. Binding state was reset so a later initialize() "
+          "builds a fresh isolate.\n");
+}
 
 // One node per cleanup() call that arrived while a teardown was already
 // pending. napi_env/napi_deferred/napi_threadsafe_function are thread-affine,
@@ -767,6 +810,7 @@ static bool env_init_acquire_and_hook(napi_env env) {
 // Forward declaration: tears down g_isolate on a dedicated attached thread.
 // Defined below; used here (napi_initialize's create-path acquire-failure
 // recovery) and further down by isolate_ref_release_n_locked.
+// arg is a cleanup_result_t* out-param (review #17 #1); see the definition.
 static void cleanup_thread_fn(void* arg);
 
 // Forward declaration: retries a stranded teardown (round-14 #2/#3). Defined
@@ -937,17 +981,24 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
     uv_thread_options_t cleanup_opts;
     cleanup_opts.flags = UV_THREAD_HAS_STACK_SIZE;
     cleanup_opts.stack_size = 2 * 1024 * 1024;
-    int torn_down = 0;
-    int cleanup_spawn_rc = uv_thread_create_ex(&cleanup_tid, &cleanup_opts, cleanup_thread_fn, &torn_down);
+    cleanup_result_t result = CLEANUP_RETAIN;
+    int cleanup_spawn_rc = uv_thread_create_ex(&cleanup_tid, &cleanup_opts, cleanup_thread_fn, &result);
     if (cleanup_spawn_rc == 0) {
       uv_thread_join(&cleanup_tid);
     }
-    if (torn_down) {
+    if (result == CLEANUP_TORN_DOWN) {
       // Teardown ran (or there was nothing to tear down) -- clear the globals
       // so the next initialize() sees a clean slate. g_ref_count is already 0.
       g_thread = NULL;
       g_isolate = NULL;
       g_initialized = 0;
+    } else if (result == CLEANUP_UNRECOVERABLE) {
+      // teardown+detach double failure (review #17 #1): abandon the isolate and
+      // reset published state so this same initialize() failure path throws
+      // below and a LATER initialize() builds a fresh isolate. Does NOT arm the
+      // retry. g_ref_count is already 0, so the helper's g_ref_count = 0 is a
+      // no-op and the invariant g_ref_count == sum(init_refs) still holds.
+      abandon_unrecoverable_isolate_locked();
     } else {
       // Spawn failed, or cleanup_thread_fn's attach/teardown to the isolate
       // failed. The isolate is genuinely still alive with g_initialized == 0.
@@ -2599,15 +2650,16 @@ static void call_js_teardown_done(napi_env env, napi_value js_callback, void* co
   free(waiter);
 }
 
-// `arg` is an int* out-param: the caller (napi_cleanup's case 4) must set it
-// to 0 before spawning this thread and read it after uv_thread_join returns.
-// Mirrors teardown_waiter_thread_fn's `torn_down` local exactly, so the
-// caller can tell "isolate torn down / nothing to tear down" (safe to clear
-// g_thread/g_isolate/g_initialized/g_ref_count) apart from "attach failed,
-// isolate still alive" (must leave those globals set, or the isolate becomes
-// unreachable and can never be torn down).
+// `arg` is a cleanup_result_t* out-param: the caller must set it to
+// CLEANUP_RETAIN before spawning this thread (so a spawn that never runs, or the
+// attach-failure early return, leaves the live isolate retained) and read it
+// after uv_thread_join returns. Mirrors teardown_waiter_thread_fn's outcome
+// exactly, so the caller can distinguish "isolate torn down / nothing to tear
+// down" (clear g_thread/g_isolate/g_initialized/g_ref_count) from "attach or
+// teardown failed but the isolate is still reachable" (retain + arm retry) from
+// "teardown AND detach both failed" (unrecoverable -- leak the isolate).
 static void cleanup_thread_fn(void* arg) {
-  int* out_torn_down = (int*)arg;
+  cleanup_result_t* out_result = (cleanup_result_t*)arg;
   // graal_tear_down_isolate() must be passed the IsolateThread belonging to the
   // *calling* OS thread. g_thread was created by graal_create_isolate() on the
   // (now-exited, already-joined) init thread, so it is invalid here — passing it
@@ -2616,29 +2668,32 @@ static void cleanup_thread_fn(void* arg) {
   // to obtain a valid local IsolateThread, then tear down with that.
   if (!fn_tear_down_isolate || !fn_attach_thread || !g_isolate) {
     // Nothing to tear down (no isolate / FFI unavailable) -- safe to clear.
-    *out_torn_down = 1;
+    *out_result = CLEANUP_TORN_DOWN;
     return;
   }
   void* local_thread = NULL;
   if (fn_attach_thread(g_isolate, &local_thread) != 0 || local_thread == NULL) {
-    // Attach failed -- the isolate is still alive. Leave *out_torn_down at 0
-    // (its caller-initialized value) so the caller does NOT clear g_isolate,
-    // or it becomes unreachable and can never be torn down.
+    // Attach failed -- the isolate is still alive. Leave *out_result at its
+    // caller-initialized CLEANUP_RETAIN so the caller does NOT clear g_isolate
+    // (or it becomes unreachable and can never be torn down) and arms the retry.
     return;
   }
   // Check the teardown return code (0 == success). On nonzero the isolate is
-  // still live: leave *out_torn_down at 0 so the caller retains
-  // g_isolate/g_initialized/g_ref_count and (per its own logic) arms the retry,
-  // rather than orphaning a live isolate (review #6 #3). On that failure the
-  // isolate was NOT destroyed, so this thread is still attached to it -- detach
-  // before the helper thread exits, or the live isolate keeps a phantom
-  // attached thread that can make a later retry teardown block or fail (review
-  // #7 #1). On success the isolate is gone: do NOT detach (would be a UAF).
+  // still live and this thread is still attached to it -- detach before exiting
+  // or the live isolate keeps a phantom attached thread that can block/fail a
+  // later retry teardown (review #7 #1). On success the isolate is gone: do NOT
+  // detach (would be a UAF).
   if (fn_tear_down_isolate(local_thread) == 0) {
-    *out_torn_down = 1;
+    *out_result = CLEANUP_TORN_DOWN;
+  } else if (fn_detach_thread(local_thread) == 0) {
+    // Teardown failed but the worker detached cleanly: the isolate is live and
+    // reachable -- retain it and (per the caller's own logic) arm the retry
+    // (review #6 #3).
+    *out_result = CLEANUP_RETAIN;
   } else {
-    fn_detach_thread(local_thread);
-    *out_torn_down = 0;
+    // Teardown AND detach both failed (review #17 #1): the worker is stuck
+    // attached, so this isolate can never be torn down. Signal leak-and-continue.
+    *out_result = CLEANUP_UNRECOVERABLE;
   }
 }
 
@@ -2663,60 +2718,56 @@ static void teardown_waiter_thread_fn(void* arg) {
   }
   uv_mutex_unlock(&g_mutex);
 
-  // Perform teardown exactly as the unchanged fast path does: attach a local
-  // thread to the isolate (g_thread from graal_create_isolate's bootstrap
-  // thread is invalid here -- see cleanup_thread_fn's comment), then tear
-  // down. Honor the return code (0 == success); a nonzero teardown leaves the
-  // isolate live (review #6 #3). Skipped entirely
-  // when an initialize() call adopted the live isolate instead (see
-  // napi_initialize's TEARDOWN_PENDING_WAIT branch).
-  bool torn_down = false;
+  // Perform teardown exactly as the synchronous cleanup_thread_fn path does.
+  // Honor the return codes (0 == success). Skipped entirely when an initialize()
+  // call adopted the live isolate instead (see napi_initialize's
+  // TEARDOWN_PENDING_WAIT branch).
+  cleanup_result_t result = CLEANUP_RETAIN;
   if (!cancelled && fn_tear_down_isolate && fn_attach_thread && g_isolate) {
     void* local_thread = NULL;
     if (fn_attach_thread(g_isolate, &local_thread) == 0 && local_thread != NULL) {
-      // Check the teardown return code (0 == success). On nonzero the isolate is
-      // still live -- leave torn_down false so the post-teardown block below
-      // retains the isolate globals and arms the retry (review #6 #3). On that
-      // failure the isolate was NOT destroyed, so this thread is still attached
-      // to it -- detach before exiting or the live isolate keeps a phantom
-      // attached thread that can block/fail a later retry teardown (review #7
-      // #1). On success the isolate is gone: do NOT detach (would be a UAF).
       if (fn_tear_down_isolate(local_thread) == 0) {
-        torn_down = true;
+        result = CLEANUP_TORN_DOWN;
+      } else if (fn_detach_thread(local_thread) == 0) {
+        // Teardown failed, worker detached cleanly: retain + arm below (review #6 #3).
+        result = CLEANUP_RETAIN;
       } else {
-        fn_detach_thread(local_thread);
-        torn_down = false;
+        // Teardown AND detach both failed (review #17 #1): leak-and-continue below.
+        result = CLEANUP_UNRECOVERABLE;
       }
     }
-    // else: attach failed -- the isolate is still alive. Do NOT clear g_isolate,
-    // or it becomes unreachable and can never be torn down.
+    // else: attach failed -- isolate still alive and reachable; leave
+    // result == CLEANUP_RETAIN so the post block retains + arms the retry.
   } else if (!cancelled) {
     // Nothing to tear down (no isolate / FFI unavailable) -- safe to clear.
-    torn_down = true;
+    result = CLEANUP_TORN_DOWN;
   }
-  // if (cancelled): leave torn_down = false -- the isolate stays live for the
-  // adopter; we tear nothing down.
+  // if (cancelled): leave result == CLEANUP_RETAIN -- the isolate stays live for
+  // the adopter; we tear nothing down and the post block's !cancelled guards skip
+  // every branch, leaving the adopter's state untouched.
 
   uv_mutex_lock(&g_mutex);
-  if (!cancelled && torn_down) {
+  if (!cancelled && result == CLEANUP_TORN_DOWN) {
     g_thread = NULL;
     g_isolate = NULL;
     g_initialized = 0;
     g_ref_count = 0;
+  } else if (!cancelled && result == CLEANUP_UNRECOVERABLE) {
+    // teardown+detach double failure on the deferred path (review #17 #1):
+    // abandon + leak the isolate; do NOT arm the retry. The deferred cleanup()
+    // promise still RESOLVES below (deliberate, exactly as the retain branch
+    // does). The helper emits its own stderr diagnostic. Mirrors Python
+    // native.py leak-and-continue.
+    abandon_unrecoverable_isolate_locked();
   } else if (!cancelled && g_isolate != NULL && g_ref_count == 0) {
     // Teardown did not happen (attach failed, or graal_tear_down_isolate
-    // returned nonzero -- review #6 #3) and this async-waiter path IS the last
-    // release: g_ref_count is already 0 with no owner and no pending waiter.
-    // Arm the retry signal so a later op-completion drain or a fresh
-    // initialize() retries teardown -- otherwise the live isolate is stranded
-    // with nothing to reclaim it (review #6 #4). Mirrors the twin arm in
-    // isolate_ref_release_n_locked's waiter-spawn-failure path.
+    // returned nonzero with a clean detach -- review #6 #3) and this async-waiter
+    // path IS the last release: arm the retry signal so a later drain or a fresh
+    // initialize() retries teardown (review #6 #4).
     g_teardown_needed = true;
     // Observable failure (review #10 #5): the deferred cleanup() promise is still
-    // RESOLVED below (via call_js_teardown_done -- deliberate, exactly as the
-    // synchronous Case 4 path resolves on failure), so emit a diagnostic or a
-    // failed async teardown would be silent. Parity with Python's _release_isolate
-    // stderr notice (native.py).
+    // RESOLVED below, so emit a diagnostic or a failed async teardown would be
+    // silent. Parity with Python's _release_isolate stderr notice (native.py).
     fprintf(stderr,
             "[DataWeave Node addon] GraalVM isolate teardown failed on deferred "
             "cleanup(); the isolate is retained and teardown will be retried on the "
@@ -2843,18 +2894,22 @@ static void retry_stranded_teardown_locked(void) {
   uv_thread_options_t opts;
   opts.flags = UV_THREAD_HAS_STACK_SIZE;
   opts.stack_size = 2 * 1024 * 1024;
-  int torn_down = 0;
-  int spawn_rc = uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, &torn_down);
+  cleanup_result_t result = CLEANUP_RETAIN;
+  int spawn_rc = uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, &result);
   if (spawn_rc == 0) uv_thread_join(&tid);
-  if (torn_down) {
+  if (result == CLEANUP_TORN_DOWN) {
     g_thread = NULL;
     g_isolate = NULL;
     g_initialized = 0;
     g_ref_count = 0;
     g_teardown_needed = false;
+  } else if (result == CLEANUP_UNRECOVERABLE) {
+    // teardown+detach double failure (review #17 #1): abandon + leak; the helper
+    // also clears g_teardown_needed so this stranded-teardown retry stops.
+    abandon_unrecoverable_isolate_locked();
   }
-  // else: spawn/attach failed again -- leave g_teardown_needed set so the next
-  // drain (or a later initialize() adoption) retries.
+  // else (CLEANUP_RETAIN): spawn/attach failed again -- leave g_teardown_needed
+  // set so the next drain (or a later initialize() adoption) retries.
 }
 
 static void isolate_ref_release_n_locked(int n) {
@@ -2868,16 +2923,20 @@ static void isolate_ref_release_n_locked(int n) {
     uv_thread_options_t opts;
     opts.flags = UV_THREAD_HAS_STACK_SIZE;
     opts.stack_size = 2 * 1024 * 1024;
-    int torn_down = 0;
-    int spawn_rc = uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, &torn_down);
+    cleanup_result_t result = CLEANUP_RETAIN;
+    int spawn_rc = uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, &result);
     if (spawn_rc == 0) {
       uv_thread_join(&tid);
     }
-    if (torn_down) {
+    if (result == CLEANUP_TORN_DOWN) {
       g_thread = NULL;
       g_isolate = NULL;
       g_initialized = 0;
       g_ref_count = 0;
+    } else if (result == CLEANUP_UNRECOVERABLE) {
+      // teardown+detach double failure (review #17 #1): abandon + leak the
+      // isolate; do NOT arm the retry. Mirrors Python native.py leak-and-continue.
+      abandon_unrecoverable_isolate_locked();
     } else if (g_isolate != NULL && g_ref_count == 0) {
       // Sync teardown failed (spawn or cleanup_thread_fn attach) with the isolate
       // still live and no owners: arm the retry signal (round-14 #3). g_active_ops
@@ -3032,13 +3091,14 @@ static napi_value release_isolate_ref_locked(napi_env env) {
     uv_thread_options_t opts;
     opts.flags = UV_THREAD_HAS_STACK_SIZE;
     opts.stack_size = 2 * 1024 * 1024;
-    // torn_down is cleanup_thread_fn's out-param (mirrors teardown_waiter_thread_fn's
-    // `torn_down` local exactly): must be initialized to 0 before the thread runs so
-    // the attach-failure early-return path (which never touches it) leaves it false.
+    // result is cleanup_thread_fn's out-param (mirrors teardown_waiter_thread_fn's
+    // outcome exactly): must be initialized to CLEANUP_RETAIN before the thread runs
+    // so a spawn that never happens, or the attach-failure early-return path (which
+    // never touches it), leaves the live isolate retained + the retry armed.
     // uv_thread_join is synchronous, so when spawn_rc == 0 this stack variable safely
     // outlives the thread's write to it.
-    int torn_down = 0;
-    int spawn_rc = uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, &torn_down);
+    cleanup_result_t result = CLEANUP_RETAIN;
+    int spawn_rc = uv_thread_create_ex(&tid, &opts, cleanup_thread_fn, &result);
     if (spawn_rc == 0) {
       uv_thread_join(&tid);
     }
@@ -3053,11 +3113,17 @@ static napi_value release_isolate_ref_locked(napi_env env) {
     // initialize() correctly ref-counts the surviving isolate instead of
     // building a second one (identical semantics to teardown_waiter_thread_fn's
     // attach-failure path).
-    if (torn_down) {
+    if (result == CLEANUP_TORN_DOWN) {
       g_thread = NULL;
       g_isolate = NULL;
       g_initialized = 0;
       g_ref_count = 0;
+    } else if (result == CLEANUP_UNRECOVERABLE) {
+      // teardown+detach double failure (review #17 #1): abandon + leak the
+      // isolate; the promise below still RESOLVES (deliberate, per the note that
+      // follows). The helper emits its own stderr diagnostic. Mirrors Python
+      // native.py leak-and-continue.
+      abandon_unrecoverable_isolate_locked();
     } else if (g_isolate != NULL && g_ref_count == 0) {
       // cleanup_thread_fn spawn/attach failed: the isolate is still live with
       // zero owners. Arm the retry signal so a later op-completion drain or the
