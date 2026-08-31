@@ -409,8 +409,12 @@ drain-before-teardown. The **public Python API is unchanged** by the unification
 Module-level state in `native.py`, all mutations under one module lock (`_isolate_lock`):
 `_lib`, `_lib_path`, `_isolate` (the single process-wide isolate, or None), `_isolate_ref_count`.
 
-> **Invariant:** `_isolate_ref_count` == number of live engines across all `DataWeave` instances,
-> and the isolate exists iff the count > 0.
+> **Invariant:** `_isolate_ref_count` == the number of outstanding ownership/init references
+> (one per live engine across all `DataWeave` instances). A **positive** count requires a live
+> isolate. A **zero** count normally means no isolate, but may temporarily retain a live one
+> pending a teardown retry (`_teardown_needed`), or leave one leaked for the process lifetime
+> after an unrecoverable teardown path (see §7.2, §10). The count is thus proof of outstanding
+> ownership, not proof of physical isolate existence.
 
 Each `DataWeave` instance owns exactly one engine handle and contributes exactly one to the
 refcount. The module lock guards only isolate refcount/create/teardown; it is **not** held during
@@ -443,7 +447,11 @@ attachment**, mirroring the Node and Go bindings:
   teardown before deciding whether to create a new isolate; a repeated failure re-arms the flag and
   raises rather than proceeding. This mirrors Node's `g_teardown_needed` retryable-teardown model
   (§6.2) — the two bindings now share one failure-recovery contract instead of Python's previous
-  unconditional-null behavior.
+  unconditional-null behavior. If teardown fails **and** the just-attached worker cannot be detached
+  (`graal_detach_thread` returns nonzero), a retry would stack a second worker on the stuck one
+  and block teardown forever, so the isolate is instead treated as **unrecoverable**: the globals
+  are nulled, `_teardown_needed` is left unset, and the isolate leaks until process exit — the same
+  leak-and-continue policy as the bootstrap double failure (§10).
 
 Because nothing stays attached between calls, teardown never blocks on a phantom attachment
 regardless of which OS thread performs the last release.
@@ -625,7 +633,11 @@ dwB.cleanup()  → join workers; destroy_engine(handleB); ref 1→0 → attach f
   `initialize()` (on any OS thread) retries by attaching a **fresh** worker on the
   current thread and tearing down; on success it clears the flag and nulls the
   globals. GraalVM `IsolateThread` handles are OS-thread-affine, so the retry
-  never reuses a thread attached on another OS thread — it always attaches its own.
+  never reuses a thread attached on another OS thread — it always attaches its own. If that
+  retry's teardown fails **and** its worker cannot be detached (`graal_detach_thread` returns
+  nonzero), the same holds for the initial release: a further retry would stack a second stuck
+  worker, so the isolate is treated as **unrecoverable** — globals nulled, no retry armed, isolate
+  leaked until process exit (mirroring the bootstrap double-failure policy below).
 - **Bootstrap-thread double failure (Python, `_acquire_isolate`):** if the just-
   created isolate's bootstrap thread can be neither detached **nor** used to tear
   the isolate down, only the creating OS thread could ever tear it down (teardown
@@ -685,8 +697,9 @@ These invariants are the shared artifact both `native-lib/node/src/addon.c` and
 uphold all six:
 
 1. One process-wide isolate; engines are handle-addressed objects in the Java registry.
-2. The isolate is reference-counted; the refcount equals the number of live engines; the isolate
-   exists iff the refcount > 0.
+2. The isolate is reference-counted by outstanding ownership/init references (one per live engine).
+   A positive refcount requires a live isolate; a zero refcount may temporarily retain a live
+   isolate pending a teardown retry, or leave one leaked after an unrecoverable teardown path.
 3. Create-on-first-ref, tear-down-on-last-release; the binding calls
    `graal_create_isolate` / `graal_tear_down_isolate` from *outside* the isolate, and holds no
    thread persistently attached across calls (so teardown never blocks on a phantom attachment).
