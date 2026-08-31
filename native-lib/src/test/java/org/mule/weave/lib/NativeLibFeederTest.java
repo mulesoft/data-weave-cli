@@ -9,8 +9,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -379,5 +382,90 @@ class NativeLibFeederTest {
         assertFalse(t.isAlive());
         assertTrue(resultJson.contains("\"success\":false"),
                 "selectTransformResult must observe the feeder's late failure, was: " + resultJson);
+    }
+
+    // ── Interrupted cleanup caller must block, not busy-spin (review #15 #2) ─────
+
+    /**
+     * Regression guard: before the fix, {@code cleanupFeeder}'s join-retry loop re-asserted the
+     * interrupt inside its {@code catch (InterruptedException)} handler. If the caller's interrupt
+     * flag was already set when {@code cleanupFeeder} was invoked, every subsequent
+     * {@code thread.join()} re-threw immediately (an interrupted {@code join()} throws without
+     * blocking), so the loop busy-spun at full CPU instead of blocking, even while the feeder was
+     * still alive.
+     *
+     * <p>This test pins a feeder alive (parked in an overridden {@code readChunk} behind a latch)
+     * and runs {@code cleanupFeeder} on a worker thread that arrives pre-interrupted. It then
+     * measures the worker thread's own CPU time (via {@link ThreadMXBean#getThreadCpuTime(long)})
+     * over a fixed wall-clock window while the feeder is held alive: the fix must let {@code join()}
+     * actually block, consuming close to zero CPU, whereas the bug's tight
+     * re-throw/catch/re-interrupt loop consumes close to 100% of the window.</p>
+     *
+     * <p>Determinism note: sampling {@link Thread#getState()} was tried first and rejected — the
+     * JVM's {@code join()}/{@code wait()} interrupt check can transition the thread through a
+     * momentary {@code WAITING} state even while it is, in aggregate, busy-spinning (verified: on
+     * this JDK, 15/15 trial runs of a state-polling assertion falsely passed against the unfixed
+     * {@code cleanupFeeder}, i.e. it never actually caught the regression). Per-thread CPU time
+     * integrated over a window does not have that failure mode: it reliably reports ~0ns against
+     * the fix and ~100% of the window against the bug (verified over multiple runs against both).
+     * {@code cleaner} is a daemon thread specifically so that if this regression is ever
+     * reintroduced, the busy-spin (which never terminates on its own, since {@code release} is
+     * only counted down after this assertion) does not hang the test JVM — it only fails the
+     * assertion below.</p>
+     */
+    @Test
+    void interruptedCleanupCallerBlocksInJoinInsteadOfBusySpinning() throws Exception {
+        InputStreamSession inputSession = new InputStreamSession("application/json", "UTF-8");
+        long inputHandle = inputSession.register();
+
+        CountDownLatch feederParked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        // Feeder blocks inside readChunk until released, so it stays alive across the join.
+        NativeLib.InputCallbackFeeder feeder = new NativeLib.InputCallbackFeeder(0L, 0L, inputSession) {
+            @Override
+            int readChunk(byte[] dest, int max) {
+                feederParked.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return 0; // clean EOF once released, so the loop exits promptly
+            }
+        };
+        Thread feederThread = new Thread(feeder, "test-busy-spin-feeder");
+        feederThread.setDaemon(true);
+        feederThread.start();
+        assertTrue(feederParked.await(2, TimeUnit.SECONDS), "feeder never entered the read callback");
+
+        AtomicBoolean restored = new AtomicBoolean(false);
+        Thread cleaner = new Thread(() -> {
+            Thread.currentThread().interrupt();   // caller arrives already interrupted
+            NativeLib.cleanupFeeder(feeder, feederThread, inputHandle);
+            restored.set(Thread.currentThread().isInterrupted());  // must be restored at the end
+        });
+        // Daemon: see the determinism note above — a reintroduced regression must not hang the JVM.
+        cleaner.setDaemon(true);
+        cleaner.start();
+
+        // The fix blocks in join(), consuming ~no CPU; the bug spins, consuming ~all of the window.
+        ThreadMXBean threadMXBean = ManagementFactory.getThreadMXBean();
+        long cleanerId = cleaner.getId();
+        Thread.sleep(50); // let the cleanup thread reach steady state (blocked, or spinning)
+        long cpuBefore = threadMXBean.getThreadCpuTime(cleanerId);
+        Thread.sleep(300);
+        long cpuAfter = threadMXBean.getThreadCpuTime(cleanerId);
+        assertTrue(cpuBefore >= 0 && cpuAfter >= 0,
+                "thread CPU time measurement unavailable on this JVM");
+        long consumedNanos = cpuAfter - cpuBefore;
+        assertTrue(consumedNanos < TimeUnit.MILLISECONDS.toNanos(100),
+                "cleanup thread must block in join(), not busy-spin, under interruption (consumed "
+                        + TimeUnit.NANOSECONDS.toMillis(consumedNanos) + "ms of CPU over a 300ms window)");
+
+        release.countDown();          // let the feeder finish
+        cleaner.join(5000);
+        feederThread.join(5000);
+        assertFalse(cleaner.isAlive());
+        assertTrue(restored.get(), "interrupt status must be restored after cleanup");
     }
 }

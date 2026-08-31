@@ -314,8 +314,11 @@ public class NativeLib {
      *       where the feeder has already reached EOF and exited. It also unregisters the handle.</li>
      *   <li><b>Join without a finite timeout</b> — we wait for {@code run()} to complete rather
      *       than abandoning the thread after a bound. An {@link InterruptedException} does not end
-     *       the wait (returning early would reopen the use-after-free window); we re-assert the
-     *       interrupt and keep waiting.</li>
+     *       the wait (returning early would reopen the use-after-free window): we record the
+     *       interruption locally and keep joining with the interrupt status <em>cleared</em>, so
+     *       {@code join()} actually blocks instead of immediately re-throwing and busy-spinning.
+     *       The caller's interrupt status is restored exactly once, after the feeder has
+     *       terminated.</li>
      * </ol>
      *
      * <p><strong>Null-safety:</strong> when the feeder never started — a setup failure threw
@@ -340,15 +343,21 @@ public class NativeLib {
         if (thread == null) {
             return;
         }
-        boolean joined = false;
-        while (!joined) {
+        boolean interrupted = false;
+        while (thread.isAlive()) {
             try {
                 thread.join();
-                joined = true;
             } catch (InterruptedException e) {
-                // Never abandon a live feeder: re-assert the interrupt and keep waiting.
-                Thread.currentThread().interrupt();
+                // Never abandon a live feeder (abandoning reopens the use-after-free
+                // window this method exists to close). Record the interruption and
+                // keep waiting with the interrupt status CLEARED, so join() actually
+                // blocks instead of re-throwing immediately and busy-spinning.
+                interrupted = true;
             }
+        }
+        if (interrupted) {
+            // Restore the caller's interrupt status now that the feeder has exited.
+            Thread.currentThread().interrupt();
         }
     }
 
