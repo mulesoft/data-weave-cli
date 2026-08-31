@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 // GraalVM function pointer types
 typedef int (*graal_create_isolate_fn)(void*, void**, void**);
@@ -2983,6 +2986,18 @@ static void isolate_ref_release_n_locked(int n) {
   waiter_opts.flags = UV_THREAD_HAS_STACK_SIZE;
   waiter_opts.stack_size = 2 * 1024 * 1024;
   int spawn_rc = uv_thread_create_ex(&waiter_tid, &waiter_opts, teardown_waiter_thread_fn, NULL);
+  if (spawn_rc == 0) {
+    // Reclaim the waiter's OS thread handle without joining it (joining on this
+    // JS thread would reintroduce the blocking-JS deadlock this deferral avoids).
+    // libuv has no uv_thread_detach, and uv_thread_t IS the underlying platform
+    // handle, so detach it directly: the OS reclaims the thread on exit, leaving
+    // zero unreaped handles across repeated init/stream/cleanup cycles (review #20 #2).
+#ifdef _WIN32
+    CloseHandle(waiter_tid);
+#else
+    pthread_detach(waiter_tid);
+#endif
+  }
   if (spawn_rc != 0) {
     // Best-effort degradation: the waiter thread never started, so nothing will
     // drain the isolate. Restore g_ref_count to the true remaining ownership
@@ -3208,9 +3223,19 @@ static napi_value release_isolate_ref_locked(napi_env env) {
   waiter_opts.flags = UV_THREAD_HAS_STACK_SIZE;
   waiter_opts.stack_size = 2 * 1024 * 1024;
   int spawn_rc = uv_thread_create_ex(&waiter_tid, &waiter_opts, teardown_waiter_thread_fn, NULL);
-  // Deliberately not joined -- this thread finishes on its own and resolves
+  // Deliberately not JOINED -- this thread finishes on its own and resolves
   // every waiter's promise itself; joining here would reintroduce exactly
-  // the blocking-JS-thread problem this fix removes.
+  // the blocking-JS-thread problem this fix removes. But we must still reclaim
+  // its OS thread handle, so DETACH it: libuv has no uv_thread_detach and
+  // uv_thread_t IS the platform handle, so the OS reclaims the thread on exit
+  // with zero unreaped handles across cycles (review #20 #2).
+  if (spawn_rc == 0) {
+#ifdef _WIN32
+    CloseHandle(waiter_tid);
+#else
+    pthread_detach(waiter_tid);
+#endif
+  }
 
   if (spawn_rc != 0) {
     // Best-effort degradation: if the waiter thread never starts, nothing
