@@ -41,13 +41,6 @@ _isolate_ref_count = 0
 # Node's g_teardown_needed retryable-teardown model. Only read/written while
 # holding _isolate_lock.
 _teardown_needed = False
-# When a bootstrap-thread detach AND the immediate teardown BOTH fail in
-# _acquire_isolate, the isolate was NOT destroyed and the bootstrap thread is
-# still attached. GraalVM teardown cannot succeed while it stays attached, so the
-# retry must reuse THIS thread rather than attach a fresh worker (which could
-# never tear down). None except across such a double-failure window. Guarded by
-# _isolate_lock.
-_pending_teardown_thread = None
 
 
 # Per-engine resolver dispatch. The ctx passed to create_engine_with_resolver is
@@ -120,48 +113,43 @@ def _retry_pending_teardown_locked() -> None:
     On success, clears the flag and nulls the isolate globals so the caller may
     build fresh. On failure, leaves the isolate live and the flag armed, and
     propagates the failure so the caller does not proceed to build a second,
-    racing isolate."""
-    global _lib, _lib_path, _isolate, _teardown_needed, _pending_teardown_thread
+    racing isolate.
+
+    The retry ALWAYS attaches a FRESH worker on the CURRENT OS thread. GraalVM
+    IsolateThread handles are OS-thread-affine, so a thread attached on one OS
+    thread must never be reused to tear down from another (review #15 #1). This
+    is sound because the only path that arms a retry is the last-release path
+    (_release_isolate), which leaves NO thread persistently attached -- the
+    bootstrap was detached at create and every op detaches its own thread -- so a
+    fresh attach on the current thread is always a valid, sole attachment."""
+    global _lib, _lib_path, _isolate, _teardown_needed
     if not _teardown_needed:
         return
     lib, isolate = _lib, _isolate
-    if _pending_teardown_thread is not None:
-        # Reuse the still-attached bootstrap thread from a prior double failure
-        # (bootstrap detach + immediate teardown both failed). Attaching a fresh
-        # worker would leave that thread attached and teardown could never
-        # succeed. Its detach already failed, so we must NOT detach it here.
-        worker = _pending_teardown_thread
-        attached_fresh = False
-    else:
-        worker = GraalIsolateThreadPointer()
-        if lib.graal_attach_thread(isolate, ctypes.byref(worker)) != 0:
-            raise DataWeaveError("Failed to attach thread to retry isolate teardown")
-        attached_fresh = True
+    worker = GraalIsolateThreadPointer()
+    if lib.graal_attach_thread(isolate, ctypes.byref(worker)) != 0:
+        raise DataWeaveError("Failed to attach thread to retry isolate teardown")
     try:
         _tear_down(lib, worker)  # raises on failure -> flag stays armed
     except BaseException:
-        # Teardown failed again. If we attached a fresh worker, detach it (best-
-        # effort) so it does not stay attached and block the NEXT retry, which
-        # attaches its own fresh worker. If we reused the retained bootstrap
-        # thread, keep it retained -- its detach already failed and the isolate
-        # is still live. _teardown_needed stays armed; globals not nulled.
-        if attached_fresh:
-            try:
-                lib.graal_detach_thread(worker)
-            except Exception:
-                pass
+        # Teardown failed again. Detach the fresh worker (best-effort) so it does
+        # not stay attached and block the NEXT retry, then re-raise with the flag
+        # still armed and globals not nulled.
+        try:
+            lib.graal_detach_thread(worker)
+        except Exception:
+            pass
         raise
     # Success: the isolate (and every thread pointer into it) is now invalid, so
     # the worker must NOT be detached.
     _lib = _lib_path = _isolate = None
     _teardown_needed = False
-    _pending_teardown_thread = None
 
 
 def _acquire_isolate(lib_path: str):
     """Returns (lib, isolate), creating the shared isolate on the first reference.
     Increments the refcount only on success."""
-    global _lib, _lib_path, _isolate, _isolate_ref_count, _teardown_needed, _pending_teardown_thread
+    global _lib, _lib_path, _isolate, _isolate_ref_count, _teardown_needed
     with _isolate_lock:
         _retry_pending_teardown_locked()
         if _isolate is None:
@@ -189,24 +177,27 @@ def _acquire_isolate(lib_path: str):
                 # created but not yet published (globals unset, refcount not
                 # bumped), so tear it down here rather than leak an unreachable
                 # live isolate. Reuse the same still-attached bootstrap thread to
-                # tear down (it is the only attached thread).
+                # tear down -- valid because this runs on the OS thread that
+                # created it (IsolateThread values are OS-thread-affine).
                 try:
                     _tear_down(lib, thread)
                 except BaseException:
-                    # Even teardown failed: the isolate was NOT destroyed and the
-                    # bootstrap `thread` is still attached to it. Retain both the
-                    # isolate AND that still-attached bootstrap thread so the retry
-                    # can tear down using IT -- GraalVM teardown can never succeed
-                    # while the bootstrap thread stays attached, so a fresh worker
-                    # could never tear this isolate down. Its detach already failed
-                    # above, so we do NOT detach it again; the retry path
-                    # (_retry_pending_teardown_locked) reuses the retained thread.
-                    _lib, _lib_path, _isolate = lib, lib_path, isolate
-                    _teardown_needed = True
-                    _pending_teardown_thread = thread
+                    # Double failure: the bootstrap thread could be neither
+                    # detached nor used to tear the isolate down. Only THIS OS
+                    # thread could ever tear this isolate down (GraalVM teardown
+                    # needs the sole attached thread, on its own OS thread), and
+                    # we are about to return an error with no guarantee this
+                    # thread re-enters. Retaining the bootstrap IsolateThread for
+                    # a later retry would risk handing an OS-thread-affine pointer
+                    # to graal_tear_down_isolate from a DIFFERENT thread (review
+                    # #15 #1: wrong-thread fatal path). So treat the isolate as
+                    # UNRECOVERABLE: leave the globals unset (this isolate leaks
+                    # until process exit) so a later initialize() -- on any thread
+                    # -- builds a fresh isolate.
                     print(
                         "DataWeave: bootstrap-thread detach and isolate teardown "
-                        "both failed; isolate retained for retry.",
+                        "both failed; the isolate is unrecoverable and is leaked "
+                        "(a later initialize() will build a fresh one).",
                         file=sys.stderr,
                     )
                 raise DataWeaveError(

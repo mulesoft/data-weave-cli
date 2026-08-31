@@ -1,5 +1,6 @@
 from pathlib import Path
 import ctypes
+import threading
 from threading import Barrier, BrokenBarrierError, current_thread, get_ident, Thread
 
 import pytest
@@ -712,10 +713,14 @@ def test_bootstrap_detach_failure_tears_down_created_isolate(monkeypatch):
 
 
 @pytest.mark.unit
-def test_bootstrap_detach_and_teardown_both_failing_arms_retry_instead_of_leaking(monkeypatch):
-    """If the just-created isolate's teardown ALSO fails after a bootstrap
-    detach failure, the isolate must be retained (not silently leaked) and a
-    retry armed for the next acquire -- mirroring the release-path contract."""
+def test_bootstrap_detach_and_teardown_both_failing_leaks_isolate_without_retaining_thread(monkeypatch):
+    """Option A (review #15 #1): when a bootstrap-thread detach AND the immediate
+    teardown BOTH fail in _acquire_isolate, the still-attached bootstrap
+    IsolateThread is OS-thread-affine and could only ever tear this isolate down
+    from THIS OS thread. Retaining it for a cross-thread retry risks handing a
+    foreign thread to graal_tear_down_isolate (wrong-thread fatal path). So the
+    isolate is treated as UNRECOVERABLE: leaked (globals unset), no retry armed,
+    no thread retained -- and a later initialize() builds a fresh isolate."""
     library = FakeLibrary()
     library.graal_detach_thread = CallableFunction(lambda _thread: 1)  # bootstrap detach fails
     library.graal_tear_down_isolate = CallableFunction(
@@ -726,63 +731,20 @@ def test_bootstrap_detach_and_teardown_both_failing_arms_retry_instead_of_leakin
     with pytest.raises(native.DataWeaveError):
         native._acquire_isolate("/tmp/dwlib")
 
-    assert native._isolate is not None
-    assert native._lib is library
+    # Leaked, not published; no retry armed; no thread retained.
+    assert native._isolate is None
+    assert native._lib is None
     assert native._isolate_ref_count == 0
-    assert native._teardown_needed is True
-    assert len(library.tear_down_threads) == 1
-
-
-@pytest.mark.unit
-def test_retry_after_double_failure_reuses_retained_bootstrap_thread(monkeypatch):
-    """Review #13 (finding D): when a bootstrap-thread detach AND the immediate
-    teardown BOTH fail in _acquire_isolate, the isolate was NOT destroyed and the
-    bootstrap thread is still attached. GraalVM teardown can never succeed while
-    that thread stays attached, so the retry must reuse the RETAINED bootstrap
-    thread -- attaching a fresh worker would leave the bootstrap attached and
-    teardown could never succeed."""
-    monkeypatch.setattr(native, "_teardown_needed", False)
-    monkeypatch.setattr(native, "_pending_teardown_thread", None)
-    library = FakeLibrary()
-
-    # graal_create_isolate hands out a distinct, non-null bootstrap thread so we
-    # can prove the retry tears down using THAT thread, not a fresh attach (a
-    # fresh attach via FakeLibrary would produce a different worker pointer).
-    def create_isolate(_params, _isolate, thread_ptr):
-        bootstrap = ctypes.cast(ctypes.c_void_p(0x1000), native.GraalIsolateThreadPointer)
-        ctypes.cast(
-            thread_ptr, ctypes.POINTER(native.GraalIsolateThreadPointer)
-        )[0] = bootstrap
-        return 0
-
-    def failing_detach(_thread):
-        return 1  # bootstrap detach always fails
-
-    teardown_calls = {"threads": []}
-
-    def teardown(thread):
-        teardown_calls["threads"].append(ctypes.cast(thread, ctypes.c_void_p).value)
-        return 1 if len(teardown_calls["threads"]) == 1 else 0  # fail first, succeed on retry
-
-    library.graal_create_isolate = CallableFunction(create_isolate)
-    library.graal_detach_thread = CallableFunction(failing_detach)
-    library.graal_tear_down_isolate = CallableFunction(teardown)
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-
-    with pytest.raises(native.DataWeaveError):
-        native._acquire_isolate("/tmp/dwlib")
-    assert native._teardown_needed is True
-    assert native._pending_teardown_thread is not None
-    bootstrap_addr = ctypes.cast(native._pending_teardown_thread, ctypes.c_void_p).value
-    assert bootstrap_addr == 0x1000
-
-    # Retry: teardown must reuse the retained bootstrap thread and succeed.
-    with native._isolate_lock:
-        native._retry_pending_teardown_locked()
     assert native._teardown_needed is False
-    assert native._pending_teardown_thread is None
-    # Two teardown attempts total, both on the SAME retained bootstrap thread.
-    assert teardown_calls["threads"] == [bootstrap_addr, bootstrap_addr]
+    assert len(library.tear_down_threads) == 1  # tried once, on the bootstrap thread
+
+    # The module is NOT wedged: a healthy library builds a fresh isolate.
+    healthy = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: healthy)
+    lib, isolate = native._acquire_isolate("/tmp/dwlib")
+    assert lib is healthy
+    assert native._isolate is not None
+    native._release_isolate()  # clean up the fresh isolate
 
 
 class RetryTeardownFake:
@@ -885,6 +847,52 @@ def test_failed_teardown_detaches_worker_so_cross_thread_retry_succeeds(monkeypa
     assert fake.attach_workers == [0x1000, 0x2000]
     assert fake.tear_down_workers == [0x1000, 0x2000]
     assert fake.detached == [0x1000]  # success path does not detach
+
+
+@pytest.mark.unit
+def test_release_teardown_retry_from_a_distinct_os_thread_uses_a_fresh_worker(monkeypatch):
+    """Review #15 #1: the retry must attach a FRESH worker on whatever OS thread
+    runs it -- never reuse a thread attached on another OS thread. Drive the
+    last-release teardown to fail (arming _teardown_needed with NO retained
+    thread), then run the retry from a distinct threading.Thread and prove it
+    attached a new worker on that thread and tore down successfully.
+
+    RetryTeardownFake implements only the lifecycle ABI (attach/detach/teardown),
+    not the full export set _acquire_isolate/_bind_abi require, so publish the
+    shared isolate by driving the globals directly -- exactly the setup pattern
+    used by the sibling cross-thread retry test above."""
+    fake = RetryTeardownFake()
+    monkeypatch.setattr(native, "_lib", fake)
+    monkeypatch.setattr(native, "_lib_path", "/tmp/dwlib")
+    monkeypatch.setattr(native, "_isolate", native.GraalIsolatePointer())
+    monkeypatch.setattr(native, "_isolate_ref_count", 1)
+    monkeypatch.setattr(native, "_teardown_needed", False)
+
+    with pytest.raises(native.DataWeaveError):
+        native._release_isolate()                  # last release: teardown fails once -> armed
+    assert native._teardown_needed is True
+    assert native._isolate is not None
+    workers_before = list(fake.attach_workers)
+
+    errors = []
+    def retry_on_other_thread():
+        try:
+            with native._isolate_lock:
+                native._retry_pending_teardown_locked()   # succeeds on the 2nd teardown
+        except BaseException as e:  # pragma: no cover - surfaced via errors
+            errors.append(e)
+
+    t = threading.Thread(target=retry_on_other_thread)
+    t.start()
+    t.join()
+
+    assert errors == []
+    assert native._teardown_needed is False
+    assert native._isolate is None
+    # The retry attached a NEW worker (distinct pointer) and tore down with IT.
+    assert len(fake.attach_workers) == len(workers_before) + 1
+    fresh_worker = fake.attach_workers[-1]
+    assert fake.tear_down_workers[-1] == fresh_worker
 
 
 @pytest.mark.unit

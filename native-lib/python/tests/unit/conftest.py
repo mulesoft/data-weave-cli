@@ -21,5 +21,4 @@ def _clear():
     native._isolate = None
     native._isolate_ref_count = 0
     native._teardown_needed = False
-    native._pending_teardown_thread = None
     native._lib_path = None
