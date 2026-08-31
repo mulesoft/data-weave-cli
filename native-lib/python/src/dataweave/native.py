@@ -28,8 +28,14 @@ GraalIsolateThreadPointer = ctypes.POINTER(graal_isolatethread_t)
 
 # ── Process-wide shared isolate (one per process, N handle-addressed engines) ──
 # All mutations happen under _isolate_lock. Invariant: _isolate_ref_count equals
-# the number of live engines across all DataWeave instances, and _isolate is not
-# None iff the count > 0.
+# the number of outstanding ownership/init references (one per live engine across
+# all DataWeave instances). A positive count requires a live _isolate; a zero
+# count normally means _isolate is None, but may temporarily retain a live one
+# pending a teardown retry (_teardown_needed, see _release_isolate /
+# _retry_pending_teardown_locked), or leak one for the process lifetime after an
+# unrecoverable teardown path (double detach+teardown failure, or the bootstrap
+# double failure in _acquire_isolate). The count is proof of outstanding
+# ownership, not proof of physical isolate existence.
 _isolate_lock = Lock()
 _lib = None
 _lib_path = None
