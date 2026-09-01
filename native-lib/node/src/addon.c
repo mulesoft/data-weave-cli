@@ -732,13 +732,19 @@ static void init_thread_fn(void* arg) {
   uv_dlsym(&g_lib, "run_script_callback_engine", (void**)&fn_run_script_callback_engine);
   uv_dlsym(&g_lib, "run_script_input_output_callback_engine", (void**)&fn_run_script_input_output_callback_engine);
 
-  // graal_detach_thread and graal_tear_down_isolate are required, not optional:
-  // the bootstrap-detach failure path below (review #20 #1) tears the isolate
-  // down with boot_thread on a failed detach, and its guard short-circuits when
-  // these pointers are NULL. Gating them here makes that guard's guarantee
-  // unconditional -- a dwlib missing them fails init fast with a clear message
-  // instead of publishing an isolate whose bootstrap thread was never detached.
-  if (!fn_create_isolate || !fn_free_cstring || !fn_detach_thread || !fn_tear_down_isolate) {
+  // graal_attach_thread, graal_detach_thread and graal_tear_down_isolate are
+  // required, not optional. graal_attach_thread is called UNCONDITIONALLY on
+  // every engine-creation, execution, and teardown path (e.g. createEngine at
+  // fn_attach_thread(g_isolate, &thread) with no NULL guard), so a dwlib missing
+  // it would pass init and then invoke a NULL function pointer on the first
+  // createEngine() (review #21 #2). graal_detach_thread/graal_tear_down_isolate
+  // back the bootstrap-detach failure path below (review #20 #1), whose guard
+  // short-circuits when those pointers are NULL. Gating all three here makes
+  // those guarantees unconditional -- a dwlib missing any of them fails init
+  // fast with a clear message instead of crashing or publishing an isolate whose
+  // bootstrap thread was never detached.
+  if (!fn_create_isolate || !fn_free_cstring || !fn_attach_thread ||
+      !fn_detach_thread || !fn_tear_down_isolate) {
     snprintf(args->error, sizeof(args->error), "Missing required symbols in library");
     args->result = -2;
     return;
