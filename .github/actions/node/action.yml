@@ -56,24 +56,56 @@ runs:
         cd native-lib/node && npm run test:tck
       shell: bash
 
-    - name: Stage OS-qualified Node package
-      if: inputs.publish == 'artifact'
-      run: cp native-lib/node/dataweave-native-0.0.1.tgz "native-lib/node/dataweave-node-0.0.1-${{ inputs.script-name }}-${{ inputs.arch }}.tgz"
+    - name: Resolve Node package names
+      if: inputs.publish != 'none'
+      id: node-package
+      run: |
+        case "${{ inputs.script-name }}-${{ inputs.arch }}" in
+          linux-x86_64) NPM_PLAT=linux-x64 ;;
+          windows-x86_64) NPM_PLAT=win32-x64 ;;
+          macos-arm64) NPM_PLAT=darwin-arm64 ;;
+          *) echo "unmapped platform"; exit 1 ;;
+        esac
+        VER="${{ inputs.native-version }}"
+        if [ -z "$VER" ]; then
+          VER=$(awk -F= '/^nativeVersion=/ { print $2 }' gradle.properties)
+        fi
+        echo "platform_name=dataweave-native-${NPM_PLAT}-${VER}.tgz" >> "$GITHUB_OUTPUT"
+        echo "meta_name=dataweave-native-${VER}.tgz" >> "$GITHUB_OUTPUT"
+        echo "platform=native-lib/node/dataweave-native-${NPM_PLAT}-${VER}.tgz" >> "$GITHUB_OUTPUT"
+        echo "meta=native-lib/node/dataweave-native-${VER}.tgz" >> "$GITHUB_OUTPUT"
       shell: bash
 
-    - name: Upload Node package (artifact)
+    - name: Upload platform Node package (artifact)
       if: inputs.publish == 'artifact'
       uses: actions/upload-artifact@v7.0.1
       with:
-        path: native-lib/node/dataweave-node-0.0.1-${{ inputs.script-name }}-${{ inputs.arch }}.tgz
+        path: ${{ steps.node-package.outputs.platform }}
         archive: false
 
-    - name: Upload Node package to release
+    - name: Upload meta Node package (artifact)
+      if: inputs.publish == 'artifact' && inputs.script-name == 'linux'
+      uses: actions/upload-artifact@v7.0.1
+      with:
+        path: ${{ steps.node-package.outputs.meta }}
+        archive: false
+
+    - name: Upload platform Node package to release
       if: inputs.publish == 'release'
       uses: svenstaro/upload-release-action@v2
       with:
         repo_token: ${{ inputs.repo-token }}
-        file: native-lib/node/dataweave-native-0.0.1.tgz
-        asset_name: dataweave-node-0.0.1-${{ inputs.script-name }}-${{ inputs.arch }}.tgz
+        file: ${{ steps.node-package.outputs.platform }}
+        asset_name: ${{ steps.node-package.outputs.platform_name }}
+        tag: ${{ inputs.tag }}
+        overwrite: true
+
+    - name: Upload meta Node package to release
+      if: inputs.publish == 'release' && inputs.script-name == 'linux'
+      uses: svenstaro/upload-release-action@v2
+      with:
+        repo_token: ${{ inputs.repo-token }}
+        file: ${{ steps.node-package.outputs.meta }}
+        asset_name: ${{ steps.node-package.outputs.meta_name }}
         tag: ${{ inputs.tag }}
         overwrite: true

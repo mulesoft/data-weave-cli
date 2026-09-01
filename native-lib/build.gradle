@@ -180,6 +180,16 @@ tasks.register('pythonTest', Exec) {
 
 // --- Node.js native package tasks ---
 
+def nodePlatformToken
+def osName = System.getProperty('os.name').toLowerCase()
+if (osName.contains('windows')) {
+  nodePlatformToken = 'win32-x64'
+} else if (osName.contains('mac')) {
+  nodePlatformToken = 'darwin-arm64'
+} else {
+  nodePlatformToken = 'linux-x64'
+}
+
 tasks.register('stageNodeNativeLib', Copy) {
   dependsOn tasks.named('stripNativeLibrary')
   from("${layout.buildDirectory.get().asFile}/native/nativeCompile") {
@@ -248,16 +258,30 @@ tasks.register('buildNodePackage', Exec) {
   inputs.file("${projectDir}/node/package.json")
   inputs.file("${projectDir}/node/binding.gyp")
   inputs.file("${projectDir}/node/tsconfig.json")
+  inputs.file("${projectDir}/node/scripts/pack-packages.mjs")
+  inputs.property('nativeVersion', project.version.toString())
   outputs.dir("${projectDir}/node/dist")
   outputs.file("${projectDir}/node/build/Release/dwlib_addon.node")
+  outputs.file("${projectDir}/node/dataweave-native-${project.version}.tgz")
+  outputs.file("${projectDir}/node/dataweave-native-${nodePlatformToken}-${project.version}.tgz")
+  environment 'NATIVE_VERSION', project.version.toString()
   doFirst {
     delete("${projectDir}/node/dist")
   }
   if (System.getProperty('os.name').toLowerCase().contains('windows')) {
-    commandLine('cmd', '/c', 'npm install && npx node-gyp rebuild && npx tsc && npm pack')
+    commandLine('cmd', '/c', 'npm install && npx node-gyp rebuild && npx tsc && node scripts/pack-packages.mjs')
   } else {
-    commandLine('bash', '-c', 'npm install && npx node-gyp rebuild && npx tsc && npm pack')
+    commandLine('bash', '-c', 'npm install && npx node-gyp rebuild && npx tsc && node scripts/pack-packages.mjs')
   }
+}
+
+tasks.register('nodePackTest', Exec) {
+  if (project.findProperty('skipNodeTests')?.toString()?.toBoolean() == true) {
+    enabled = false
+  }
+
+  workingDir("${projectDir}/node")
+  commandLine('node', '--test', 'scripts/pack-packages.test.mjs')
 }
 
 tasks.register('nodeTest', Exec) {
@@ -349,6 +373,7 @@ tasks.register('benchmarkJsUnitTest', Exec) {
 
 tasks.named('test') {
   dependsOn tasks.named('pythonTest')
+  dependsOn tasks.named('nodePackTest')
   dependsOn tasks.named('nodeTest')
   dependsOn tasks.named('benchmarkPythonStatsTest')
   dependsOn tasks.named('benchmarkJsUnitTest')
@@ -361,6 +386,7 @@ tasks.named('clean') {
   delete("${projectDir}/python/src/dataweave_native.egg-info")
   delete("${projectDir}/node/dist")
   delete("${projectDir}/node/build")
+  delete fileTree("${projectDir}/node") { include '*.tgz' }
   delete("${projectDir}/node/native")
   delete("${projectDir}/node/node_modules")
 }

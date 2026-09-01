@@ -326,15 +326,23 @@ print(b"".join(chunks))  # [1,4,9,16,25]
 
 ## Installing for use in a Node.js project
 
-### Option A: Install the produced tarball (recommended)
+### Option A: Install the package (recommended)
 
-After `:native-lib:buildNodePackage`:
+From npm:
 
 ```bash
-npm install native-lib/node/dataweave-native-0.0.1.tgz
+npm install dataweave-native
 ```
 
-This tarball includes the pre-built native addon and the `dwlib.*` shared library.
+Supported platform packages are `dataweave-native-linux-x64`,
+`dataweave-native-win32-x64`, and `dataweave-native-darwin-arm64`.
+
+After `:native-lib:buildNodePackage`, install the local meta-package tarball and the
+matching platform tarball:
+
+```bash
+npm install ./native-lib/node/dataweave-native-<ver>.tgz ./native-lib/node/dataweave-native-<platform>-<ver>.tgz
+```
 
 ### Option B: Development install (link)
 
@@ -394,7 +402,7 @@ The module also searches:
 All examples below assume:
 
 ```typescript
-import { run, runStreaming, runTransform, cleanup } from "@dataweave/native";
+import { run, runStreaming, runTransform, cleanup } from "dataweave-native";
 ```
 
 ### 1) Simple script
@@ -446,7 +454,7 @@ if (result.success) {
 The module-level API (`run(...)`) uses a shared singleton. Use the `DataWeave` class directly when you need explicit control over isolate lifecycle:
 
 ```typescript
-import { DataWeave } from "@dataweave/native";
+import { DataWeave } from "dataweave-native";
 
 const dw = new DataWeave();
 dw.initialize();
@@ -470,7 +478,7 @@ There are two error classes:
 **Option A: Use `raiseOnError: true` for try/catch (recommended)**
 
 ```typescript
-import { run, DataWeaveScriptError } from "@dataweave/native";
+import { run, DataWeaveScriptError } from "dataweave-native";
 
 try {
   const result = run("invalid syntax here", {}, { raiseOnError: true });
@@ -638,7 +646,7 @@ for await (const chunk of gen) {
 The module registers a `process.on('exit')` handler to clean up automatically. For explicit control:
 
 ```typescript
-import { cleanup } from "@dataweave/native";
+import { cleanup } from "dataweave-native";
 
 // When done with all DataWeave operations
 cleanup();

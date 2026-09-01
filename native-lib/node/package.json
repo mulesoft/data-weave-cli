@@ -1,5 +1,5 @@
 {
-  "name": "@dataweave/native",
+  "name": "dataweave-native",
   "version": "0.0.1",
   "description": "Node.js bindings for the DataWeave native library",
   "main": "dist/index.js",
@@ -15,14 +15,10 @@
     "test:tck": "vitest run --project tck",
     "test:coverage": "vitest run --coverage",
     "test:coverage:unit": "vitest run --project unit --coverage",
-    "pack": "npm pack"
+    "pack": "node scripts/pack-packages.mjs"
   },
   "files": [
     "dist/",
-    "native/",
-    "build/Release/dwlib_addon.node",
-    "src/addon.c",
-    "binding.gyp",
     "docs/"
   ],
   "os": [
@@ -34,8 +30,22 @@
     "node": ">=18"
   },
   "gypfile": true,
+  "author": "MuleSoft",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mulesoft/data-weave-cli.git"
+  },
+  "homepage": "https://dataweave.mulesoft.com/",
+  "bugs": {
+    "url": "https://github.com/mulesoft/data-weave-cli/issues"
+  },
   "dependencies": {
     "adm-zip": "^0.6.0"
+  },
+  "optionalDependencies": {
+    "dataweave-native-linux-x64": "0.0.1",
+    "dataweave-native-win32-x64": "0.0.1",
+    "dataweave-native-darwin-arm64": "0.0.1"
   },
   "devDependencies": {
     "@types/node": "^20",

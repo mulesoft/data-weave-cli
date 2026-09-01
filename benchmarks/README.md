@@ -61,7 +61,7 @@ The one-shot cross-runner comparison — runs **every** registered runner and pr
 The Node and Python runners can benchmark pre-built wrapper artifacts via env vars, skipping
 their corresponding local wrapper build or staging task:
 
-- **`DW_BENCH_NODE_PACKAGE`** — absolute path to an extracted `@dataweave/native` package
+- **`DW_BENCH_NODE_PACKAGE`** — absolute path to an extracted `dataweave-native` package
   directory (must contain `dist/index.js`). Example:
 
       DW_BENCH_NODE_PACKAGE=/tmp/artifacts/node/package \
