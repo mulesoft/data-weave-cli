@@ -1,0 +1,112 @@
+name: Promote release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: GitHub release tag (v1.2.3)
+        required: true
+        type: string
+      dry_run:
+        description: Print formula changes without opening a tap PR
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  homebrew:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Test Homebrew helpers
+        run: node --test scripts/promote/homebrew.test.mjs
+      - name: Resolve tag and download macOS CLI zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node --input-type=module -e "import { parseTag } from './scripts/promote/homebrew.mjs'; console.log(parseTag(process.env.TAG));")
+          ASSET=$(VERSION="$VERSION" node --input-type=module -e "import { assetName } from './scripts/promote/homebrew.mjs'; console.log(assetName(process.env.VERSION));")
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fx "$ASSET"
+          gh release download "$TAG" --pattern "$ASSET"
+          unzip -Z1 "$ASSET" | grep -Fx 'bin/dw'
+          SHA=$(sha256sum "$ASSET" | awk '{print $1}')
+          {
+            echo "VERSION=$VERSION"
+            echo "ASSET=$ASSET"
+            echo "SHA=$SHA"
+          } >> "$GITHUB_ENV"
+      - name: Checkout tap
+        uses: actions/checkout@v4
+        with:
+          repository: mulesoft/homebrew-data-weave
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - name: Rewrite formula
+        id: formula
+        env:
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ env.SHA }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'EOF'
+          import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+          import {
+            alreadyPromoted,
+            parseTag,
+            releaseAssetUrl,
+            rewriteFormula,
+          } from "./scripts/promote/homebrew.mjs";
+
+          const tag = process.env.TAG;
+          const version = parseTag(tag);
+          const formulaPath = "tap/formula/dw.rb";
+          const formula = readFileSync(formulaPath, "utf8");
+
+          if (alreadyPromoted(formula, version)) {
+            console.log(`already promoted: ${version}`);
+            appendFileSync(process.env.GITHUB_OUTPUT, "skipped=true\n");
+            process.exit(0);
+          }
+
+          const next = rewriteFormula(formula, {
+            url: releaseAssetUrl("mulesoft/data-weave-cli", tag, version),
+            sha256: process.env.SHA,
+            version,
+          });
+          writeFileSync(formulaPath, next);
+          console.log(next);
+          appendFileSync(process.env.GITHUB_OUTPUT, "skipped=false\n");
+          EOF
+      - name: Open tap pull request
+        if: steps.formula.outputs.skipped == 'false' && inputs.dry_run == false
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ env.VERSION }}
+          ASSET: ${{ env.ASSET }}
+          SHA: ${{ env.SHA }}
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          BRANCH="promote-dw-${VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add formula/dw.rb
+          git commit -m "chore: promote dw ${VERSION}"
+          git push -u origin "$BRANCH" --force
+          if gh pr list --repo mulesoft/homebrew-data-weave --head "$BRANCH" --json number --jq '.[0].number' | grep -q .; then
+            echo "PR already open"
+          else
+            gh pr create --repo mulesoft/homebrew-data-weave --base master --head "$BRANCH" \
+              --title "Promote dw ${VERSION}" \
+              --body "From ${TAG} asset ${ASSET} sha256 ${SHA}"
+          fi
