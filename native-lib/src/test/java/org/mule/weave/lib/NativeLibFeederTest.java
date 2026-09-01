@@ -504,6 +504,11 @@ class NativeLibFeederTest {
                     return 0; // clean EOF once released, so the loop exits promptly
                 }
             };
+            // Two references to the SAME thread on purpose: `ft` is final so the
+            // cleaner lambda below can capture it, while `feederThread` is the
+            // method-scope (reassignable, initially null) alias the finally uses to
+            // join it. Do not collapse these into one variable -- a reassignable
+            // local cannot be captured by the lambda.
             final Thread ft = new Thread(feeder, "test-busy-spin-feeder");
             feederThread = ft;
             ft.setDaemon(true);
