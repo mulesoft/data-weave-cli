@@ -377,7 +377,10 @@ because a boolean cannot represent the window during which `cleanup()` has start
   needing guaranteed graceful shutdown register and await their own signal handlers.
 - Module-level `cleanup()` coalesces overlapping calls via a module-scoped `cleanupPromise` (it
   nulls `globalInstance` synchronously so new work builds a fresh instance, but overlapping
-  `cleanup()`s await the same drain and resolve only when native teardown finishes).
+  `cleanup()`s await the same drain and resolve once the native teardown *attempt* completes --
+  guaranteeing logical release, not necessarily physical reclamation: an ordinary teardown failure
+  retains the live isolate and retries where safe, and an unrecoverable teardown-plus-detach double
+  failure leaks it for the process lifetime with a stderr diagnostic (§6.2)).
 
 ### 6.5 Robustness of native allocation and streaming
 
@@ -480,7 +483,9 @@ regardless of which OS thread performs the last release.
 ### 7.3 Instance lifecycle
 
 - **`initialize()`** — under the lock, `_acquire_isolate` (create-on-first-ref + bootstrap detach,
-  `_isolate_ref_count += 1`); then `create_engine()` or `create_engine_with_resolver(ctx, trampoline)`,
+  `_isolate_ref_count += 1`); then `create_engine()` or `create_engine_with_resolver(trampoline, ctx)`
+  (post-isolate ABI order is `(resolverCallback, ctx)`; the full C signature is
+  `create_engine_with_resolver(isolateThread, resolverCallback, ctx)`),
   storing the returned `handle` on the instance. If `create_engine` fails after the isolate ref was
   taken, the instance releases the ref (tearing down if it was the only one) and — when a resolver
   was installed before `initialize()` — unregisters its resolver token, so a failed init leaks
@@ -614,11 +619,11 @@ dwB.run(...)  →  resolves via resolver B only; A's cache untouched; no cross-t
 ```
 dwA = DataWeave(resolve_module=A); dwA.initialize()
   → lock: _isolate None → graal_create_isolate() + detach bootstrap thread; ref 0→1
-  → create_engine_with_resolver(ctx=tokenA, trampoline); registry[tokenA]=dwA; dwA._handle = handleA
+  → create_engine_with_resolver(trampoline, ctx=tokenA); registry[tokenA]=dwA; dwA._handle = handleA
 
 dwB = DataWeave(resolve_module=B); dwB.initialize()
   → lock: _isolate exists → reuse; ref 1→2
-  → create_engine_with_resolver(ctx=tokenB, trampoline); registry[tokenB]=dwB
+  → create_engine_with_resolver(trampoline, ctx=tokenB); registry[tokenB]=dwB
 
 dwA.run("... import custom/lib ...")
   → attach a fresh thread on demand → run_script_engine(handleA, script, inputs) → detach
