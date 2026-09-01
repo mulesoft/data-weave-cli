@@ -2294,11 +2294,18 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
     if (rec == NULL) {
         // Roll back the engine we just created so we don't leak a registered but
         // unrecorded handle. fn_destroy_engine attaches its own thread.
+        int detach_rc = 0;
         if (fn_destroy_engine) {
             void* t2 = NULL;
-            if (fn_attach_thread(g_isolate, &t2) == 0) { fn_destroy_engine(t2, handle); fn_detach_thread(t2); }
+            if (fn_attach_thread(g_isolate, &t2) == 0) { fn_destroy_engine(t2, handle); detach_rc = fn_detach_thread(t2); }
         }
-        uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+        // review #21 #1 (final-review completeness): this OOM-rollback detach is an
+        // ordinary detach too -- a failure here strands a phantom thread and would
+        // wedge a later teardown, so poison in the same critical section as the
+        // g_active_ops-- (before the decrement/broadcast), matching the other sites.
+        uv_mutex_lock(&g_mutex);
+        if (detach_rc != 0) poison_isolate_detach_failure_locked(detach_rc);
+        g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
         napi_throw_error(env, NULL, "Failed to allocate engine record");
         return NULL;
     }
