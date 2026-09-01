@@ -234,6 +234,17 @@ static bool g_teardown_cancelled = false;
 // While set with g_active_ops > 0, the op-completion drain point retries the
 // teardown once ops reach 0 (retry_stranded_teardown_locked).
 static bool g_teardown_needed = false;
+// review #21 #1: set under g_mutex when an ORDINARY operation's
+// graal_detach_thread() returns nonzero, leaving a phantom OS thread attached to
+// the live isolate. Unlike g_teardown_needed (a retryable "teardown couldn't run
+// yet" signal), this is TERMINAL for this isolate: graal_tear_down_isolate()
+// would block forever waiting for the phantom to reach a safepoint, so any later
+// teardown must SKIP the attempt and leak-and-continue (CLEANUP_UNRECOVERABLE)
+// instead of hanging. The isolate stays fully usable for running more ops
+// (GraalVM tolerates many attached threads); only its teardown is doomed. Reset
+// to false when a FRESH isolate is created (init_thread_fn) and by
+// abandon_unrecoverable_isolate_locked().
+static bool g_isolate_poisoned = false;
 static uv_cond_t g_teardown_cond;
 
 // teardown+detach double failure (review #17 #1): an exiting worker is stuck
@@ -252,11 +263,38 @@ static void abandon_unrecoverable_isolate_locked(void) {
   g_initialized = 0;
   g_ref_count = 0;
   g_teardown_needed = false;
+  g_isolate_poisoned = false;
   fprintf(stderr,
           "[DataWeave Node addon] GraalVM isolate teardown AND worker detach both "
           "failed; the isolate can never be torn down and is being leaked for the "
           "process lifetime. Binding state was reset so a later initialize() "
           "builds a fresh isolate.\n");
+}
+
+// review #21 #1: mark the shared isolate un-tear-down-able because an ordinary
+// op's graal_detach_thread() failed (a phantom thread is now stuck attached).
+// Emits a one-time stderr diagnostic on the false->true transition. Caller holds
+// g_mutex. Teardown paths consult g_isolate_poisoned and leak-and-continue
+// (CLEANUP_UNRECOVERABLE) instead of calling graal_tear_down_isolate(), which
+// would hang. The triggering op still delivers its (valid) result -- only the
+// isolate's eventual teardown is affected.
+static void poison_isolate_detach_failure_locked(int detach_rc) {
+  if (!g_isolate_poisoned) {
+    fprintf(stderr,
+            "[DataWeave Node addon] graal_detach_thread failed (code %d) after an "
+            "operation; a thread is stuck attached to the isolate, so it can never "
+            "be torn down. Teardown will leak the isolate for the process lifetime "
+            "instead of hanging, and a later initialize() builds a fresh one.\n",
+            detach_rc);
+  }
+  g_isolate_poisoned = true;
+}
+
+// Lock-taking wrapper for call sites that are NOT already holding g_mutex.
+static void poison_isolate_detach_failure(int detach_rc) {
+  uv_mutex_lock(&g_mutex);
+  poison_isolate_detach_failure_locked(detach_rc);
+  uv_mutex_unlock(&g_mutex);
 }
 
 // One node per cleanup() call that arrived while a teardown was already
@@ -449,7 +487,8 @@ static bool bridge_finalize_registry(engine_bridge_t* b) {
     bool destroyed = false;
     if (fn_attach_thread(g_isolate, &thread) == 0 && thread != NULL) {
         fn_destroy_engine(thread, b->handle);
-        fn_detach_thread(thread);
+        int detach_rc = fn_detach_thread(thread);
+        if (detach_rc != 0) poison_isolate_detach_failure(detach_rc);
         destroyed = true;  // registry entry removed -> resolver ctx is now dead
     }
     // else: attach failed while the isolate is STILL LIVE -- destroy was skipped,
@@ -772,6 +811,12 @@ static void init_thread_fn(void* arg) {
     args->result = rc;
     return;
   }
+
+  // review #21 #1: a brand-new isolate starts un-poisoned. Any poison flag left
+  // over from a previously abandoned/leaked isolate must not carry onto this
+  // fresh one. Runs under the init caller's g_mutex (see the g_mutex discipline
+  // note for init_thread_fn).
+  g_isolate_poisoned = false;
 
   // Detach the bootstrap thread immediately. This init OS thread is joined and
   // exits right after, so leaving it attached would leave a phantom attached
@@ -1204,6 +1249,7 @@ static void streaming_thread_fn(void* arg) {
   // back to the OOM_JSON static (which must never be freed; see the guarded
   // frees below and in call_js_write).
   char* meta_result = NULL;
+  int detach_rc = 0;
   if (rc != 0) {
     char err[256];
     snprintf(err, sizeof(err), "{\"success\":false,\"error\":\"Failed to attach thread (code %d)\"}", rc);
@@ -1221,7 +1267,7 @@ static void streaming_thread_fn(void* arg) {
       meta_result = strdup("{\"success\":false,\"error\":\"Empty response\"}");
       if (meta_result == NULL) meta_result = (char*)OOM_JSON;
     }
-    fn_detach_thread(worker_thread);
+    detach_rc = fn_detach_thread(worker_thread);
   }
 
   // Decrement here, once this thread has fully detached from the isolate --
@@ -1232,6 +1278,7 @@ static void streaming_thread_fn(void* arg) {
   // here ties g_active_ops to the actual invariant isolate teardown needs
   // (no GraalVM-attached thread remains), independent of the event loop.
   uv_mutex_lock(&g_mutex);
+  if (detach_rc != 0) poison_isolate_detach_failure_locked(detach_rc);
   g_active_ops--;
   uv_cond_broadcast(&g_teardown_cond);
   // Round-14 (#2/#3): if a prior last-release could not tear the isolate down
@@ -1727,6 +1774,7 @@ static void transform_thread_fn(void* arg) {
   // so the sentinel below still delivers a terminal result. Mirrors
   // streaming_thread_fn.
   char* meta_result = NULL;
+  int detach_rc = 0;
   if (rc != 0) {
     char err[256];
     snprintf(err, sizeof(err), "{\"success\":false,\"error\":\"Failed to attach thread (code %d)\"}", rc);
@@ -1747,13 +1795,14 @@ static void transform_thread_fn(void* arg) {
       meta_result = strdup("{\"success\":false,\"error\":\"Empty response\"}");
       if (meta_result == NULL) meta_result = (char*)OOM_JSON;
     }
-    fn_detach_thread(worker_thread);
+    detach_rc = fn_detach_thread(worker_thread);
   }
 
   // See streaming_thread_fn's comment: decrement here (after detach), not in
   // call_js_transform_write's completion branch, to avoid the same
   // circular-wait deadlock against napi_initialize's pending-teardown wait.
   uv_mutex_lock(&g_mutex);
+  if (detach_rc != 0) poison_isolate_detach_failure_locked(detach_rc);
   g_active_ops--;
   uv_cond_broadcast(&g_teardown_cond);
   // Round-14 (#2/#3): retry a stranded teardown now that this op has drained.
@@ -2215,7 +2264,8 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
         napi_throw_error(env, NULL, "Failed to attach thread"); return NULL;
     }
     long long handle = fn_create_engine(thread);
-    fn_detach_thread(thread);
+    int detach_rc = fn_detach_thread(thread);
+    if (detach_rc != 0) poison_isolate_detach_failure(detach_rc);
     // A GraalVM @CEntryPoint that throws on the Java side returns the return
     // type's default value instead of propagating the exception — 0 for a
     // long long. The real handle registry only ever hands out handles >= 1, so
@@ -2346,7 +2396,8 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
         napi_throw_error(env, NULL, "Failed to attach thread"); return NULL;
     }
     long long handle = fn_create_engine_with_resolver(thread, resolve_module_callback, (void*)bridge);
-    fn_detach_thread(thread);
+    int detach_rc = fn_detach_thread(thread);
+    if (detach_rc != 0) poison_isolate_detach_failure(detach_rc);
 
     // Same invalid-handle guard as napi_create_engine: a Java-side construction
     // failure surfaces here as handle == 0 (GraalVM @CEntryPoint default-value
@@ -2534,12 +2585,14 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
                 g_active_ops++;  // pins the live isolate against teardown for this attach
                 uv_mutex_unlock(&g_mutex);
                 void* thread = NULL;
+                int detach_rc = 0;
                 if (fn_attach_thread(g_isolate, &thread) == 0 && thread != NULL) {
                     fn_destroy_engine(thread, handle);
-                    fn_detach_thread(thread);
+                    detach_rc = fn_detach_thread(thread);
                 }
                 // Verbatim g_active_ops release pattern.
                 uv_mutex_lock(&g_mutex);
+                if (detach_rc != 0) poison_isolate_detach_failure_locked(detach_rc);
                 g_active_ops--;
                 uv_cond_broadcast(&g_teardown_cond);
                 uv_mutex_unlock(&g_mutex);
@@ -2634,7 +2687,8 @@ static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) 
 
     char* result_copy = result ? strdup(result) : NULL;
     if (result != NULL) fn_free_cstring(thread, result);
-    fn_detach_thread(thread);
+    int detach_rc = fn_detach_thread(thread);
+    if (detach_rc != 0) poison_isolate_detach_failure(detach_rc);
     free(script); free(inputs);
 
     // Round-11 (#3): release the per-engine pin (may finalize a destroy that a
@@ -2710,6 +2764,15 @@ static void cleanup_thread_fn(void* arg) {
     *out_result = CLEANUP_TORN_DOWN;
     return;
   }
+  if (g_isolate_poisoned) {
+    // review #21 #1: an earlier op's detach failed, leaving a phantom attached
+    // thread. graal_tear_down_isolate() would block forever waiting for it, so do
+    // NOT attempt teardown -- signal leak-and-continue (the caller runs
+    // abandon_unrecoverable_isolate_locked()). Reading g_isolate_poisoned unlocked
+    // is safe: the caller spawns+joins this thread while holding g_mutex.
+    *out_result = CLEANUP_UNRECOVERABLE;
+    return;
+  }
   void* local_thread = NULL;
   if (fn_attach_thread(g_isolate, &local_thread) != 0 || local_thread == NULL) {
     // Attach failed -- the isolate is still alive. Leave *out_result at its
@@ -2749,6 +2812,7 @@ static void teardown_waiter_thread_fn(void* arg) {
     uv_cond_wait(&g_teardown_cond, &g_mutex);
   }
   bool cancelled = g_teardown_cancelled;
+  bool poisoned = g_isolate_poisoned;
   if (!cancelled) {
     // Point of no return: from here an adopting initialize() must NOT reuse the
     // isolate, so publish TEARING_DOWN under the lock before we drop it to call
@@ -2762,7 +2826,12 @@ static void teardown_waiter_thread_fn(void* arg) {
   // call adopted the live isolate instead (see napi_initialize's
   // TEARDOWN_PENDING_WAIT branch).
   cleanup_result_t result = CLEANUP_RETAIN;
-  if (!cancelled && fn_tear_down_isolate && fn_attach_thread && g_isolate) {
+  if (!cancelled && poisoned) {
+    // review #21 #1: a prior op's failed detach left a phantom attached thread;
+    // graal_tear_down_isolate() would hang. Skip it and leak-and-continue -- the
+    // post block below runs abandon_unrecoverable_isolate_locked().
+    result = CLEANUP_UNRECOVERABLE;
+  } else if (!cancelled && fn_tear_down_isolate && fn_attach_thread && g_isolate) {
     void* local_thread = NULL;
     if (fn_attach_thread(g_isolate, &local_thread) == 0 && local_thread != NULL) {
       if (fn_tear_down_isolate(local_thread) == 0) {
