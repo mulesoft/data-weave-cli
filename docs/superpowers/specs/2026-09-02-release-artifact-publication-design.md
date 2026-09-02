@@ -52,13 +52,14 @@ published by each composite action:
 - CLI: `dw-cli-<version>-<linux|windows|macos>-<arch>.zip`
 - Node: `dataweave-native-<platform>-<version>.tgz`, plus the Linux-produced
   `dataweave-native-<version>.tgz` meta package
-- Python: the built wheel filename
+- Python: the existing platform-qualified built wheel filename
 - Native library: platform-specific `dwlib-<version>-<platform>-<arch>` file,
   plus the shared header only once
 
-The current Python artifact path is platform-independent. The implementation
-must make Python artifact names platform-qualified so parallel matrix uploads do
-not collide. The release publisher must upload each distinct asset exactly once.
+The Python packaging already produces platform-qualified wheel filenames. The
+publisher must retain and upload each wheel, so Linux, Windows, and macOS
+customers receive their matching native-library build. The release publisher
+must upload each distinct asset exactly once.
 
 ## Publish Semantics
 
