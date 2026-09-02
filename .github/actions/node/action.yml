@@ -2,9 +2,8 @@ name: Node artifact
 description: >-
   Sets up Node.js, builds the DataWeave Node package (which embeds dwlib), and
   runs the Node unit/integration tests (always). Optionally runs the master-only
-  Node TCK conformance lane, and optionally publishes the .tgz as a CI artifact
-  (main) or a release asset (release). Requires build-foundation earlier in the
-  same job.
+  Node TCK conformance lane and optionally publishes the .tgz as a CI artifact.
+  Requires build-foundation earlier in the same job.
 inputs:
   native-version:
     description: -PnativeVersion value; empty omits the flag.
@@ -15,23 +14,15 @@ inputs:
     required: false
     default: 'false'
   publish:
-    description: "'none' | 'artifact' | 'release'."
+    description: "'none' | 'artifact'."
     required: false
     default: 'none'
-  repo-token:
-    description: Token for svenstaro release upload (publish=release).
-    required: false
-    default: ''
   arch:
     description: Runtime arch token for artifact/asset names.
     required: false
     default: ''
   script-name:
     description: OS naming token (linux/windows/macos) for artifact/asset names.
-    required: false
-    default: ''
-  tag:
-    description: Release tag (publish=release).
     required: false
     default: ''
 runs:
@@ -80,6 +71,7 @@ runs:
       if: inputs.publish == 'artifact'
       uses: actions/upload-artifact@v7.0.1
       with:
+        name: node-platform-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}
         path: ${{ steps.node-package.outputs.platform }}
         archive: false
 
@@ -87,25 +79,6 @@ runs:
       if: inputs.publish == 'artifact' && inputs.script-name == 'linux'
       uses: actions/upload-artifact@v7.0.1
       with:
+        name: node-meta-${{ inputs.native-version }}
         path: ${{ steps.node-package.outputs.meta }}
         archive: false
-
-    - name: Upload platform Node package to release
-      if: inputs.publish == 'release'
-      uses: svenstaro/upload-release-action@v2
-      with:
-        repo_token: ${{ inputs.repo-token }}
-        file: ${{ steps.node-package.outputs.platform }}
-        asset_name: ${{ steps.node-package.outputs.platform_name }}
-        tag: ${{ inputs.tag }}
-        overwrite: true
-
-    - name: Upload meta Node package to release
-      if: inputs.publish == 'release' && inputs.script-name == 'linux'
-      uses: svenstaro/upload-release-action@v2
-      with:
-        repo_token: ${{ inputs.repo-token }}
-        file: ${{ steps.node-package.outputs.meta }}
-        asset_name: ${{ steps.node-package.outputs.meta_name }}
-        tag: ${{ inputs.tag }}
-        overwrite: true

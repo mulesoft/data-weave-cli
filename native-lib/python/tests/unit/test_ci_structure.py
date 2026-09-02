@@ -67,7 +67,8 @@ def test_python_artifact_owns_test_dependencies_and_tck_junit_upload():
     assert "python-tck-junit-${{ inputs.platform }}" in action
     assert action.index("Create Native Lib Python Wheel") < action.index("Run Python TCK Conformance")
     assert action.index("Upload Python wheel (artifact)") < action.index("Run Python TCK Conformance")
-    assert action.index("Upload Python wheel to release") < action.index("Run Python TCK Conformance")
+    assert "Upload Python wheel to release" not in action
+    assert "svenstaro/upload-release-action" not in action
     assert action.index("Run Python TCK Conformance") < action.index("Upload Python TCK JUnit")
     assert named_step_if(action, "Run Python TCK Conformance") == "always() && inputs.run-tck == 'true'"
     assert "native-lib/build/test-results/pythonTck.xml" in action
