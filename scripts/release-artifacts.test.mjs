@@ -54,5 +54,17 @@ test("publisher retains the versioned native library release filenames", () => {
   assert.doesNotMatch(workflow, /merge-multiple: true/);
   assert.match(workflow, /dwlib-\$\{VERSION\}-\$\{platform\}\.\$\{extension\}/);
   assert.match(workflow, /release-assets\/dwlib-\$\{VERSION\}-linux-x86_64/);
-  assert.match(workflow, /shopt -s globstar nullglob/);
+  assert.match(workflow, /mapfile -d '' assets/);
+});
+
+test("publisher uploads only regular files after artifact download", () => {
+  const workflow = readFileSync(".github/workflows/release.yml", "utf8");
+  assert.match(workflow, /find release-assets -type f \\?\(/);
+  assert.doesNotMatch(workflow, /release-assets\/\*\*\/\*\.zip/);
+});
+
+test("Ubuntu PR CI runs the release publisher contract tests", () => {
+  const workflow = readFileSync(".github/workflows/main.yml", "utf8");
+  assert.match(workflow, /if: matrix\.os == 'mulesoft-ubuntu'/);
+  assert.match(workflow, /node --test scripts\/release-artifacts\.test\.mjs/);
 });
