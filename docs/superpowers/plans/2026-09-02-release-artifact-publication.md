@@ -32,9 +32,9 @@
 - Modify: `.github/actions/native-lib/action.yml:12-88`
 
 **Interfaces:**
-- Consumes: `publish` input values `none`, `artifact`, and legacy `release`.
+- Consumes: `publish` input values `none` and `artifact`.
 - Produces when `publish: artifact`: one Actions artifact per release file, with a stable explicit `name`, while retaining the existing file paths and external filename inside each artifact.
-- The release workflow will use only `publish: artifact`; the composite actions retain their legacy `publish: release` paths for callers outside this workflow.
+- Removes `publish: release`, `repo-token`, and `tag` from all four composite actions because no workflow invokes them.
 
 - [ ] **Step 1: Add failing workflow-contract coverage** by creating `scripts/release-artifacts.test.mjs`.
 

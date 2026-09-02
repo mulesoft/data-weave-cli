@@ -22,6 +22,16 @@ test("Python wheel artifact retains its platform-qualified wheel filename", () =
   assert.match(action, /path: native-lib\/python\/dist\/dataweave_native-0\.0\.1-py3-\*\.whl/);
 });
 
+test("composite actions do not expose direct release publishing", () => {
+  for (const file of files) {
+    const action = readFileSync(file, "utf8");
+    assert.doesNotMatch(action, /'release'/);
+    assert.doesNotMatch(action, /repo-token:/);
+    assert.doesNotMatch(action, /tag:/);
+    assert.doesNotMatch(action, /svenstaro\/upload-release-action/);
+  }
+});
+
 test("release publication happens only on internal Ubuntu after the matrix", () => {
   const workflow = readFileSync(".github/workflows/release.yml", "utf8");
   assert.match(workflow, /publish: 'artifact'/);

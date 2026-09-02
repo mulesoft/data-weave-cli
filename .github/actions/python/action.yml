@@ -3,8 +3,8 @@ description: >-
   Installs Python build dependencies and builds the DataWeave Python wheel
   (which embeds dwlib), runs the Python unit/integration tests, and optionally
   runs the master-only Python TCK conformance lane before publishing the wheel
-  as a CI artifact (main) or a release asset (release). Requires
-  build-foundation to have run earlier in the same job.
+  as a CI artifact. Requires build-foundation to have run earlier in the same
+  job.
 inputs:
   native-version:
     description: -PnativeVersion value; empty omits the flag.
@@ -22,25 +22,13 @@ inputs:
     required: false
     default: 'false'
   platform:
-    description: Platform token for matrix-qualified TCK JUnit artifact names.
+    description: Platform token for CI artifact names.
     required: false
     default: ''
   publish:
-    description: "'none' | 'artifact' | 'release'."
+    description: "'none' | 'artifact'."
     required: false
     default: 'none'
-  platform:
-    description: Platform token for artifact names.
-    required: false
-    default: ''
-  repo-token:
-    description: Token for svenstaro release upload (publish=release).
-    required: false
-    default: ''
-  tag:
-    description: Release tag (publish=release).
-    required: false
-    default: ''
 runs:
   using: composite
   steps:
@@ -67,16 +55,6 @@ runs:
         name: python-wheel-${{ inputs.native-version }}-${{ inputs.platform }}
         path: native-lib/python/dist/dataweave_native-0.0.1-py3-*.whl
         archive: false
-
-    - name: Upload Python wheel to release
-      if: inputs.publish == 'release'
-      uses: svenstaro/upload-release-action@v2
-      with:
-        repo_token: ${{ inputs.repo-token }}
-        file: native-lib/python/dist/dataweave_native-0.0.1-py3-none-*.whl
-        file_glob: true
-        tag: ${{ inputs.tag }}
-        overwrite: true
 
     - name: Run Python TCK Conformance
       if: always() && inputs.run-tck == 'true'

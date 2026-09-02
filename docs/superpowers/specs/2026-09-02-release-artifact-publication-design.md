@@ -70,7 +70,9 @@ For a tag `v<version>`, `publish-release` must:
 3. Create it with generated notes only when absent.
 4. Upload every asset with replacement enabled, making reruns idempotent.
 
-No platform build job may invoke `svenstaro/upload-release-action`, `gh release`,
+The composite actions expose only `none` and `artifact` publication modes. No
+platform build job may invoke `svenstaro/upload-release-action`, `gh release`,
+or any GitHub Releases API endpoint. A failed matrix job prevents
 `publish-release` from starting, so a partial release is never published.
 
 ## Non-goals

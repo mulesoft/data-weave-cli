@@ -2,8 +2,7 @@ name: CLI artifact
 description: >-
   Produces the DataWeave `dw` CLI distro zip; optionally runs the master-only
   native-cli regression/TCK suites; optionally publishes the distro as a CI
-  artifact (main) or a release asset (release). Requires build-foundation to
-  have run earlier in the same job.
+  artifact. Requires build-foundation to have run earlier in the same job.
 inputs:
   native-version:
     description: -PnativeVersion value; empty omits the flag.
@@ -14,13 +13,9 @@ inputs:
     required: false
     default: 'false'
   publish:
-    description: "'none' | 'artifact' | 'release'."
+    description: "'none' | 'artifact'."
     required: false
     default: 'none'
-  repo-token:
-    description: Token for svenstaro release upload (publish=release).
-    required: false
-    default: ''
   arch:
     description: Runtime arch token for artifact/asset names.
     required: false
@@ -31,10 +26,6 @@ inputs:
     default: ''
   distro-os:
     description: Gradle distro classifier (linux/windows/osx) for the source zip name.
-    required: false
-    default: ''
-  tag:
-    description: Release tag (publish=release).
     required: false
     default: ''
 runs:
@@ -61,13 +52,3 @@ runs:
         name: cli-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}
         path: native-cli/build/distributions/dw-cli-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}.zip
         archive: false
-
-    - name: Upload binaries to release
-      if: inputs.publish == 'release'
-      uses: svenstaro/upload-release-action@v2
-      with:
-        repo_token: ${{ inputs.repo-token }}
-        file: native-cli/build/distributions/native-cli-${{ inputs.native-version }}-native-distro-${{ inputs.distro-os }}.zip
-        asset_name: dw-cli-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}.zip
-        tag: ${{ inputs.tag }}
-        overwrite: true
