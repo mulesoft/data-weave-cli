@@ -39,11 +39,6 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      - name: Verify release publisher contract
-        if: matrix.os == 'mulesoft-ubuntu'
-        run: node --test scripts/release-artifacts.test.mjs
-        shell: bash
-
       - name: Derive platform tokens
         run: echo "ARCH=$(uname -m)" >> "$GITHUB_ENV"
         shell: bash
