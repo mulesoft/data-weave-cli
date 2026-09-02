@@ -40,14 +40,6 @@ dependencies {
     testRuntimeOnly 'com.vladsch.flexmark:flexmark-all:0.62.2'
 }
 
-ext {
-    aws = [
-            accessKey: System.getenv("AWS_ACCESS_KEY_ID"),
-            secretKey: System.getenv("AWS_SECRET_KEY")
-    ]
-}
-
-
 def genDirectory = new File("$project.buildDir/genresource")
 
 
