@@ -89,31 +89,44 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: release-assets
-          merge-multiple: true
       - name: Create release and upload assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          HEADER=$(find release-assets -type f -name 'dwlib.h' -print -quit)
+          VERSION="${TAG#v}"
+          HEADER=$(find "release-assets/dwlib-${VERSION}-linux-x86_64" -maxdepth 1 -name 'dwlib.h' -print -quit)
           if [ -z "$HEADER" ]; then
             echo "dwlib.h is missing"
             exit 1
           fi
           mv "$HEADER" "$RUNNER_TEMP/dwlib.h"
           find release-assets -type f -name 'dwlib.h' -delete
-          mv "$RUNNER_TEMP/dwlib.h" "release-assets/dwlib-${TAG#v}.h"
+          mv "$RUNNER_TEMP/dwlib.h" "release-assets/dwlib-${VERSION}.h"
+          for platform in linux-x86_64 windows-x86_64 macos-arm64; do
+            case "$platform" in
+              linux-x86_64) extension=so ;;
+              windows-x86_64) extension=dll ;;
+              macos-arm64) extension=dylib ;;
+            esac
+            source="release-assets/dwlib-${VERSION}-${platform}/dwlib.${extension}"
+            if [ ! -f "$source" ]; then
+              echo "native library is missing: $source"
+              exit 1
+            fi
+            mv "$source" "release-assets/dwlib-${VERSION}-${platform}.${extension}"
+          done
           gh release view "$TAG" || gh release create "$TAG" --generate-notes
-          shopt -s nullglob
+          shopt -s globstar nullglob
           assets=(
-            release-assets/*.zip
-            release-assets/*.whl
-            release-assets/*.tgz
-            release-assets/*.so
-            release-assets/*.dll
-            release-assets/*.dylib
-            release-assets/*.h
+            release-assets/**/*.zip
+            release-assets/**/*.whl
+            release-assets/**/*.tgz
+            release-assets/dwlib-*.so
+            release-assets/dwlib-*.dll
+            release-assets/dwlib-*.dylib
+            release-assets/dwlib-*.h
           )
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "release artifacts are missing"

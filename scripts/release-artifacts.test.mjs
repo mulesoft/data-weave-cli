@@ -12,8 +12,12 @@ const files = [
 test("artifact publishing names every uploaded release input", () => {
   for (const file of files) {
     const action = readFileSync(file, "utf8");
-    assert.match(action, /uses: actions\/upload-artifact@v7\.0\.1/);
-    assert.match(action, /\n\s+name: .+/);
+    const uploads = action.matchAll(
+      /uses: actions\/upload-artifact@v7\.0\.1\n\s+with:\n(?<options>(?:\s+.+\n?)+)/g,
+    );
+    for (const upload of uploads) {
+      assert.match(upload.groups.options, /^\s+name: .+/m);
+    }
   }
 });
 
@@ -42,4 +46,12 @@ test("release publication happens only on internal Ubuntu after the matrix", () 
   assert.match(workflow, /gh release view "\$TAG" \|\| gh release create "\$TAG" --generate-notes/);
   assert.match(workflow, /gh release upload "\$TAG"/);
   assert.doesNotMatch(workflow, /publish: 'release'/);
+});
+
+test("publisher retains the versioned native library release filenames", () => {
+  const workflow = readFileSync(".github/workflows/release.yml", "utf8");
+  assert.doesNotMatch(workflow, /merge-multiple: true/);
+  assert.match(workflow, /dwlib-\$\{VERSION\}-\$\{platform\}\.\$\{extension\}/);
+  assert.match(workflow, /release-assets\/dwlib-\$\{VERSION\}-linux-x86_64/);
+  assert.match(workflow, /shopt -s globstar nullglob/);
 });
