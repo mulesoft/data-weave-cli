@@ -43,6 +43,7 @@ test("release publication happens only on internal Ubuntu after the matrix", () 
   assert.match(workflow, /needs: RELEASE_EXTENSION/);
   assert.match(workflow, /runs-on: mulesoft-ubuntu/);
   assert.match(workflow, /publish-release:\n(?:.|\n)*?permissions:\n\s+contents: write/);
+  assert.match(workflow, /GH_REPO: \$\{\{ github\.repository \}\}/);
   assert.match(workflow, /gh release view "\$TAG" \|\| gh release create "\$TAG" --generate-notes/);
   assert.match(workflow, /gh release upload "\$TAG"/);
   assert.doesNotMatch(workflow, /publish: 'release'/);
