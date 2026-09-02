@@ -58,6 +58,7 @@ runs:
       if: inputs.publish == 'artifact'
       uses: actions/upload-artifact@v7.0.1
       with:
+        name: cli-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}
         path: native-cli/build/distributions/dw-cli-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}.zip
         archive: false
 

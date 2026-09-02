@@ -80,6 +80,7 @@ runs:
       if: inputs.publish == 'artifact'
       uses: actions/upload-artifact@v7.0.1
       with:
+        name: node-platform-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}
         path: ${{ steps.node-package.outputs.platform }}
         archive: false
 
@@ -87,6 +88,7 @@ runs:
       if: inputs.publish == 'artifact' && inputs.script-name == 'linux'
       uses: actions/upload-artifact@v7.0.1
       with:
+        name: node-meta-${{ inputs.native-version }}
         path: ${{ steps.node-package.outputs.meta }}
         archive: false
 
