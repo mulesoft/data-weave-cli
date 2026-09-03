@@ -119,15 +119,7 @@ jobs:
             mv "$source" "release-assets/dwlib-${VERSION}-${platform}.${extension}"
           done
           gh release view "$TAG" || gh release create "$TAG" --generate-notes
-          mapfile -d '' assets < <(find release-assets -type f \(
-            -name '*.zip' -o
-            -name '*.whl' -o
-            -name '*.tgz' -o
-            -name 'dwlib-*.so' -o
-            -name 'dwlib-*.dll' -o
-            -name 'dwlib-*.dylib' -o
-            -name 'dwlib-*.h'
-          \) -print0)
+          mapfile -d '' assets < <(find release-assets -type f -print0)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "release artifacts are missing"
             exit 1
