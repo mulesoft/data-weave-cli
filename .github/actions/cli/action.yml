@@ -51,4 +51,5 @@ runs:
       with:
         name: cli-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}
         path: native-cli/build/distributions/dw-cli-${{ inputs.native-version }}-${{ inputs.script-name }}-${{ inputs.arch }}.zip
+        archive: false
         if-no-files-found: error

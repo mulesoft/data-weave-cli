@@ -85,10 +85,31 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download release artifacts
+      - name: Download CLI archives
         uses: actions/download-artifact@v8
         with:
           path: release-assets
+          pattern: dw-cli-*
+          merge-multiple: true
+          skip-decompress: true
+      - name: Download Python wheels
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          pattern: dataweave_native-*.whl
+          merge-multiple: true
+          skip-decompress: true
+      - name: Download Node packages
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          pattern: dataweave-native-*.tgz
+          merge-multiple: true
+      - name: Download native libraries
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          pattern: dwlib-*
       - name: Create release and upload assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -54,6 +54,7 @@ runs:
       with:
         name: python-wheel-${{ inputs.native-version }}-${{ inputs.platform }}
         path: native-lib/python/dist/dataweave_native-0.0.1-py3-*.whl
+        archive: false
         if-no-files-found: error
 
     - name: Run Python TCK Conformance
