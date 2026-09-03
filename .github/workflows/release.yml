@@ -118,8 +118,34 @@ jobs:
             fi
             mv "$source" "release-assets/dwlib-${VERSION}-${platform}.${extension}"
           done
+          mapfile -d '' assets < <(find release-assets -type f -name '*.zip' -print0)
+          if [ "${#assets[@]}" -ne 3 ]; then
+            echo "expected three CLI archives, found ${#assets[@]}"
+            exit 1
+          fi
+          mapfile -d '' -O "${#assets[@]}" assets < <(find release-assets -type f -name '*.whl' -print0)
+          if [ "${#assets[@]}" -ne 6 ]; then
+            echo "expected three Python wheels"
+            exit 1
+          fi
+          mapfile -d '' -O "${#assets[@]}" assets < <(find release-assets -type f -name '*.tgz' -print0)
+          if [ "${#assets[@]}" -ne 10 ]; then
+            echo "expected four Node packages"
+            exit 1
+          fi
+          assets+=(
+            "release-assets/dwlib-${VERSION}-linux-x86_64.so"
+            "release-assets/dwlib-${VERSION}-windows-x86_64.dll"
+            "release-assets/dwlib-${VERSION}-macos-arm64.dylib"
+            "release-assets/dwlib-${VERSION}.h"
+          )
+          for asset in "${assets[@]}"; do
+            if [ ! -f "$asset" ]; then
+              echo "release asset is missing: $asset"
+              exit 1
+            fi
+          done
           gh release view "$TAG" || gh release create "$TAG" --generate-notes
-          mapfile -d '' assets < <(find release-assets -type f -print0)
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "release artifacts are missing"
             exit 1
