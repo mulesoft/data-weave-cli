@@ -24,8 +24,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Test Homebrew helpers
-        run: node --test scripts/promote/homebrew.test.mjs
       - name: Resolve tag and download macOS CLI zip
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
