@@ -32,3 +32,8 @@ grimoires/
 # Superpowers implementation plans are local scratch artifacts, never commit them.
 /docs/superpowers/plans/
 /docs/superpowers/plans/**/*.md
+
+# PR follow-up code-review notes are local scratch, keep them untracked.
+/docs/pr-*-follow-up-*code-review*.md
+# GA cleanup backlog is a local working note, keep it untracked.
+/docs/ga-cleanup-backlog.md

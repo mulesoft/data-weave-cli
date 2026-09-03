@@ -91,10 +91,10 @@ const LEGACY_IGNORED_CASES: Readonly<Record<string, { reason: string }>> = {
   "multipart-binary-out.multipart": { reason: "multipart: boundary nondeterminism + binary part encoding" },
   "multipart-class-cast-issue-out.multipart": { reason: "multipart: boundary nondeterminism" },
   "multipart-empty-part-out.multipart": { reason: "multipart: boundary nondeterminism + empty part handling" },
-  "multipart-mixed-message-out.multipart": { reason: "multipart: empty parts / structural" },
+  "multipart-mixed-message-out.multipart": { reason: "multipart: execution fails — 'Multipart Object has empty `parts`' (see EXPECTED_EXECUTION_FAILURES, not a skip)" },
   "multipart-write-binary-out.json": { reason: "multipart: binary part write" },
-  "multipart-write-message-out.multipart": { reason: "multipart: empty parts / structural" },
-  "multipart-write-subtype-override-out.multipart": { reason: "multipart: subtype override" },
+  "multipart-write-message-out.multipart": { reason: "multipart: execution fails — 'Multipart Object has empty `parts`' (see EXPECTED_EXECUTION_FAILURES, not a skip)" },
+  "multipart-write-subtype-override-out.multipart": { reason: "multipart: execution fails — 'Multipart Object has empty `parts`' (see EXPECTED_EXECUTION_FAILURES, not a skip)" },
 
   // slow — passes but risks exceeding the 30s test timeout on CI
   "big_intersection-out.json": { reason: "slow: 500-way intersection type exceeds the test timeout" },
@@ -108,10 +108,10 @@ const LEGACY_IGNORED_CASES: Readonly<Record<string, { reason: string }>> = {
   "properties-writer-out.properties": { reason: "nondeterministic: properties output embeds a timestamp comment" },
 
   // coercion/runtime behavior (also CLI-ignored)
-  "access_raw_value-out.json": { reason: "coercion/runtime: Cannot coerce Null to String" },
+  "access_raw_value-out.json": { reason: "coercion/runtime: execution fails — 'Cannot coerce Null to String' (see EXPECTED_EXECUTION_FAILURES, not a skip)" },
   "csv-invalid-utf8-out.csv": { reason: "coercion/runtime: csv invalid utf8 handling" },
-  "read-concat-out.json": { reason: "coercion/runtime: Cannot coerce Null to String" },
-  "update-op-out.dwl": { reason: "coercion/runtime: Cannot coerce Null to Number" },
+  "read-concat-out.json": { reason: "coercion/runtime: execution fails — 'Cannot coerce Null to String' (see EXPECTED_EXECUTION_FAILURES, not a skip)" },
+  "update-op-out.dwl": { reason: "coercion/runtime: execution fails — 'Cannot coerce Null (null) to Number' (see EXPECTED_EXECUTION_FAILURES, not a skip)" },
 
   // xml — attribute selector runtime behavior or serialization differences
   "multi_attribute_selector_after_empty_filter_slot-out.json": { reason: "xml: attribute selector runtime behavior" },
@@ -164,23 +164,17 @@ export const ACCEPTED_BASELINE_MISMATCHES: ExpectedFailurePolicy = {
   "core-modules/multipart-binary-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
   "core-modules/multipart-class-cast-issue-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
   "core-modules/multipart-empty-part-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
-  "core-modules/multipart-mixed-message-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
-  "core-modules/multipart-write-message-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
-  "core-modules/multipart-write-subtype-override-out.multipart:out.multipart": "multipart writer output differs from the baseline fixture",
   "core-modules/properties-passthrough-out.properties:out.properties": "properties writer output differs from the baseline fixture",
   "core-modules/xml-escaped-data-out.xml:out.xml": "XML character escaping differs from the baseline fixture",
   "core-modules/xml-streaming-selectors-out.xml:out.xml": "streaming XML serialization differs from the baseline fixture",
   "core-modules/xml-value-selector-out.xml:out.xml": "XML namespace scoping differs from the baseline fixture",
   "core-modules/xml_empty_namespace-out.xml:out.xml": "empty XML namespace serialization differs from the baseline fixture",
-  "runtime/access_raw_value-out.json:out.json": "runtime coercion output differs from the baseline fixture",
   "runtime/coerciones_toString-out.json:out.json": "locale-sensitive runtime output differs from the baseline fixture",
   "runtime/properties-writer-out.properties:out.properties": "properties writer output differs from the baseline fixture",
-  "runtime/read-concat-out.json:out.json": "runtime coercion output differs from the baseline fixture",
   "runtime/runtime_dataFormatsDescriptors-out.json:out.json": "dw::Runtime output differs from the baseline fixture",
   "runtime/runtime_orElseTry-out.json:out.json": "source-location runtime output differs from the baseline fixture",
   "runtime/runtime_run-out.json:out.json": "dw::Runtime output differs from the baseline fixture",
   "runtime/try-recursive-call-out.json:out.json": "source-location runtime output differs from the baseline fixture",
-  "runtime/update-op-out.dwl:out.dwl": "runtime coercion output differs from the baseline fixture",
 };
 
 export const REENABLED_CASES = [
@@ -192,10 +186,29 @@ export const REENABLED_CASES = [
   "runtime/repeated_attribute_selector_map_slot_permutations-out.json",
 ] as const;
 
+// Cases that are known to FAIL AT EXECUTION (not merely produce a mismatched
+// output). These run — they are not skipped — and the harness asserts
+// `result.success === false` plus a stable error-message discriminator, so a
+// behavior recovery (fixed upstream) or a different failure (regression) both
+// turn the case red instead of staying silently green under a skip.
+export const EXPECTED_EXECUTION_FAILURES: Readonly<Record<string, { errorMatch: string }>> = {
+  "core-modules/multipart-mixed-message-out.multipart:out.multipart": { errorMatch: "Multipart Object has empty `parts`" },
+  "core-modules/multipart-write-message-out.multipart:out.multipart": { errorMatch: "Multipart Object has empty `parts`" },
+  "core-modules/multipart-write-subtype-override-out.multipart:out.multipart": { errorMatch: "Multipart Object has empty `parts`" },
+  "runtime/access_raw_value-out.json:out.json": { errorMatch: "Cannot coerce Null to String" },
+  "runtime/read-concat-out.json:out.json": { errorMatch: "Cannot coerce Null to String" },
+  "runtime/update-op-out.dwl:out.dwl": { errorMatch: "Cannot coerce Null (null) to Number" },
+} as const;
+
+const EXPECTED_EXECUTION_FAILURE_CASES = new Set(
+  Object.keys(EXPECTED_EXECUTION_FAILURES).map((identifier) => identifier.slice(0, identifier.lastIndexOf(":")))
+);
+
 export const CAPABILITY_EXCLUSIONS = Object.fromEntries(
   Object.entries(LEGACY_POLICY).filter(([identifier]) =>
     !Object.keys(ACCEPTED_BASELINE_MISMATCHES).some((scenario) => scenario.startsWith(`${identifier}:`))
       && !REENABLED_CASES.includes(identifier as typeof REENABLED_CASES[number])
+      && !EXPECTED_EXECUTION_FAILURE_CASES.has(identifier)
   )
 );
 
@@ -256,6 +269,7 @@ export function validateReconciledPolicy(
   expectedFailures: ExpectedFailurePolicy,
   reenabledCases: readonly string[] = [],
   runnableScenarios?: ReadonlySet<string>,
+  expectedExecutionFailures: Readonly<Record<string, { errorMatch: string }>> = {},
 ): string[] {
   const errors: string[] = [];
   const reenabledCounts = new Map<string, number>();
@@ -276,9 +290,15 @@ export function validateReconciledPolicy(
   const expectedFailureCases = new Set(
     Object.keys(expectedFailures).map((identifier) => identifier.slice(0, identifier.lastIndexOf(":")))
   );
+  const execFailureCases = new Set(
+    Object.keys(expectedExecutionFailures).map((identifier) => identifier.slice(0, identifier.lastIndexOf(":")))
+  );
   errors.push(...[...reenabledCounts.keys()]
     .filter((identifier) => expectedFailureCases.has(identifier))
     .map((identifier) => `${identifier}: case is both re-enabled and expected to fail`));
+  errors.push(...[...reenabledCounts.keys()]
+    .filter((identifier) => execFailureCases.has(identifier))
+    .map((identifier) => `${identifier}: case is both re-enabled and expected to fail execution`));
   for (const [identifier, reason] of Object.entries(expectedFailures)) {
     if (!reason.trim()) errors.push(`${identifier}: missing expected-failure reason`);
     if (runnableScenarios && !runnableScenarios.has(identifier)) {
@@ -287,6 +307,19 @@ export function validateReconciledPolicy(
     const caseIdentifier = identifier.slice(0, identifier.lastIndexOf(":"));
     if (Object.prototype.hasOwnProperty.call(exclusions, caseIdentifier)) {
       errors.push(`${identifier}: case is both skipped and expected to fail`);
+    }
+    if (execFailureCases.has(caseIdentifier)) {
+      errors.push(`${identifier}: case is both an output-mismatch xfail and an expected execution failure`);
+    }
+  }
+  for (const [identifier, entry] of Object.entries(expectedExecutionFailures)) {
+    if (!entry.errorMatch.trim()) errors.push(`${identifier}: missing errorMatch discriminator`);
+    if (runnableScenarios && !runnableScenarios.has(identifier)) {
+      errors.push(`${identifier}: not a discovered runnable scenario`);
+    }
+    const caseIdentifier = identifier.slice(0, identifier.lastIndexOf(":"));
+    if (Object.prototype.hasOwnProperty.call(exclusions, caseIdentifier)) {
+      errors.push(`${identifier}: case is both skipped and an expected execution failure`);
     }
   }
   return errors.sort();
@@ -315,4 +348,18 @@ export function isIgnored(caseIdentifier: string): boolean {
 /** The documented skip reason for a case, or undefined if not ignored. */
 export function ignoreReason(caseIdentifier: string): string | undefined {
   return IGNORED_CASES[caseIdentifier]?.reason;
+}
+
+/**
+ * Whether a scenario (full `<suite>/<case>:<out.ext>` id) is a strict expected
+ * execution failure — it must run and fail with the returned discriminator,
+ * rather than being skipped.
+ */
+export function isExpectedExecutionFailure(scenarioId: string): { errorMatch: string } | undefined {
+  return EXPECTED_EXECUTION_FAILURES[scenarioId];
+}
+
+/** Whether a case identifier (`<suite>/<case>`) has an expected execution failure scenario. */
+export function isExpectedExecutionFailureCase(caseIdentifier: string): boolean {
+  return EXPECTED_EXECUTION_FAILURE_CASES.has(caseIdentifier);
 }

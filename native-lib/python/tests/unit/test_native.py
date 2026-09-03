@@ -1,6 +1,7 @@
 from pathlib import Path
 import ctypes
-from threading import current_thread, Event, get_ident, Thread
+import threading
+from threading import Barrier, BrokenBarrierError, current_thread, get_ident, Thread
 
 import pytest
 
@@ -24,10 +25,15 @@ class FakeLibrary:
     run_script = Function()
     free_cstring = Function()
 
-    def __init__(self, *, resolver_export=False):
+    def __init__(self):
         self.attach_calls = []
         self.detach_calls = []
         self.tear_down_threads = []
+        self.created_engines = []
+        self.destroyed_engines = []
+        self.create_engine_threads = []
+        self.destroy_engine_threads = []
+        self._next_handle = 1
         self.graal_create_isolate = CallableFunction(lambda _params, _isolate, _thread: 0)
         self.graal_attach_thread = CallableFunction(self._attach_thread)
         self.graal_detach_thread = CallableFunction(
@@ -36,8 +42,32 @@ class FakeLibrary:
         self.graal_tear_down_isolate = CallableFunction(
             lambda thread: self.tear_down_threads.append(thread) or 0
         )
-        if resolver_export:
-            self.run_script_with_resolver = Function()
+        self.free_cstring = Function()
+        self.create_engine = CallableFunction(self._create_engine)
+        self.create_engine_with_resolver = CallableFunction(self._create_engine_with_resolver)
+        self.destroy_engine = CallableFunction(
+            lambda thread, handle: (
+                self.destroy_engine_threads.append(thread),
+                self.destroyed_engines.append(handle),
+            )
+        )
+        self.run_script_engine = Function()
+        self.run_script_callback_engine = Function()
+        self.run_script_input_output_callback_engine = Function()
+
+    def _create_engine(self, thread):
+        handle = self._next_handle
+        self._next_handle += 1
+        self.created_engines.append((handle, None, None))
+        self.create_engine_threads.append(thread)
+        return handle
+
+    def _create_engine_with_resolver(self, thread, callback, ctx):
+        handle = self._next_handle
+        self._next_handle += 1
+        self.created_engines.append((handle, callback, ctx))
+        self.create_engine_threads.append(thread)
+        return handle
 
     def _attach_thread(self, _isolate, thread):
         worker_thread = native.GraalIsolateThreadPointer()
@@ -47,6 +77,57 @@ class FakeLibrary:
         )[0] = worker_thread
         self.attach_calls.append((get_ident(), worker_thread))
         return 0
+
+
+@pytest.mark.unit
+def test_shared_isolate_is_created_once_and_torn_down_on_last_release(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    a = native.NativeRuntime("/tmp/dwlib")
+    b = native.NativeRuntime("/tmp/dwlib")
+    a.initialize()
+    b.initialize()
+
+    # One shared isolate, two engines, refcount == live engines.
+    assert native._isolate_ref_count == 2
+    assert len(library.tear_down_threads) == 0
+    assert [h for h, _cb, _ctx in library.created_engines] == [a.handle, b.handle]
+    assert a.handle != b.handle
+
+    a.cleanup()
+    assert native._isolate_ref_count == 1
+    assert library.destroyed_engines == [a.handle]
+    assert len(library.tear_down_threads) == 0  # isolate stays for b
+
+    b.cleanup()
+    assert native._isolate_ref_count == 0
+    assert library.destroyed_engines == [a.handle, b.handle]
+    assert len(library.tear_down_threads) == 1  # last release tears down
+
+    # Idempotent double-cleanup releases the ref only once.
+    b.cleanup()
+    assert native._isolate_ref_count == 0
+    assert len(library.tear_down_threads) == 1
+
+
+@pytest.mark.unit
+def test_engine_create_failure_releases_isolate_ref(monkeypatch):
+    library = FakeLibrary()
+    library.create_engine = CallableFunction(
+        lambda _thread: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    with pytest.raises(native.DataWeaveError):
+        runtime.initialize()
+
+    # Failed init must leak nothing: the isolate it created is torn down.
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None
+    assert len(library.tear_down_threads) == 1
+    assert runtime.initialized is False
 
 
 @pytest.mark.unit
@@ -112,14 +193,15 @@ def test_decode_and_free_preserves_decode_failure_when_free_also_fails(monkeypat
 @pytest.mark.unit
 def test_native_runtime_registers_abi_and_cleans_up_idempotently(monkeypatch):
     library = FakeLibrary()
-
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
     runtime = native.NativeRuntime("/tmp/dwlib")
     runtime.initialize()
     runtime.cleanup()
     runtime.cleanup()
 
-    assert library.run_script.argtypes[1:] == [native.ctypes.c_char_p, native.ctypes.c_char_p]
+    assert library.run_script_engine.argtypes[1:] == [
+        native.ctypes.c_int64, native.ctypes.c_char_p, native.ctypes.c_char_p,
+    ]
     assert library.free_cstring.argtypes[1] is native.ctypes.c_void_p
     assert len(library.tear_down_threads) == 1
     assert runtime.initialized is False
@@ -130,8 +212,8 @@ def test_buffered_worker_execution_uses_one_current_thread_attachment_for_run_de
     calls = []
     buffer = ctypes.create_string_buffer(b"result")
     library = FakeLibrary()
-    library.run_script = CallableFunction(
-        lambda thread, _script, _inputs: calls.append(("run", get_ident(), thread))
+    library.run_script_engine = CallableFunction(
+        lambda thread, _handle, _script, _inputs: calls.append(("run", get_ident(), thread))
         or ctypes.addressof(buffer)
     )
     library.free_cstring = CallableFunction(
@@ -141,11 +223,16 @@ def test_buffered_worker_execution_uses_one_current_thread_attachment_for_run_de
     runtime = native.NativeRuntime("/tmp/dwlib")
     runtime.initialize()
     owner_ident = get_ident()
+    # Snapshot right after initialize(): the bootstrap create/detach and the
+    # attach-on-demand engine create already added entries, so we assert the
+    # DELTA the worker run adds rather than a brittle absolute count.
+    attach_count_after_init = len(library.attach_calls)
+    detach_count_after_init = len(library.detach_calls)
     outcomes = []
 
     worker = Thread(
         target=lambda: outcomes.append(
-            (get_ident(), runtime.run_script_and_decode(runtime.thread, b"script", b"{}"))
+            (get_ident(), runtime.run_engine_and_decode(b"script", b"{}"))
         )
     )
     worker.start()
@@ -155,9 +242,15 @@ def test_buffered_worker_execution_uses_one_current_thread_attachment_for_run_de
     worker_ident, result = outcomes[0]
     assert worker_ident != owner_ident
     assert result == "result"
-    assert runtime._owner_thread is current_thread()
-    assert len(library.attach_calls) == 1
-    assert library.attach_calls[0][0] == worker_ident
+    # Exactly one attach and one detach for the whole run+decode+free, both on
+    # the worker's OS thread -- no owner fast-path, one attachment shared by
+    # run and free.
+    assert len(library.attach_calls) - attach_count_after_init == 1
+    assert len(library.detach_calls) - detach_count_after_init == 1
+    new_attach = library.attach_calls[attach_count_after_init]
+    new_detach = library.detach_calls[detach_count_after_init]
+    assert new_attach[0] == worker_ident
+    assert new_detach[0] == worker_ident
     worker_pointer = ctypes.cast(calls[0][2], ctypes.c_void_p).value
     assert [(name, ident) for name, ident, _thread in calls] == [
         ("run", worker_ident),
@@ -167,16 +260,21 @@ def test_buffered_worker_execution_uses_one_current_thread_attachment_for_run_de
         ctypes.cast(thread, ctypes.c_void_p).value == worker_pointer
         for _name, _ident, thread in calls
     )
-    assert library.detach_calls[0][0] == worker_ident
-    assert ctypes.cast(library.detach_calls[0][1], ctypes.c_void_p).value == worker_pointer
+    assert ctypes.cast(new_attach[1], ctypes.c_void_p).value == worker_pointer
+    assert ctypes.cast(new_detach[1], ctypes.c_void_p).value == worker_pointer
 
 
 @pytest.mark.unit
-def test_distinct_thread_object_attaches_when_python_thread_ident_is_reused(monkeypatch):
+def test_attach_on_demand_does_not_cache_by_thread_ident(monkeypatch):
+    # This guarded the OLD owner-reuse-by-thread-object branch (comparing
+    # `current_thread() is owner` under a spoofed get_ident so a reused ident
+    # could not be mistaken for the owner). That branch is gone entirely: every
+    # call attaches on demand regardless of ident. Keep the get_ident spoof to
+    # prove there is no ident-keyed cache anywhere in the new path.
     buffer = ctypes.create_string_buffer(b"result")
     library = FakeLibrary()
-    library.run_script = CallableFunction(
-        lambda _thread, _script, _inputs: ctypes.addressof(buffer)
+    library.run_script_engine = CallableFunction(
+        lambda _thread, _handle, _script, _inputs: ctypes.addressof(buffer)
     )
     library.free_cstring = CallableFunction(lambda _thread, _ptr: None)
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
@@ -184,12 +282,15 @@ def test_distinct_thread_object_attaches_when_python_thread_ident_is_reused(monk
     runtime = native.NativeRuntime("/tmp/dwlib")
     runtime.initialize()
     owner_thread = current_thread()
+    attach_count_after_init = len(library.attach_calls)
+    detach_count_after_init = len(library.detach_calls)
     observed_threads = []
+    outcomes = []
 
     worker = Thread(
         target=lambda: (
             observed_threads.append(current_thread()),
-            runtime.run_script_and_decode(runtime.thread, b"script", b"{}"),
+            outcomes.append(runtime.run_engine_and_decode(b"script", b"{}")),
         )
     )
     worker.start()
@@ -198,23 +299,25 @@ def test_distinct_thread_object_attaches_when_python_thread_ident_is_reused(monk
     assert not worker.is_alive()
     assert observed_threads == [worker]
     assert observed_threads[0] is not owner_thread
-    assert runtime._owner_thread is owner_thread
-    assert len(library.attach_calls) == 1
-    assert len(library.detach_calls) == 1
+    assert outcomes == ["result"]
+    assert len(library.attach_calls) - attach_count_after_init == 1
+    assert len(library.detach_calls) - detach_count_after_init == 1
 
 
 @pytest.mark.unit
-def test_cleanup_clears_owner_thread_reference(monkeypatch):
+def test_cleanup_releases_isolate_ref(monkeypatch):
+    # _owner_thread no longer exists (attach-on-demand for every call); the
+    # remaining intent this test guards is that cleanup() releases the shared
+    # isolate ref and, on the last release, clears the module-level isolate.
     library = FakeLibrary()
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
     runtime = native.NativeRuntime("/tmp/dwlib")
     runtime.initialize()
 
-    assert runtime._owner_thread is current_thread()
-
     runtime.cleanup()
 
-    assert runtime._owner_thread is None
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None
 
 
 @pytest.mark.unit
@@ -223,7 +326,7 @@ def test_buffered_worker_execution_detaches_current_thread_after_failure(monkeyp
     buffer = ctypes.create_string_buffer(b"result")
     library = FakeLibrary()
 
-    def run_script(_thread, _script, _inputs):
+    def run_script_engine(_thread, _handle, _script, _inputs):
         if failure == "run":
             raise RuntimeError("run failed")
         return ctypes.addressof(buffer)
@@ -232,23 +335,30 @@ def test_buffered_worker_execution_detaches_current_thread_after_failure(monkeyp
         if failure == "free":
             raise RuntimeError("free failed")
 
-    library.run_script = CallableFunction(run_script)
+    library.run_script_engine = CallableFunction(run_script_engine)
     library.free_cstring = CallableFunction(free_cstring)
-    if failure == "detach":
-        library.graal_detach_thread = CallableFunction(
-            lambda _thread: (_ for _ in ()).throw(RuntimeError("detach failed"))
-        )
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
     if failure == "decode":
         monkeypatch.setattr(native.ctypes, "string_at", lambda _ptr: b"\xff")
     runtime = native.NativeRuntime("/tmp/dwlib")
     runtime.initialize()
+    # Snapshot right after initialize(): the bootstrap create/detach and the
+    # attach-on-demand engine create already used the library's default
+    # (working) detach, so the "detach" failure below is installed AFTER
+    # initialize() -- it must only break the worker run's own detach, not the
+    # unrelated bootstrap-detach call inside _acquire_isolate.
+    attach_count_after_init = len(library.attach_calls)
+    detach_count_after_init = len(library.detach_calls)
+    if failure == "detach":
+        library.graal_detach_thread = CallableFunction(
+            lambda _thread: (_ for _ in ()).throw(RuntimeError("detach failed"))
+        )
     errors = []
 
     worker = Thread(
         target=lambda: _capture_error(
             errors,
-            lambda: runtime.run_script_and_decode(runtime.thread, b"script", b"{}"),
+            lambda: runtime.run_engine_and_decode(b"script", b"{}"),
         )
     )
     worker.start()
@@ -258,65 +368,10 @@ def test_buffered_worker_execution_detaches_current_thread_after_failure(monkeyp
     assert len(errors) == 1
     if failure == "detach":
         assert "detach failed" in str(errors[0])
-    assert len(library.attach_calls) == 1
+    assert len(library.attach_calls) - attach_count_after_init == 1
     if failure != "detach":
-        assert len(library.detach_calls) == 1
-        assert library.detach_calls[0][0] == library.attach_calls[0][0]
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("method_name", "native_name", "extra_args"),
-    [
-        ("run_script", "run_script", ()),
-        (
-            "run_script_with_resolver",
-            "run_script_with_resolver",
-            (lambda _path: "module source",),
-        ),
-        ("run_script_callback", "run_script_callback", (object(),)),
-        (
-            "run_script_input_output_callback",
-            "run_script_input_output_callback",
-            (b"payload", b"application/json", None, object(), object()),
-        ),
-    ],
-)
-def test_raw_pointer_calls_use_supplied_thread_without_automatic_attachment(
-    monkeypatch, method_name, native_name, extra_args
-):
-    observed_threads = []
-    library = FakeLibrary(resolver_export=method_name == "run_script_with_resolver")
-    setattr(
-        library,
-        native_name,
-        CallableFunction(
-            lambda thread, *_args: observed_threads.append(thread) or 123
-        ),
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-    runtime.has_callback_streaming = True
-    runtime.has_callback_input_output = True
-    supplied_thread = runtime.thread
-    outcomes = []
-
-    worker = Thread(
-        target=lambda: outcomes.append(
-            getattr(runtime, method_name)(
-                supplied_thread, b"script", b"{}", *extra_args
-            )
-        )
-    )
-    worker.start()
-    worker.join(1)
-
-    assert not worker.is_alive()
-    assert outcomes == [123]
-    assert observed_threads == [supplied_thread]
-    assert library.attach_calls == []
-    assert library.detach_calls == []
+        assert len(library.detach_calls) - detach_count_after_init == 1
+        assert library.detach_calls[detach_count_after_init][0] == library.attach_calls[attach_count_after_init][0]
 
 
 def _capture_error(errors, invoke):
@@ -324,549 +379,6 @@ def _capture_error(errors, invoke):
         invoke()
     except Exception as error:
         errors.append(error)
-
-
-@pytest.mark.unit
-def test_native_runtime_registers_optional_module_resolver_export(monkeypatch):
-    library = FakeLibrary(resolver_export=True)
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-
-    assert runtime.has_module_resolver is True
-    assert library.run_script_with_resolver.argtypes == [
-        native.GraalIsolateThreadPointer,
-        native.ctypes.c_char_p,
-        native.ctypes.c_char_p,
-        dataweave.RESOLVE_MODULE_CALLBACK,
-    ]
-    assert library.run_script_with_resolver.restype is native.ctypes.c_void_p
-
-
-@pytest.mark.unit
-def test_native_runtime_initializes_without_optional_module_resolver_export(monkeypatch):
-    library = FakeLibrary()
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-
-    assert runtime.has_module_resolver is False
-
-
-@pytest.mark.unit
-def test_run_script_with_resolver_adapts_path_and_retains_source_buffer(monkeypatch):
-    observed = []
-    resolver_paths = []
-    library = FakeLibrary(resolver_export=True)
-
-    def invoke(_thread, _script, _inputs, callback):
-        address = callback(None, b"/org/test/lib.dwl")
-        observed.append(ctypes.string_at(address).decode("utf-8"))
-        assert library.runtime._resolver_buffers
-        return 0
-
-    library.run_script_with_resolver = CallableFunction(invoke)
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    library.runtime = runtime
-    runtime.initialize()
-    stale_buffer = ctypes.create_string_buffer(b"stale")
-    runtime._resolver_buffers.append(stale_buffer)
-
-    resolver = lambda path: resolver_paths.append(path) or "module source"
-    result = runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
-
-    assert result == 0
-    assert resolver_paths == ["org/test/lib.dwl"]
-    assert observed == ["module source"]
-    assert runtime._resolver_buffers == []
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("module_path", "resolver"),
-    [
-        (b"/missing.dwl", lambda _path: None),
-        (b"/invalid.dwl", lambda _path: 42),
-        (b"\xff", lambda _path: "unreachable"),
-    ],
-)
-def test_resolver_callback_returns_null_for_unresolved_or_invalid_values(
-    monkeypatch, module_path, resolver
-):
-    addresses = []
-    library = FakeLibrary(resolver_export=True)
-    library.run_script_with_resolver = CallableFunction(
-        lambda _thread, _script, _inputs, callback: addresses.append(
-            callback(None, module_path)
-        ) or 0
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-
-    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
-
-    assert addresses == [None]
-    assert runtime._resolver_buffers == []
-
-
-@pytest.mark.unit
-def test_resolver_callback_contains_exceptions_and_hides_details_by_default(
-    monkeypatch, capsys
-):
-    addresses = []
-    library = FakeLibrary(resolver_export=True)
-    library.run_script_with_resolver = CallableFunction(
-        lambda _thread, _script, _inputs, callback: addresses.append(
-            callback(None, b"/org/test/lib.dwl")
-        ) or 0
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    monkeypatch.delenv("DATAWEAVE_RESOLVER_DEBUG", raising=False)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-
-    def resolver(_path):
-        raise RuntimeError("secret /private/path")
-
-    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
-
-    captured = capsys.readouterr()
-    assert addresses == [None]
-    assert "DataWeave module resolver callback failed." in captured.err
-    assert "secret" not in captured.err
-    assert "/private/path" not in captured.err
-
-
-@pytest.mark.unit
-def test_resolver_callback_prints_exception_details_in_debug_mode(
-    monkeypatch, capsys
-):
-    library = FakeLibrary(resolver_export=True)
-    library.run_script_with_resolver = CallableFunction(
-        lambda _thread, _script, _inputs, callback: callback(
-            None, b"/org/test/lib.dwl"
-        ) or 0
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    monkeypatch.setenv("DATAWEAVE_RESOLVER_DEBUG", "1")
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-
-    def resolver(_path):
-        raise RuntimeError("secret /private/path")
-
-    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
-
-    captured = capsys.readouterr()
-    assert "RuntimeError: secret /private/path" in captured.err
-
-
-@pytest.mark.unit
-def test_resolver_callback_contains_base_exceptions(monkeypatch, capsys):
-    class ResolverExit(BaseException):
-        pass
-
-    addresses = []
-    library = FakeLibrary(resolver_export=True)
-    library.run_script_with_resolver = CallableFunction(
-        lambda _thread, _script, _inputs, callback: addresses.append(
-            callback(None, b"/org/test/lib.dwl")
-        ) or 0
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    monkeypatch.delenv("DATAWEAVE_RESOLVER_DEBUG", raising=False)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-
-    def resolver(_path):
-        raise ResolverExit("secret /private/path")
-
-    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
-
-    captured = capsys.readouterr()
-    assert addresses == [None]
-    assert "DataWeave module resolver callback failed." in captured.err
-    assert "secret" not in captured.err
-    assert "/private/path" not in captured.err
-
-
-@pytest.mark.unit
-def test_resolver_callback_contains_diagnostic_writer_failures(monkeypatch):
-    addresses = []
-    library = FakeLibrary(resolver_export=True)
-    library.run_script_with_resolver = CallableFunction(
-        lambda _thread, _script, _inputs, callback: addresses.append(
-            callback(None, b"/org/test/lib.dwl")
-        ) or 0
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    monkeypatch.delenv("DATAWEAVE_RESOLVER_DEBUG", raising=False)
-    monkeypatch.setattr(
-        native.sys,
-        "stderr",
-        type(
-            "FailingStderr",
-            (),
-            {"write": lambda _self, _value: (_ for _ in ()).throw(SystemExit(9))},
-        )(),
-    )
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-
-    def resolver(_path):
-        raise KeyboardInterrupt("secret /private/path")
-
-    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
-
-    assert addresses == [None]
-
-
-@pytest.mark.unit
-def test_run_script_with_resolver_clears_buffers_when_native_call_fails(monkeypatch):
-    library = FakeLibrary(resolver_export=True)
-
-    def invoke(_thread, _script, _inputs, callback):
-        assert callback(None, b"/org/test/lib.dwl")
-        raise RuntimeError("native failure")
-
-    library.run_script_with_resolver = CallableFunction(invoke)
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-
-    with pytest.raises(RuntimeError, match="native failure"):
-        runtime.run_script_with_resolver(
-            "thread", b"script", b"{}", lambda _path: "module source"
-        )
-
-    assert runtime._resolver_buffers == []
-
-
-@pytest.mark.unit
-def test_run_script_with_resolver_serializes_calls_and_buffer_cleanup(monkeypatch):
-    first_entered = Event()
-    release_first = Event()
-    second_entered = Event()
-    errors = []
-    library = FakeLibrary(resolver_export=True)
-
-    def invoke(_thread, script, _inputs, callback):
-        address = callback(None, b"/org/test/lib.dwl")
-        if script == b"first":
-            first_entered.set()
-            if not release_first.wait(1):
-                raise AssertionError("first invocation was not released")
-            assert ctypes.string_at(address) == b"module source"
-            assert len(library.runtime._resolver_buffers) == 1
-        else:
-            second_entered.set()
-        return 0
-
-    library.run_script_with_resolver = CallableFunction(invoke)
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    library.runtime = runtime
-    runtime.initialize()
-    resolver = lambda _path: "module source"
-
-    def run(script):
-        try:
-            runtime.run_script_with_resolver("thread", script, b"{}", resolver)
-        except Exception as error:
-            errors.append(error)
-
-    first = Thread(target=run, args=(b"first",))
-    second = Thread(target=run, args=(b"second",))
-    first.start()
-    assert first_entered.wait(1)
-    second.start()
-
-    assert not second_entered.wait(0.1)
-    release_first.set()
-    first.join(1)
-    second.join(1)
-
-    assert not first.is_alive()
-    assert not second.is_alive()
-    assert second_entered.is_set()
-    assert errors == []
-    assert runtime._resolver_buffers == []
-
-
-@pytest.mark.unit
-def test_native_runtime_reentrant_execution_fails_without_deadlocking(monkeypatch):
-    completed = Event()
-    nested_errors = []
-    library = FakeLibrary()
-
-    def invoke(thread, script, inputs):
-        if script == b"outer":
-            try:
-                library.runtime.run_script(thread, b"nested", inputs)
-            except Exception as error:
-                nested_errors.append(error)
-        return 0
-
-    library.run_script = CallableFunction(invoke)
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    library.runtime = runtime
-    runtime.initialize()
-
-    worker = Thread(
-        target=lambda: (runtime.run_script("thread", b"outer", b"{}"), completed.set()),
-        daemon=True,
-    )
-    worker.start()
-
-    assert completed.wait(1), "reentrant native execution deadlocked"
-    assert len(nested_errors) == 1
-    assert isinstance(nested_errors[0], dataweave.DataWeaveError)
-    assert "reentrant" in str(nested_errors[0]).lower()
-
-
-@pytest.mark.unit
-def test_resolver_callback_translates_reentrant_execution_to_null(monkeypatch):
-    completed = Event()
-    callback_results = []
-    library = FakeLibrary(resolver_export=True)
-    library.run_script = CallableFunction(lambda _thread, _script, _inputs: 0)
-    library.run_script_with_resolver = CallableFunction(
-        lambda thread, _script, inputs, callback: callback_results.append(
-            callback(thread, b"/org/test/lib.dwl")
-        ) or 0
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-
-    def resolver(_path):
-        runtime.run_script("thread", b"nested", b"{}")
-        return "unreachable"
-
-    worker = Thread(
-        target=lambda: (
-            runtime.run_script_with_resolver("thread", b"outer", b"{}", resolver),
-            completed.set(),
-        ),
-        daemon=True,
-    )
-    worker.start()
-
-    assert completed.wait(1), "resolver callback re-entry deadlocked"
-    assert callback_results == [None]
-
-
-@pytest.mark.unit
-def test_cleanup_waits_for_resolver_aware_call(monkeypatch):
-    run_entered = Event()
-    release_run = Event()
-    teardown_entered = Event()
-    library = FakeLibrary(resolver_export=True)
-
-    def invoke(_thread, _script, _inputs, callback):
-        assert callback(None, b"/org/test/lib.dwl")
-        run_entered.set()
-        assert release_run.wait(1)
-        return 0
-
-    library.run_script_with_resolver = CallableFunction(invoke)
-    library.graal_tear_down_isolate = CallableFunction(
-        lambda _thread: teardown_entered.set() or 0
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-
-    run_thread = Thread(
-        target=runtime.run_script_with_resolver,
-        args=("thread", b"script", b"{}", lambda _path: "module source"),
-    )
-    cleanup_thread = Thread(target=runtime.cleanup)
-    run_thread.start()
-    assert run_entered.wait(1)
-    cleanup_thread.start()
-
-    assert not teardown_entered.wait(0.1)
-    release_run.set()
-    run_thread.join(1)
-    cleanup_thread.join(1)
-
-    assert not run_thread.is_alive()
-    assert not cleanup_thread.is_alive()
-    assert teardown_entered.is_set()
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "invoke",
-    [
-        lambda runtime: runtime.run_script_and_decode("thread", b"script", b"{}"),
-        lambda runtime: runtime.run_script_with_resolver_and_decode(
-            "thread", b"script", b"{}", lambda _path: "module source"
-        ),
-        lambda runtime: runtime.run_script_callback_and_decode(
-            "thread", b"script", b"{}", object()
-        ),
-        lambda runtime: runtime.run_script_input_output_callback_and_decode(
-            "thread",
-            b"script",
-            b"{}",
-            b"payload",
-            b"application/json",
-            None,
-            object(),
-            object(),
-        ),
-    ],
-)
-def test_cleanup_waits_until_native_result_is_decoded_and_freed(monkeypatch, invoke):
-    native_returned = Event()
-    release_decode = Event()
-    freed = Event()
-    teardown_entered = Event()
-    errors = []
-    buffer = ctypes.create_string_buffer(b"result")
-    pointer = ctypes.addressof(buffer)
-    library = FakeLibrary(resolver_export=True)
-    return_pointer = lambda *_args: native_returned.set() or pointer
-    library.run_script = CallableFunction(return_pointer)
-    library.run_script_with_resolver = CallableFunction(return_pointer)
-    library.run_script_callback = CallableFunction(return_pointer)
-    library.run_script_input_output_callback = CallableFunction(return_pointer)
-    library.graal_attach_thread = CallableFunction(lambda _isolate, _thread: 0)
-    library.graal_detach_thread = CallableFunction(lambda _thread: 0)
-    library.free_cstring = CallableFunction(
-        lambda _thread, _ptr: release_decode.wait(1) and freed.set()
-    )
-    library.graal_tear_down_isolate = CallableFunction(
-        lambda _thread: teardown_entered.set() or 0
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-    runtime.has_callback_streaming = True
-    runtime.has_callback_input_output = True
-
-    def run():
-        try:
-            invoke(runtime)
-        except Exception as error:
-            errors.append(error)
-
-    run_thread = Thread(target=run)
-    cleanup_thread = Thread(target=runtime.cleanup)
-    run_thread.start()
-    assert native_returned.wait(1)
-    cleanup_thread.start()
-
-    assert not teardown_entered.wait(0.1)
-    release_decode.set()
-    assert freed.wait(1)
-    run_thread.join(1)
-    cleanup_thread.join(1)
-
-    assert not run_thread.is_alive()
-    assert not cleanup_thread.is_alive()
-    assert teardown_entered.is_set()
-    assert errors == []
-
-
-@pytest.mark.unit
-def test_run_script_with_resolver_rejects_missing_native_export(monkeypatch):
-    library = FakeLibrary()
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-
-    with pytest.raises(
-        dataweave.DataWeaveError,
-        match=r"Native library does not support module resolver API \(run_script_with_resolver not found\)\.",
-    ):
-        runtime.run_script_with_resolver(
-            "thread", b"script", b"{}", lambda _path: "module source"
-        )
-
-
-@pytest.mark.unit
-def test_native_runtime_retains_one_resolver_callback_until_teardown(monkeypatch):
-    retained_during_teardown = []
-    library = FakeLibrary(resolver_export=True)
-    library.run_script_with_resolver = CallableFunction(
-        lambda _thread, _script, _inputs, _callback: 0
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    library.graal_tear_down_isolate = CallableFunction(
-        lambda _thread: retained_during_teardown.append(
-            runtime._module_resolver_callback is not None
-        ) or 0
-    )
-    runtime.initialize()
-    resolver = lambda _path: "module source"
-
-    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
-    callback = runtime._module_resolver_callback
-    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
-
-    assert runtime._module_resolver_callback is callback
-    with pytest.raises(dataweave.DataWeaveError):
-        runtime.run_script_with_resolver(
-            "thread", b"script", b"{}", lambda _path: "other source"
-        )
-
-    runtime.cleanup()
-
-    assert retained_during_teardown == [True]
-    assert runtime._module_resolver_callback is None
-    assert runtime._module_resolver is None
-
-
-@pytest.mark.unit
-def test_cleanup_failure_preserves_runtime_state_for_successful_retry(monkeypatch):
-    library = FakeLibrary(resolver_export=True)
-    library.run_script_with_resolver = CallableFunction(
-        lambda _thread, _script, _inputs, _callback: 0
-    )
-    tear_down_results = iter((7, 0))
-    library.graal_tear_down_isolate = CallableFunction(
-        lambda _thread: next(tear_down_results)
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-    isolate = runtime.isolate
-    thread = runtime.thread
-    resolver = lambda _path: "module source"
-    runtime.run_script_with_resolver("thread", b"script", b"{}", resolver)
-    callback = runtime._module_resolver_callback
-
-    with pytest.raises(
-        dataweave.DataWeaveError,
-        match="Failed to tear down GraalVM isolate. Error code: 7",
-    ):
-        runtime.cleanup()
-
-    assert runtime.initialized is True
-    assert runtime.lib is library
-    assert runtime.isolate is isolate
-    assert runtime.thread is thread
-    assert runtime.has_module_resolver is True
-    assert runtime._module_resolver is resolver
-    assert runtime._module_resolver_callback is callback
-
-    runtime.cleanup()
-
-    assert runtime.initialized is False
-    assert runtime.lib is None
-    assert runtime.isolate is None
-    assert runtime.thread is None
-    assert runtime._module_resolver is None
-    assert runtime._module_resolver_callback is None
 
 
 @pytest.mark.unit
@@ -880,6 +392,12 @@ def test_cleanup_from_worker_uses_current_thread_for_isolate_teardown(monkeypatc
     runtime = native.NativeRuntime("/tmp/dwlib")
     runtime.initialize()
     owner_ident = get_ident()
+    # Snapshot right after initialize(): the bootstrap create/detach and the
+    # attach-on-demand engine create already added entries on this (main)
+    # thread's ident, so we assert the DELTA the worker cleanup() adds rather
+    # than a brittle absolute count.
+    attach_count_after_init = len(library.attach_calls)
+    detach_count_after_init = len(library.detach_calls)
 
     worker = Thread(target=runtime.cleanup)
     worker.start()
@@ -888,61 +406,29 @@ def test_cleanup_from_worker_uses_current_thread_for_isolate_teardown(monkeypatc
     assert not worker.is_alive()
     worker_ident, teardown_thread = teardown_calls[0]
     assert worker_ident != owner_ident
-    assert library.attach_calls[0][0] == worker_ident
+    # This is the structural guard for Finding #1: the isolate was created on
+    # the main thread, but the bootstrap thread was detached immediately after
+    # create, so teardown on a completely different (worker) thread does not
+    # block on a phantom attachment. Off-owner cleanup attaches/detaches its
+    # own thread for destroy_engine (the first post-init attach), then the
+    # isolate teardown attaches a second, separate thread for
+    # graal_tear_down_isolate (the second post-init attach); teardown itself
+    # never explicitly detaches (tearing down the isolate implicitly does).
+    assert len(library.attach_calls) - attach_count_after_init == 2
+    destroy_attach = library.attach_calls[attach_count_after_init]
+    teardown_attach = library.attach_calls[attach_count_after_init + 1]
+    assert destroy_attach[0] == worker_ident
+    assert teardown_attach[0] == worker_ident
     assert ctypes.cast(teardown_thread, ctypes.c_void_p).value == ctypes.cast(
-        library.attach_calls[0][1], ctypes.c_void_p
+        teardown_attach[1], ctypes.c_void_p
     ).value
-    assert library.detach_calls == []
+    assert len(library.detach_calls) - detach_count_after_init == 1
+    new_detach = library.detach_calls[detach_count_after_init]
+    assert new_detach[0] == worker_ident
+    assert ctypes.cast(new_detach[1], ctypes.c_void_p).value == ctypes.cast(
+        destroy_attach[1], ctypes.c_void_p
+    ).value
     assert runtime.initialized is False
-
-
-@pytest.mark.unit
-def test_failed_cleanup_from_worker_detaches_and_preserves_state_for_owner_retry(monkeypatch):
-    library = FakeLibrary()
-    tear_down_results = iter((7, 0))
-    library.graal_tear_down_isolate = CallableFunction(
-        lambda _thread: next(tear_down_results)
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-    errors = []
-
-    worker = Thread(target=lambda: _capture_error(errors, runtime.cleanup))
-    worker.start()
-    worker.join(1)
-
-    assert not worker.is_alive()
-    assert len(errors) == 1
-    assert runtime.initialized is True
-    assert len(library.attach_calls) == 1
-    assert len(library.detach_calls) == 1
-
-    runtime.cleanup()
-
-    assert runtime.initialized is False
-
-
-@pytest.mark.unit
-def test_failed_worker_cleanup_preserves_teardown_error_when_detach_also_fails(monkeypatch):
-    library = FakeLibrary()
-    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 7)
-    library.graal_detach_thread = CallableFunction(
-        lambda _thread: (_ for _ in ()).throw(RuntimeError("detach failed"))
-    )
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-    runtime.initialize()
-    errors = []
-
-    worker = Thread(target=lambda: _capture_error(errors, runtime.cleanup))
-    worker.start()
-    worker.join(1)
-
-    assert not worker.is_alive()
-    assert len(errors) == 1
-    assert str(errors[0]) == "Failed to tear down GraalVM isolate. Error code: 7"
-    assert runtime.initialized is True
 
 
 @pytest.mark.unit
@@ -955,11 +441,8 @@ def test_native_runtime_wraps_library_load_errors(monkeypatch):
 
 @pytest.mark.unit
 def test_initialize_resets_state_when_isolate_creation_fails(monkeypatch):
-    class Function:
-        def __call__(self, *_args):
-            return 9
-
-    library = type("Native", (), {"graal_create_isolate": Function()})()
+    library = FakeLibrary()
+    library.graal_create_isolate = CallableFunction(lambda _params, _isolate, _thread: 9)
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
     runtime = native.NativeRuntime("/tmp/dwlib")
 
@@ -970,6 +453,8 @@ def test_initialize_resets_state_when_isolate_creation_fails(monkeypatch):
     assert runtime.isolate is None
     assert runtime.thread is None
     assert runtime.initialized is False
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None
 
 
 @pytest.mark.unit
@@ -982,75 +467,17 @@ def test_initialize_requires_create_isolate_export(monkeypatch):
 
 @pytest.mark.unit
 def test_initialize_wraps_create_isolate_exception(monkeypatch):
-    class Function:
-        def __call__(self, *_args):
-            raise RuntimeError("native create failure")
-
-    library = type("Native", (), {"graal_create_isolate": Function()})()
+    library = FakeLibrary()
+    library.graal_create_isolate = CallableFunction(
+        lambda _params, _isolate, _thread: (_ for _ in ()).throw(RuntimeError("native create failure"))
+    )
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
 
     with pytest.raises(dataweave.DataWeaveError, match="Failed to create GraalVM isolate: native create failure"):
         native.NativeRuntime("/tmp/dwlib").initialize()
 
-
-@pytest.mark.unit
-def test_cleanup_wraps_teardown_exception():
-    runtime = native.NativeRuntime.__new__(native.NativeRuntime)
-    runtime.initialized = True
-    runtime.thread = object()
-    runtime.isolate = object()
-    runtime.lib = type("Native", (), {"graal_tear_down_isolate": lambda _self, _thread: (_ for _ in ()).throw(RuntimeError("native teardown failure"))})()
-
-    with pytest.raises(dataweave.DataWeaveError, match="Failed to tear down GraalVM isolate: native teardown failure"):
-        runtime.cleanup()
-
-
-@pytest.mark.unit
-def test_initialize_tears_down_isolate_when_required_export_is_missing(monkeypatch):
-    class Function:
-        def __init__(self, callback):
-            self.callback = callback
-
-        def __call__(self, *args):
-            return self.callback(*args)
-
-    torn_down = []
-    library = type("Native", (), {})()
-    library.graal_create_isolate = Function(lambda _params, _isolate, _thread: 0)
-    library.graal_tear_down_isolate = Function(lambda thread: torn_down.append(thread) or 0)
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-    runtime = native.NativeRuntime("/tmp/dwlib")
-
-    with pytest.raises(dataweave.DataWeaveError, match="Native library does not export run_script"):
-        runtime.initialize()
-
-    assert len(torn_down) == 1
-    assert runtime.lib is None
-    assert runtime.isolate is None
-    assert runtime.thread is None
-
-
-@pytest.mark.unit
-def test_initialize_rejects_streaming_export_without_required_lifecycle_symbols(monkeypatch):
-    class Function:
-        def __init__(self, callback=lambda *_args: 0):
-            self.callback = callback
-
-        def __call__(self, *args):
-            return self.callback(*args)
-
-    torn_down = []
-    library = type("Native", (), {})()
-    library.graal_create_isolate = Function()
-    library.graal_tear_down_isolate = Function(lambda thread: torn_down.append(thread) or 0)
-    library.run_script = Function()
-    library.run_script_callback = Function()
-    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
-
-    with pytest.raises(dataweave.DataWeaveError, match="Native library does not export free_cstring"):
-        native.NativeRuntime("/tmp/dwlib").initialize()
-
-    assert len(torn_down) == 1
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None
 
 
 @pytest.mark.unit
@@ -1073,23 +500,6 @@ def test_initialize_rejects_streaming_export_without_thread_lifecycle_symbols(mo
 
     with pytest.raises(dataweave.DataWeaveError, match=f"Native library does not export {missing_symbol}"):
         native.NativeRuntime("/tmp/dwlib").initialize()
-
-
-@pytest.mark.unit
-def test_cleanup_surfaces_native_teardown_error_code(monkeypatch):
-    runtime = native.NativeRuntime.__new__(native.NativeRuntime)
-    runtime.initialized = True
-    runtime.thread = object()
-    runtime.isolate = object()
-    runtime.lib = type("Native", (), {"graal_tear_down_isolate": lambda _self, _thread: 7})()
-
-    with pytest.raises(dataweave.DataWeaveError, match="Failed to tear down GraalVM isolate. Error code: 7"):
-        runtime.cleanup()
-
-    assert runtime.initialized is True
-    assert runtime.lib is not None
-    assert runtime.thread is not None
-    assert runtime.isolate is not None
 
 
 @pytest.mark.unit
@@ -1117,3 +527,654 @@ def test_thread_lifecycle_wraps_native_invocation_errors(method_name, error_mess
             runtime.attach_thread()
         else:
             runtime.detach_thread(object())
+
+
+@pytest.mark.unit
+def test_engine_create_and_destroy_off_owner_thread_use_an_attached_thread(monkeypatch):
+    # native._isolate_thread is gone: there is no persistent bootstrap thread to
+    # compare against anymore (it is detached immediately after
+    # graal_create_isolate). The new intent is that engine create/destroy always
+    # run on a freshly *attached* thread, and different OS threads use different
+    # attachments.
+    #
+    # NOTE on comparison strategy: FakeLibrary's graal_attach_thread stub writes
+    # a brand-new, always-NULL ctypes pointer into its out-param on every call
+    # (there is no real native memory backing it here), so casting to
+    # ctypes.c_void_p and comparing .value is always None == None / None != None
+    # is always False -- vacuous regardless of correctness. Object identity
+    # (`is`/`is not`) IS meaningful here: attach_thread() allocates a distinct
+    # Python pointer object on every invocation, so two *different* attaches are
+    # guaranteed to be different objects, while the (now-removed) bug reused the
+    # exact SAME object across calls. We anchor on identity + OS thread ident.
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    # A initializes on THIS thread -> create_engine runs on a freshly attached
+    # thread (the bootstrap thread from graal_create_isolate was already
+    # detached inside _acquire_isolate and is never reused for engine create;
+    # exactly one attach is added by a.initialize(), used for the create call).
+    a = native.NativeRuntime("/tmp/dwlib")
+    a.initialize()
+    owner_ident = get_ident()
+    assert len(library.attach_calls) == 1
+    assert library.attach_calls[0][0] == owner_ident
+    a_create_thread = library.create_engine_threads[0]
+
+    # B initializes on a DIFFERENT OS thread -> attaches its own fresh thread
+    # there, distinct from A's.
+    errors = []
+    b = native.NativeRuntime("/tmp/dwlib")
+
+    def init_b():
+        try:
+            b.initialize()
+        except BaseException as error:  # pragma: no cover - surfaced via assert
+            errors.append(error)
+
+    t = Thread(target=init_b)
+    t.start()
+    t.join(2)
+    assert not errors
+    assert len(library.attach_calls) == 2
+    assert library.attach_calls[1][0] == t.ident
+    assert library.attach_calls[1][0] != owner_ident
+    b_create_thread = library.create_engine_threads[1]
+    # A freshly attached thread is never the SAME object as a previous one --
+    # this is exactly how the (now-removed) reused-bootstrap/owner-thread bug
+    # would have shown up: B's create thread being the literal object A used.
+    assert b_create_thread is not a_create_thread
+
+    # Destroy B from yet another non-owner thread -> attaches its own thread,
+    # matching that thread's ident, and it is a fresh object too.
+    def cleanup_b():
+        try:
+            b.cleanup()
+        except BaseException as error:  # pragma: no cover
+            errors.append(error)
+
+    t2 = Thread(target=cleanup_b)
+    t2.start()
+    t2.join(2)
+    assert not errors
+    assert len(library.attach_calls) == 3
+    assert library.attach_calls[2][0] == t2.ident
+    assert library.destroy_engine_threads[-1] is not a_create_thread
+    assert library.destroy_engine_threads[-1] is not b_create_thread
+
+    a.cleanup()
+
+
+@pytest.mark.unit
+def test_failed_isolate_teardown_retains_isolate_and_arms_retry(monkeypatch):
+    # Updated for the retryable-teardown contract (review #10 #3, align with
+    # Node): a failed final teardown must NOT null the globals -- nulling would
+    # let the next initialize() build a SECOND live isolate while the first is
+    # still alive. Instead the isolate is retained and a retry is armed; the
+    # retry runs (and must succeed) before any fresh isolate can be built.
+    monkeypatch.setattr(native, "_teardown_needed", False)  # restored after the test regardless of outcome
+    library = FakeLibrary()
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 1)  # non-zero == failure
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    a = native.NativeRuntime("/tmp/dwlib")
+    a.initialize()
+    with pytest.raises(native.DataWeaveError):
+        a.cleanup()  # last release -> teardown fails -> raises
+
+    # The isolate is retained live (not nulled) and a retry is armed.
+    assert native._isolate is not None
+    assert native._isolate_ref_count == 0
+    assert native._teardown_needed is True
+
+    # Restore a passing teardown so the pending retry (run before b's isolate
+    # is built) succeeds.
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 0)
+
+    b = native.NativeRuntime("/tmp/dwlib")
+    b.initialize()  # retries the pending teardown, then builds a fresh isolate
+    assert native._teardown_needed is False
+    assert native._isolate is not None
+    b.cleanup()
+
+
+@pytest.mark.unit
+def test_failed_teardown_retains_isolate_and_retries(monkeypatch):
+    """A failing graal_tear_down_isolate must NOT null the globals or create a
+    second isolate; the next acquire retries the pending teardown."""
+    monkeypatch.setattr(native, "_teardown_needed", False)  # restored after the test regardless of outcome
+    library = FakeLibrary()
+    create_isolate_calls = []
+
+    def create_isolate(_params, _isolate, _thread):
+        create_isolate_calls.append(1)
+        return 0
+
+    tear_down_results = [1, 0]  # the final teardown fails once, then the retry succeeds
+
+    def tear_down(thread):
+        library.tear_down_threads.append(thread)
+        return tear_down_results.pop(0) if tear_down_results else 0
+
+    library.graal_create_isolate = CallableFunction(create_isolate)
+    library.graal_tear_down_isolate = CallableFunction(tear_down)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    lib, isolate = native._acquire_isolate("/tmp/dwlib")
+    assert len(create_isolate_calls) == 1
+
+    with pytest.raises(native.DataWeaveError):
+        native._release_isolate()  # last release -> tear_down fails
+
+    # Isolate retained, retry armed, NOT nulled, no second isolate created.
+    assert native._lib is lib
+    assert native._isolate is isolate
+    assert native._teardown_needed is True
+    assert native._isolate_ref_count == 0
+    assert len(create_isolate_calls) == 1
+
+    # Next acquire retries the pending teardown (which now succeeds) and only
+    # then builds a fresh isolate.
+    lib2, isolate2 = native._acquire_isolate("/tmp/dwlib")
+    assert native._teardown_needed is False
+    assert len(library.tear_down_threads) == 2   # the failed attempt + the retry
+    assert len(create_isolate_calls) == 2        # then a fresh isolate
+    assert isolate2 is not isolate
+
+    native._release_isolate()
+
+
+@pytest.mark.unit
+def test_bootstrap_detach_failure_tears_down_created_isolate(monkeypatch):
+    """A failed bootstrap-thread detach must not leak the just-created isolate:
+    it is torn down (reusing the still-attached bootstrap thread) before the
+    failure is raised, and nothing is published to the module globals."""
+    library = FakeLibrary()
+    create_isolate_calls = []
+
+    def create_isolate(_params, _isolate, _thread):
+        create_isolate_calls.append(1)
+        return 0
+
+    library.graal_create_isolate = CallableFunction(create_isolate)
+    library.graal_detach_thread = CallableFunction(lambda _thread: 1)  # bootstrap detach fails
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    with pytest.raises(native.DataWeaveError):
+        native._acquire_isolate("/tmp/dwlib")
+
+    # No leaked live isolate: the just-created isolate was torn down, and
+    # nothing was published since the detach failure happened before publish.
+    assert native._isolate is None
+    assert native._lib is None
+    assert native._isolate_ref_count == 0
+    assert len(create_isolate_calls) == 1
+    assert len(library.tear_down_threads) == 1
+    assert native._teardown_needed is False
+
+
+@pytest.mark.unit
+def test_bootstrap_detach_and_teardown_both_failing_leaks_isolate_without_retaining_thread(monkeypatch):
+    """Option A (review #15 #1): when a bootstrap-thread detach AND the immediate
+    teardown BOTH fail in _acquire_isolate, the still-attached bootstrap
+    IsolateThread is OS-thread-affine and could only ever tear this isolate down
+    from THIS OS thread. Retaining it for a cross-thread retry risks handing a
+    foreign thread to graal_tear_down_isolate (wrong-thread fatal path). So the
+    isolate is treated as UNRECOVERABLE: leaked (globals unset), no retry armed,
+    no thread retained -- and a later initialize() builds a fresh isolate."""
+    library = FakeLibrary()
+    library.graal_detach_thread = CallableFunction(lambda _thread: 1)  # bootstrap detach fails
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda thread: library.tear_down_threads.append(thread) or 1
+    )  # teardown also fails
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    with pytest.raises(native.DataWeaveError):
+        native._acquire_isolate("/tmp/dwlib")
+
+    # Leaked, not published; no retry armed; no thread retained.
+    assert native._isolate is None
+    assert native._lib is None
+    assert native._isolate_ref_count == 0
+    assert native._teardown_needed is False
+    assert len(library.tear_down_threads) == 1  # tried once, on the bootstrap thread
+
+    # The module is NOT wedged: a healthy library builds a fresh isolate.
+    healthy = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: healthy)
+    lib, isolate = native._acquire_isolate("/tmp/dwlib")
+    assert lib is healthy
+    assert native._isolate is not None
+    native._release_isolate()  # clean up the fresh isolate
+
+
+class RetryTeardownFake:
+    """Fake native lib for the failed-teardown / cross-thread-retry scenario.
+
+    Each graal_attach_thread hands out a distinct, non-null worker pointer so we
+    can prove WHICH worker is detached. graal_tear_down_isolate fails on the
+    first call and succeeds afterwards, modelling a transient teardown failure.
+    """
+
+    def __init__(self):
+        self.attach_workers = []   # worker addr for every attach, in order
+        self.detached = []         # worker addr passed to every detach
+        self.tear_down_workers = []  # worker addr passed to every teardown
+        self.attached = set()      # addrs currently attached (naive bookkeeping)
+        self._next_worker = 1
+        self._tear_down_calls = 0
+
+    def graal_attach_thread(self, _isolate, thread_ptr):
+        addr = self._next_worker * 0x1000
+        self._next_worker += 1
+        fake_worker = ctypes.cast(ctypes.c_void_p(addr), native.GraalIsolateThreadPointer)
+        ctypes.cast(
+            thread_ptr, ctypes.POINTER(native.GraalIsolateThreadPointer)
+        )[0] = fake_worker
+        self.attach_workers.append(addr)
+        self.attached.add(addr)
+        return 0
+
+    def graal_detach_thread(self, thread):
+        addr = ctypes.cast(thread, ctypes.c_void_p).value
+        self.detached.append(addr)
+        self.attached.discard(addr)
+        return 0
+
+    def graal_tear_down_isolate(self, thread):
+        self._tear_down_calls += 1
+        self.tear_down_workers.append(ctypes.cast(thread, ctypes.c_void_p).value)
+        return 1 if self._tear_down_calls == 1 else 0  # fail once, then succeed
+
+
+@pytest.mark.unit
+def test_failed_teardown_detaches_worker_so_cross_thread_retry_succeeds(monkeypatch):
+    """Finding #2 (review #11): a FAILED final teardown must detach the freshly-
+    attached teardown worker before arming the retry. Otherwise a later cross-
+    thread retry attaches a SECOND worker while the first stays attached, and the
+    leftover attached worker blocks graal_tear_down_isolate forever.
+
+    A SUCCESSFUL teardown must NOT detach its worker (the isolate is gone and the
+    thread pointer is invalid), so detaches == attaches - 1 across the scenario.
+    """
+    fake = RetryTeardownFake()
+    # Set up as if one engine already acquired the shared isolate. Bypass real
+    # library loading -- drive the globals directly (unit/conftest resets them).
+    monkeypatch.setattr(native, "_lib", fake)
+    monkeypatch.setattr(native, "_lib_path", "/tmp/dwlib")
+    monkeypatch.setattr(native, "_isolate", native.GraalIsolatePointer())
+    monkeypatch.setattr(native, "_isolate_ref_count", 1)
+    monkeypatch.setattr(native, "_teardown_needed", False)
+
+    # Last release on the main thread -> teardown fails once -> retry armed.
+    with pytest.raises(native.DataWeaveError):
+        native._release_isolate()
+
+    # The isolate is retained live and a retry is armed.
+    assert native._isolate is not None
+    assert native._isolate_ref_count == 0
+    assert native._teardown_needed is True
+    # Exactly one worker was attached to attempt teardown, and it WAS detached
+    # (the bug: it stayed attached). No worker is left dangling attached.
+    assert fake.attach_workers == [0x1000]
+    assert fake.detached == [0x1000]
+    assert fake.attached == set()
+
+    # A cross-thread retry (another OS thread) must now tear down cleanly with a
+    # fresh worker and no leftover attached worker blocking it.
+    errors = []
+
+    def run_retry():
+        try:
+            with native._isolate_lock:
+                native._retry_pending_teardown_locked()
+        except BaseException as error:  # pragma: no cover - surfaced via assert
+            errors.append(error)
+
+    thread = Thread(target=run_retry)
+    thread.start()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert not errors
+    # Retry succeeded: flag cleared and globals nulled.
+    assert native._teardown_needed is False
+    assert native._isolate is None
+    assert native._lib is None
+    # A second, fresh worker was attached for the retry and used for the
+    # successful teardown. Its worker is intentionally NOT detached (isolate
+    # destroyed -> pointer invalid), so only the FAILED-teardown worker (0x1000)
+    # is ever detached.
+    assert fake.attach_workers == [0x1000, 0x2000]
+    assert fake.tear_down_workers == [0x1000, 0x2000]
+    assert fake.detached == [0x1000]  # success path does not detach
+
+
+@pytest.mark.unit
+def test_release_teardown_retry_from_a_distinct_os_thread_uses_a_fresh_worker(monkeypatch):
+    """Review #15 #1: the retry must attach a FRESH worker on whatever OS thread
+    runs it -- never reuse a thread attached on another OS thread. Drive the
+    last-release teardown to fail (arming _teardown_needed with NO retained
+    thread), then run the retry from a distinct threading.Thread and prove it
+    attached a new worker on that thread and tore down successfully.
+
+    RetryTeardownFake implements only the lifecycle ABI (attach/detach/teardown),
+    not the full export set _acquire_isolate/_bind_abi require, so publish the
+    shared isolate by driving the globals directly -- exactly the setup pattern
+    used by the sibling cross-thread retry test above."""
+    fake = RetryTeardownFake()
+    monkeypatch.setattr(native, "_lib", fake)
+    monkeypatch.setattr(native, "_lib_path", "/tmp/dwlib")
+    monkeypatch.setattr(native, "_isolate", native.GraalIsolatePointer())
+    monkeypatch.setattr(native, "_isolate_ref_count", 1)
+    monkeypatch.setattr(native, "_teardown_needed", False)
+
+    with pytest.raises(native.DataWeaveError):
+        native._release_isolate()                  # last release: teardown fails once -> armed
+    assert native._teardown_needed is True
+    assert native._isolate is not None
+    workers_before = list(fake.attach_workers)
+
+    errors = []
+    def retry_on_other_thread():
+        try:
+            with native._isolate_lock:
+                native._retry_pending_teardown_locked()   # succeeds on the 2nd teardown
+        except BaseException as e:  # pragma: no cover - surfaced via errors
+            errors.append(e)
+
+    t = threading.Thread(target=retry_on_other_thread)
+    t.start()
+    t.join()
+
+    assert errors == []
+    assert native._teardown_needed is False
+    assert native._isolate is None
+    # The retry attached a NEW worker (distinct pointer) and tore down with IT.
+    assert len(fake.attach_workers) == len(workers_before) + 1
+    fresh_worker = fake.attach_workers[-1]
+    assert fake.tear_down_workers[-1] == fresh_worker
+
+
+@pytest.mark.unit
+def test_two_engines_dispatch_to_their_own_resolver(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    a = native.NativeRuntime("/tmp/dwlib")
+    a.install_resolver(lambda path: f"A:{path}")
+    a.initialize()
+    b = native.NativeRuntime("/tmp/dwlib")
+    b.install_resolver(lambda path: f"B:{path}")
+    b.initialize()
+
+    # ctx tokens are distinct and registered.
+    _ha, cb_a, ctx_a = next(e for e in library.created_engines if e[0] == a.handle)
+    _hb, cb_b, ctx_b = next(e for e in library.created_engines if e[0] == b.handle)
+    assert ctx_a != ctx_b
+    assert native._resolver_registry[ctx_a] is a
+    assert native._resolver_registry[ctx_b] is b
+
+    # Simulate a synchronous resolve on each engine's owner thread.
+    with a._resolver_scope():
+        ptr_a = cb_a(None, ctx_a, b"org/x.dwl")
+    assert ctypes.string_at(ptr_a) == b"A:org/x.dwl"
+
+    with b._resolver_scope():
+        ptr_b = cb_b(None, ctx_b, b"org/x.dwl")
+    assert ctypes.string_at(ptr_b) == b"B:org/x.dwl"
+
+    a.cleanup()
+    assert ctx_a not in native._resolver_registry
+    b.cleanup()
+
+
+@pytest.mark.unit
+def test_resolver_fails_closed_off_the_owner_thread_without_invoking_python(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    calls = []
+    a = native.NativeRuntime("/tmp/dwlib")
+    a.install_resolver(lambda path: calls.append(path) or "src")
+    a.initialize()
+    _h, callback, ctx = library.created_engines[0]
+
+    # Not inside a synchronous resolver scope (mirrors a streaming worker): must
+    # return None WITHOUT invoking the Python resolver.
+    assert callback(None, ctx, b"org/x.dwl") is None
+    assert calls == []
+
+    # Inside the scope but on a different Python thread ident: still fail-closed.
+    results = []
+    def worker():
+        with a._resolver_scope():
+            # Overwrite the active ident to the worker's, but call from... actually
+            # _resolver_scope records THIS thread's ident, so a same-thread call
+            # resolves. Assert the positive to anchor the guard semantics.
+            results.append(callback(None, ctx, b"org/y.dwl"))
+    import threading
+    t = threading.Thread(target=worker)
+    t.start(); t.join(2)
+    assert results and ctypes.string_at(results[0]) == b"src"
+
+    a.cleanup()
+
+
+@pytest.mark.unit
+def test_bootstrap_thread_is_detached_after_isolate_create(monkeypatch):
+    # Regression (final review Finding #1): the isolate's bootstrap thread must be
+    # detached immediately after graal_create_isolate, before anything attaches a
+    # fresh thread for engine creation. So a last release on a different OS
+    # thread can tear down without blocking on a phantom attachment.
+    #
+    # NOTE on comparison strategy: FakeLibrary's stubs write NULL pointers into
+    # their out-params (there is no real native memory backing them here), so
+    # pointer VALUES (and even object identity, since nothing ever aliases the
+    # bootstrap thread object across calls) cannot distinguish "the bootstrap
+    # thread" from a later attach. What CAN be checked -- and is exactly what
+    # Finding #1 is about -- is call ORDER: detach must happen immediately
+    # after create_isolate, strictly before the attach used for engine create.
+    library = FakeLibrary()
+    events = []
+
+    def create_isolate(_params, _isolate, _thread_out):
+        events.append("create_isolate")
+        return 0
+
+    def detach_thread(_thread):
+        events.append("detach")
+        return 0
+
+    def attach_thread(isolate, thread_out):
+        events.append("attach")
+        return library._attach_thread(isolate, thread_out)
+
+    library.graal_create_isolate = CallableFunction(create_isolate)
+    library.graal_detach_thread = CallableFunction(detach_thread)
+    library.graal_attach_thread = CallableFunction(attach_thread)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+
+    assert events[:2] == ["create_isolate", "detach"], (
+        "bootstrap thread was not detached immediately after graal_create_isolate"
+    )
+    assert "attach" in events[2:], "engine create never attached its own thread"
+    assert events.index("attach") > events.index("detach"), (
+        "engine create attached before the bootstrap thread was detached"
+    )
+    runtime.cleanup()
+
+
+@pytest.mark.unit
+def test_failed_init_with_resolver_unregisters_the_token(monkeypatch):
+    library = FakeLibrary()
+    library.create_engine_with_resolver = CallableFunction(
+        lambda _thread, _cb, _ctx: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.install_resolver(lambda path: "src")
+    token = runtime._resolver_token
+    assert native._resolver_registry.get(token) is runtime
+    with pytest.raises(native.DataWeaveError):
+        runtime.initialize()
+
+    assert token not in native._resolver_registry
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None
+
+
+@pytest.mark.unit
+def test_failed_acquire_with_resolver_unregisters_the_token(monkeypatch):
+    """A library-load failure inside _acquire_isolate must still roll back the
+    resolver token (regression: _acquire_isolate was called outside
+    initialize()'s try, so the rollback below never ran)."""
+    monkeypatch.setattr(
+        native.ctypes, "CDLL", lambda _path: (_ for _ in ()).throw(OSError("no lib"))
+    )
+
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.install_resolver(lambda path: "src")
+    token = runtime._resolver_token
+    assert native._resolver_registry.get(token) is runtime
+
+    with pytest.raises(native.DataWeaveError):
+        runtime.initialize()
+
+    assert token not in native._resolver_registry
+    assert runtime._resolver_token == 0
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None
+
+
+@pytest.mark.unit
+def test_concurrent_initialize_on_one_instance_creates_a_single_engine(monkeypatch):
+    # Finding (review #10 #2): initialize() has no instance-level lock spanning
+    # the initialized-check -> _acquire_isolate -> _create_engine -> publish
+    # sequence. Two threads calling initialize() on the SAME instance can both
+    # pass the check, both acquire (refcount over-counts), and both create an
+    # engine -- the second self.handle write orphans the first, and cleanup()
+    # then releases only one ref.
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    runtime = native.NativeRuntime("/tmp/dwlib")
+
+    # A 2-party barrier with a timeout, patched into the instance's
+    # _create_engine. On the UNFIXED code both threads pass the `if
+    # self.initialized: return` fast-path concurrently and reach here at
+    # roughly the same time, so the barrier is satisfied and both proceed to
+    # create an engine (reproducing the over-count). On the FIXED
+    # (per-instance-locked) code only one thread is ever inside initialize()
+    # at a time, so the second party never arrives here before the timeout;
+    # the wait times out, the barrier breaks, and the lone thread just
+    # proceeds -- this must NOT deadlock the fixed code.
+    barrier = Barrier(2)
+    orig_create_engine = runtime._create_engine
+
+    def slow_create_engine():
+        try:
+            barrier.wait(timeout=0.5)
+        except BrokenBarrierError:
+            pass
+        return orig_create_engine()
+
+    monkeypatch.setattr(runtime, "_create_engine", slow_create_engine)
+
+    errors = []
+
+    def call_initialize():
+        try:
+            runtime.initialize()
+        except BaseException as error:  # pragma: no cover - surfaced via assert
+            errors.append(error)
+
+    threads = [Thread(target=call_initialize) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+
+    assert not any(thread.is_alive() for thread in threads), "initialize() deadlocked"
+    assert not errors
+    assert runtime.initialized is True
+    # Exactly one acquire, exactly one engine -- no over-count regardless of
+    # how the two calls interleaved.
+    assert native._isolate_ref_count == 1
+    assert len(library.created_engines) == 1
+    assert runtime.handle == library.created_engines[0][0]
+
+    runtime.cleanup()
+    assert native._isolate_ref_count == 0
+
+
+@pytest.mark.unit
+def test_release_teardown_and_detach_both_failing_leaks_isolate_without_arming_retry(monkeypatch):
+    """review #16 #2 (leak-and-continue): if the last-release teardown fails AND
+    detaching the just-attached worker also fails, re-arming a retry would attach
+    yet another worker on top of the stuck one and permanently block teardown
+    (which needs the SOLE attached thread). So the isolate is treated as
+    UNRECOVERABLE: globals nulled, NO retry armed, no thread retained -- a later
+    initialize() builds a fresh isolate. Mirrors the bootstrap double-failure policy."""
+    monkeypatch.setattr(native, "_teardown_needed", False)  # restored after the test regardless
+    library = FakeLibrary()  # bootstrap detach succeeds (default) so acquire publishes cleanly
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    lib, isolate = native._acquire_isolate("/tmp/dwlib")
+
+    # Now make the last-release teardown fail AND the subsequent detach fail.
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 1)
+    library.graal_detach_thread = CallableFunction(lambda _thread: 1)  # nonzero == failed detach
+
+    with pytest.raises(native.DataWeaveError):
+        native._release_isolate()  # last release -> teardown fails -> detach fails -> leak
+
+    # Leaked: globals nulled, NO retry armed (the crux of #16 #2), refcount at 0.
+    assert native._isolate is None
+    assert native._lib is None
+    assert native._isolate_ref_count == 0
+    assert native._teardown_needed is False
+
+    # The module is NOT wedged: a healthy library builds a fresh isolate.
+    healthy = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: healthy)
+    lib2, isolate2 = native._acquire_isolate("/tmp/dwlib")
+    assert lib2 is healthy
+    assert native._isolate is not None
+    native._release_isolate()  # clean up the fresh isolate
+
+
+@pytest.mark.unit
+def test_retry_teardown_and_detach_both_failing_leaks_isolate_without_arming_retry(monkeypatch):
+    """review #16 #2: the retry path (_retry_pending_teardown_locked) attaches a
+    fresh worker. If its teardown fails AND detaching that worker fails, arming
+    another retry would stack a second stuck worker -> permanent block. So it
+    leaks-and-continues: globals nulled, retry disarmed, no thread retained."""
+    monkeypatch.setattr(native, "_teardown_needed", False)  # restored after the test regardless
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    # Acquire cleanly, then arm a pending teardown by hand and point the retry at
+    # a library whose teardown and detach both fail.
+    lib, isolate = native._acquire_isolate("/tmp/dwlib")
+    monkeypatch.setattr(native, "_teardown_needed", True)
+    monkeypatch.setattr(native, "_isolate_ref_count", 0)
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 1)
+    library.graal_detach_thread = CallableFunction(lambda _thread: 1)
+
+    # Next acquire runs _retry_pending_teardown_locked, which double-fails.
+    with pytest.raises(native.DataWeaveError):
+        native._acquire_isolate("/tmp/dwlib")
+
+    assert native._isolate is None
+    assert native._lib is None
+    assert native._teardown_needed is False
+
+    healthy = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: healthy)
+    lib2, isolate2 = native._acquire_isolate("/tmp/dwlib")
+    assert native._isolate is not None
+    native._release_isolate()

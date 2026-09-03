@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DataWeave, run, runStreaming, runTransform, cleanup } from "../../src/index";
 
-afterAll(() => {
-  cleanup();
+afterAll(async () => {
+  await cleanup();
 });
 
 describe("DataWeave Node.js API", () => {
@@ -21,7 +21,7 @@ describe("DataWeave Node.js API", () => {
       expect(result.getString()).toBe("42");
     });
 
-    it("explicit instance lifecycle", () => {
+    it("explicit instance lifecycle", async () => {
       const dw = new DataWeave();
       dw.initialize();
       try {
@@ -30,7 +30,7 @@ describe("DataWeave Node.js API", () => {
         const r2 = dw.run("sqrt(10000)");
         expect(r2.getString()).toBe("100");
       } finally {
-        dw.cleanup();
+        await dw.cleanup();
       }
     });
 

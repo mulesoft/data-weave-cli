@@ -20,9 +20,16 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.util.Base64;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Singleton wrapper around a {@link DWScriptingEngine} used to compile and execute DataWeave scripts.
+ * Wrapper around a {@link DWScriptingEngine} used to compile and execute DataWeave scripts.
+ *
+ * <p>Each {@link ScriptRuntime} instance owns its own engine (and therefore its own module
+ * resolver and script cache), so multiple isolated engines can coexist within one process.
+ * Instances are tracked in a handle-keyed registry so native callers can address a specific
+ * engine by an opaque {@code long} handle.</p>
  *
  * <p>Execution results are returned as a JSON string containing a base64-encoded payload plus metadata
  * (mime type, charset, and whether the result is binary). Errors are returned as a JSON string with
@@ -30,84 +37,65 @@ import java.util.Base64;
  */
 public class ScriptRuntime {
 
-    private static final ScriptRuntime INSTANCE = new ScriptRuntime();
+    // ── Handle registry ──────────────────────────────────────────────────
+    private static final ConcurrentHashMap<Long, ScriptRuntime> REGISTRY = new ConcurrentHashMap<>();
+    private static final AtomicLong NEXT_HANDLE = new AtomicLong(1);
 
-    // Static field for callback resolver, volatile for thread-safe double-checked locking
-    private static volatile CallbackWeaveResourceResolver resolver = null;
-
-    /**
-     * Returns the singleton instance.
-     *
-     * @return the shared {@link ScriptRuntime}
-     */
-    public static ScriptRuntime getInstance() {
-        return INSTANCE;
+    /** Registers a runtime and returns its non-zero handle. */
+    public static long register(ScriptRuntime runtime) {
+        long handle = NEXT_HANDLE.getAndIncrement();
+        REGISTRY.put(handle, runtime);
+        return handle;
     }
 
-    /**
-     * Sets the module resolver callback and rebuilds the engine.
-     * Can only be called once per process (engine is a singleton).
-     * Thread-safe but should be called early in application lifecycle before script execution.
-     *
-     * <p><strong>IMPORTANT:</strong> The callback function must be thread-safe if using
-     * GraalVM's threadsafe function pointers, as it may be invoked from multiple threads
-     * during concurrent module resolution.</p>
-     *
-     * @param callback Thread-safe function pointer for resolving modules
-     */
-    public static synchronized void setResolver(NativeCallbacks.ResolveModuleCallback callback) {
-        if (resolver != null) {
-            System.err.println("WARNING: Module resolver already set for this process. " +
-                              "Only one resolver configuration is supported. Ignoring new resolver.");
-            return;
-        }
-
-        if (callback.isNull()) {
-            System.err.println("WARNING: Attempted to set null resolver, ignoring.");
-            return;
-        }
-
-        resolver = new CallbackWeaveResourceResolver(callback);
-
-        // Rebuild engine with composite resolver (built-ins + callback)
-        synchronized (INSTANCE) {
-            INSTANCE.engine = DWScriptingEngine.builder()
-                    .withDWModuleComponentsFactory(createModuleComponentsFactory())
-                    .build();
-        }
+    /** Returns the runtime for a handle, or {@code null} if unknown/destroyed. */
+    public static ScriptRuntime get(long handle) {
+        return REGISTRY.get(handle);
     }
 
-    /**
-     * Creates composite resolver: ClassLoader (built-ins) + Callback (user modules).
-     * If no callback resolver is set, returns ClassLoader only.
-     */
-    private static WeaveResourceResolver compositeResolver() {
-        WeaveResourceResolver classLoaderResolver = ClassLoaderWeaveResourceResolver.apply();
-
-        CallbackWeaveResourceResolver currentResolver = resolver;
-        if (currentResolver == null) {
-            return classLoaderResolver;
-        }
-
-        return CompositeWeaveResourceResolver.apply(
-            classLoaderResolver,  // Try built-ins first
-            currentResolver       // Then callback for user modules
-        );
+    /** Removes a runtime; returns {@code true} if one was present. */
+    public static boolean destroy(long handle) {
+        return REGISTRY.remove(handle) != null;
     }
 
-    private static DWModuleComponentsFactory createModuleComponentsFactory() {
-        return DWModuleComponentsFactory.createSimpleDWModuleComponentsFactoryBuilder()
-                .withWeaveResourceResolver(compositeResolver())
+    // ── Per-instance engine ───────────────────────────────────────────────
+    private final DWScriptingEngine engine;
+
+    /**
+     * Builds an engine whose resolver is Composite(ClassLoader-built-ins + {@code customResolver});
+     * a null {@code customResolver} yields ClassLoader-only.
+     *
+     * @param customResolver additional resolver for user-supplied modules, or {@code null}
+     */
+    public ScriptRuntime(WeaveResourceResolver customResolver) {
+        this.engine = DWScriptingEngine.builder()
+                .withDWModuleComponentsFactory(createModuleComponentsFactory(customResolver))
                 .build();
     }
 
-    // Instance field for the scripting engine, access synchronized in setResolver
-    private volatile DWScriptingEngine engine;
+    /** Builds an engine with built-in (ClassLoader) modules only — no custom resolver. */
+    public ScriptRuntime() {
+        this(null);
+    }
 
-    private ScriptRuntime() {
-        // Initialize with ClassLoader-only resolver (no callback yet)
-        engine = DWScriptingEngine.builder()
-                .withDWModuleComponentsFactory(createModuleComponentsFactory())
+    /**
+     * Creates composite resolver: ClassLoader (built-ins) + custom (user modules).
+     * If no custom resolver is provided, returns ClassLoader only.
+     */
+    private static WeaveResourceResolver compositeResolver(WeaveResourceResolver customResolver) {
+        WeaveResourceResolver classLoaderResolver = ClassLoaderWeaveResourceResolver.apply();
+        if (customResolver == null) {
+            return classLoaderResolver;
+        }
+        return CompositeWeaveResourceResolver.apply(
+            classLoaderResolver,  // Try built-ins first
+            customResolver        // Then callback for user modules
+        );
+    }
+
+    private static DWModuleComponentsFactory createModuleComponentsFactory(WeaveResourceResolver customResolver) {
+        return DWModuleComponentsFactory.createSimpleDWModuleComponentsFactoryBuilder()
+                .withWeaveResourceResolver(compositeResolver(customResolver))
                 .build();
     }
 
@@ -132,10 +120,10 @@ public class ScriptRuntime {
      * @return a JSON string describing either the successful result or an error
      */
     public String run(String script, String inputsJson) {
-        ScriptingBindings bindings = parseJsonInputsToBindings(inputsJson);
-        String[] inputs = bindings.bindingNames();
-
         try {
+            ScriptingBindings bindings = parseJsonInputsToBindings(inputsJson);
+            String[] inputs = bindings.bindingNames();
+
             DWScript compiled = engine.compileDWScript(script, inputs);
             DWResult dwResult = compiled.writeDWResult(bindings);
 
@@ -180,10 +168,10 @@ public class ScriptRuntime {
      * @return a {@link StreamSession} with the result stream and metadata, or an error session
      */
     public StreamSession runStreaming(String script, String inputsJson) {
-        ScriptingBindings bindings = parseJsonInputsToBindings(inputsJson);
-        String[] inputs = bindings.bindingNames();
-
         try {
+            ScriptingBindings bindings = parseJsonInputsToBindings(inputsJson);
+            String[] inputs = bindings.bindingNames();
+
             DWScript compiled = engine.compileDWScript(script, inputs);
             DWResult dwResult = compiled.writeDWResult(bindings);
 
@@ -213,48 +201,48 @@ public class ScriptRuntime {
             return bindings;
         }
 
-        try {
-            JSONObject root = new JSONObject(inputsJson);
+        // Fail closed: any malformed entry (bad JSON / base64 / charset / streamHandle /
+        // properties) must propagate so the caller returns an error result rather than
+        // silently executing on partial/empty bindings. Because `bindings` is only
+        // returned after the loop completes, a propagated exception discards any
+        // partially-built bindings automatically.
+        JSONObject root = new JSONObject(inputsJson);
 
-            for (String name : root.keySet()) {
-                JSONObject entry = root.getJSONObject(name);
+        for (String name : root.keySet()) {
+            JSONObject entry = root.getJSONObject(name);
 
-                if (entry.has("streamHandle")) {
-                    long streamHandle = Long.parseLong(entry.getString("streamHandle"));
-                    InputStreamSession inputSession = InputStreamSession.get(streamHandle);
-                    if (inputSession == null) {
-                        throw new RuntimeException("Invalid streamHandle " + streamHandle + " for input '" + name + "'");
-                    }
-                    String mimeTypeRaw = entry.optString("mimeType", inputSession.getMimeType());
-                    String charsetRaw = entry.optString("charset", inputSession.getCharset());
-                    Charset charset = Charset.forName(charsetRaw);
-                    Option<String> mimeType = Option.apply(mimeTypeRaw);
-
-                    BindingValue bindingValue = new BindingValue(inputSession.getInputStream(), mimeType, Map$.MODULE$.empty(), charset);
-                    bindings.addBinding(name, bindingValue);
-
-                } else if (entry.has("content")) {
-                    String contentRaw = entry.getString("content");
-                    String mimeTypeRaw = entry.optString("mimeType", null);
-                    String charsetRaw = entry.optString("charset", "UTF-8");
-
-                    Map<String, Object> properties = Map$.MODULE$.empty();
-                    if (entry.has("properties") && !entry.isNull("properties")) {
-                        JSONObject propsObj = entry.getJSONObject("properties");
-                        properties = parseJsonProperties(propsObj);
-                    }
-
-                    Charset charset = Charset.forName(charsetRaw);
-                    Option<String> mimeType = Option.apply(mimeTypeRaw);
-
-                    byte[] content = Base64.getDecoder().decode(contentRaw);
-                    BindingValue bindingValue = new BindingValue(content, mimeType, properties, charset);
-                    bindings.addBinding(name, bindingValue);
+            if (entry.has("streamHandle")) {
+                long streamHandle = Long.parseLong(entry.getString("streamHandle"));
+                InputStreamSession inputSession = InputStreamSession.get(streamHandle);
+                if (inputSession == null) {
+                    throw new RuntimeException("Invalid streamHandle " + streamHandle + " for input '" + name + "'");
                 }
+                String mimeTypeRaw = entry.optString("mimeType", inputSession.getMimeType());
+                String charsetRaw = entry.optString("charset", inputSession.getCharset());
+                Charset charset = Charset.forName(charsetRaw);
+                Option<String> mimeType = Option.apply(mimeTypeRaw);
+
+                BindingValue bindingValue = new BindingValue(inputSession.getInputStream(), mimeType, Map$.MODULE$.empty(), charset);
+                bindings.addBinding(name, bindingValue);
+
+            } else if (entry.has("content")) {
+                String contentRaw = entry.getString("content");
+                String mimeTypeRaw = entry.optString("mimeType", null);
+                String charsetRaw = entry.optString("charset", "UTF-8");
+
+                Map<String, Object> properties = Map$.MODULE$.empty();
+                if (entry.has("properties") && !entry.isNull("properties")) {
+                    JSONObject propsObj = entry.getJSONObject("properties");
+                    properties = parseJsonProperties(propsObj);
+                }
+
+                Charset charset = Charset.forName(charsetRaw);
+                Option<String> mimeType = Option.apply(mimeTypeRaw);
+
+                byte[] content = Base64.getDecoder().decode(contentRaw);
+                BindingValue bindingValue = new BindingValue(content, mimeType, properties, charset);
+                bindings.addBinding(name, bindingValue);
             }
-        } catch (Exception e) {
-            System.err.println("Error parsing JSON inputs: " + e.getMessage());
-            e.printStackTrace();
         }
 
         return bindings;

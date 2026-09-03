@@ -6,12 +6,23 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import org.json.JSONObject;
 import org.junit.jupiter.api.Test;
+import org.mule.weave.v2.parser.ast.variables.NameIdentifier;
+import org.mule.weave.v2.sdk.NameIdentifierHelper;
+import org.mule.weave.v2.sdk.WeaveResource;
+import org.mule.weave.v2.sdk.WeaveResourceResolver;
+import scala.Option;
+import scala.collection.JavaConverters;
+import scala.collection.immutable.Seq;
+import scala.collection.immutable.Seq$;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.Charset;
 import java.util.Base64;
+import java.util.Collections;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -19,7 +30,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runSimpleScript() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
         
         System.out.println("Running sqrt(144) 10 times with timing:");
         System.out.println("=".repeat(50));
@@ -39,7 +50,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runParseError() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Running sqrt(144) 10 times with timing:");
         System.out.println("=".repeat(50));
@@ -55,7 +66,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithInputs() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
         
         System.out.println("Testing runWithInputs with two integer numbers:");
         System.out.println("=".repeat(50));
@@ -129,7 +140,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithXmlInput() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
         
         System.out.println("Testing runWithInputs with XML input to calculate average age:");
         System.out.println("=".repeat(50));
@@ -181,7 +192,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithJsonObjectInput() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
         
         System.out.println("Testing runWithInputs with JSON object input:");
         System.out.println("=".repeat(50));
@@ -216,7 +227,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithBinaryResult() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Running fromBase64 10 times with timing:");
         System.out.println("=".repeat(50));
@@ -239,7 +250,7 @@ class ScriptRuntimeTest {
 
     @Test
     void runWithInputProperties() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
         String encodedIn0 = Base64.getEncoder().encodeToString("1234567".getBytes());
         Result result = Result.parse(runtime.run("in0.column_1[0] as Number",
                 "{\"in0\": " +
@@ -252,7 +263,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamSimpleScript() throws IOException {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing streaming simple script:");
         System.out.println("=".repeat(50));
@@ -279,7 +290,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamWithInputs() throws IOException {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing streaming with inputs:");
         System.out.println("=".repeat(50));
@@ -310,7 +321,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamChunkedRead() throws IOException {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing streaming chunked read:");
         System.out.println("=".repeat(50));
@@ -341,7 +352,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamWithStreamingInput() throws Exception {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing streaming with streaming input:");
         System.out.println("=".repeat(50));
@@ -396,7 +407,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamWithLargeStreamingInput() throws Exception {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing streaming with large streaming input:");
         System.out.println("=".repeat(50));
@@ -455,7 +466,7 @@ class ScriptRuntimeTest {
 
     @Test
     void streamErrorSession() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing streaming error session:");
         System.out.println("=".repeat(50));
@@ -474,7 +485,7 @@ class ScriptRuntimeTest {
 
     @Test
     void callbackOutputStreaming() throws IOException {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing callback-based output streaming:");
         System.out.println("=".repeat(50));
@@ -505,7 +516,7 @@ class ScriptRuntimeTest {
 
     @Test
     void callbackInputOutputStreaming() throws Exception {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing callback-based input+output streaming:");
         System.out.println("=".repeat(50));
@@ -566,7 +577,7 @@ class ScriptRuntimeTest {
 
     @Test
     void callbackOutputStreamingError() {
-        ScriptRuntime runtime = ScriptRuntime.getInstance();
+        ScriptRuntime runtime = new ScriptRuntime();
 
         System.out.println("Testing callback-based output streaming with error:");
         System.out.println("=".repeat(50));
@@ -580,6 +591,167 @@ class ScriptRuntimeTest {
         System.out.println("=".repeat(50));
     }
 
+    // --- Multi-engine registry (W-23692110) ---
+
+    /** In-memory WeaveResourceResolver fake — the JVM-constructable seam standing
+     *  in for CallbackWeaveResourceResolver (a CFunctionPointer, which cannot be
+     *  built in test mode). */
+    static final class MapResolver implements WeaveResourceResolver {
+        private final Map<String, String> modules;
+        MapResolver(Map<String, String> modules) { this.modules = modules; }
+
+        @Override
+        public Option<WeaveResource> resolve(NameIdentifier id) {
+            String path = NameIdentifierHelper.toWeaveFilePath(id, "/");
+            String key = path.startsWith("/") ? path.substring(1) : path;
+            String src = modules.get(key);
+            if (src == null) return Option.empty();
+            return Option.apply(WeaveResource.apply(path, src));
+        }
+
+        @Override
+        public Seq<WeaveResource> resolveAll(NameIdentifier id) {
+            Option<WeaveResource> r = resolve(id);
+            if (r.isDefined()) {
+                return JavaConverters
+                        .asScalaBuffer(Collections.singletonList(r.get()))
+                        .toList();
+            }
+            return (Seq<WeaveResource>) Seq$.MODULE$.<WeaveResource>empty();
+        }
+    }
+
+    private static final String IMPORT_A =
+            "%dw 2.0\nimport org::test::a\noutput application/json\n---\na::greet(\"X\")";
+    private static final String IMPORT_B =
+            "%dw 2.0\nimport org::test::b\noutput application/json\n---\nb::greet(\"X\")";
+
+    @Test
+    void twoEnginesResolveOnlyTheirOwnModule() {
+        ScriptRuntime engineA = new ScriptRuntime(new MapResolver(Map.of(
+                "org/test/a.dwl", "%dw 2.0\nfun greet(n: String) = \"A:\" ++ n")));
+        ScriptRuntime engineB = new ScriptRuntime(new MapResolver(Map.of(
+                "org/test/b.dwl", "%dw 2.0\nfun greet(n: String) = \"B:\" ++ n")));
+
+        long hA = ScriptRuntime.register(engineA);
+        long hB = ScriptRuntime.register(engineB);
+        assertNotNull(ScriptRuntime.get(hA));
+        assertNotNull(ScriptRuntime.get(hB));
+
+        // Each engine resolves its own module...
+        assertEquals("\"A:X\"", Result.parse(ScriptRuntime.get(hA).run(IMPORT_A)).result);
+        assertEquals("\"B:X\"", Result.parse(ScriptRuntime.get(hB).run(IMPORT_B)).result);
+
+        // ...and NOT the other's (no cross-talk).
+        assertNotNull(Result.parse(ScriptRuntime.get(hA).run(IMPORT_B)).error);
+        assertNotNull(Result.parse(ScriptRuntime.get(hB).run(IMPORT_A)).error);
+
+        // destroy removes it; a fresh handle is distinct.
+        assertTrue(ScriptRuntime.destroy(hA));
+        assertNull(ScriptRuntime.get(hA));
+        assertFalse(ScriptRuntime.destroy(hA)); // already gone
+        assertNotNull(ScriptRuntime.get(hB));
+
+        ScriptRuntime.destroy(hB);
+    }
+
+    @Test
+    void engineWithoutResolverStillRunsBuiltins() {
+        ScriptRuntime engine = new ScriptRuntime(); // ClassLoader-only
+        long h = ScriptRuntime.register(engine);
+        String r = ScriptRuntime.get(h).run(
+                "%dw 2.0\nimport dw::core::Strings\noutput application/json\n---\nStrings::capitalize(\"hello\")");
+        assertEquals("\"Hello\"", Result.parse(r).result);
+        ScriptRuntime.destroy(h);
+    }
+
+    /**
+     * Locks in the hard contract for the per-engine FFI entrypoints
+     * ({@code run_script_engine}, {@code run_script_callback_engine},
+     * {@code run_script_input_output_callback_engine} in {@link NativeLib}): running a
+     * script against an unknown or already-destroyed engine handle must return exactly
+     * {@code {"success":false,"error":"Unknown engine handle"}} rather than throwing.
+     *
+     * <p>The {@code @CEntryPoint} methods themselves cannot be invoked from a plain JVM
+     * unit test — they take GraalVM word types ({@code IsolateThread}, {@code CCharPointer})
+     * whose boxing infrastructure is only initialized inside a compiled native image (calling
+     * e.g. {@code WordFactory.nullPointer()} from a hosted JVM test throws
+     * {@code NullPointerException} from {@code WordBoxFactory}). All three entrypoints funnel
+     * the unknown-handle case through the same {@code UNKNOWN_ENGINE_HANDLE_JSON} constant, so
+     * asserting on that constant — combined with {@link #twoEnginesResolveOnlyTheirOwnModule}
+     * proving {@link ScriptRuntime#get} returns {@code null} for an unregistered/destroyed
+     * handle — verifies the full contract without needing the native runtime.</p>
+     */
+    @Test
+    void unknownEngineHandleProducesExactErrorJson() {
+        long unregisteredHandle = Long.MAX_VALUE;
+        assertNull(ScriptRuntime.get(unregisteredHandle));
+        assertEquals("{\"success\":false,\"error\":\"Unknown engine handle\"}",
+                NativeLib.UNKNOWN_ENGINE_HANDLE_JSON);
+    }
+
+    // ── Fail-closed input parsing (review #11 #5) ──────────────────────────
+
+    /** (a) Malformed inputs JSON must fail closed, not silently run on empty bindings. */
+    @Test
+    void runMalformedInputsJsonFailsClosed() {
+        ScriptRuntime runtime = new ScriptRuntime();
+        // Script has no input dependency, so pre-fix the swallowed parse error
+        // would let this run on empty bindings and return success:true.
+        String result = runtime.run("1 + 1", "{not json");
+        assertTrue(result.contains("\"success\":false"),
+                "Expected success:false for malformed inputs JSON, got: " + result);
+        assertFalse(Result.parse(result).success);
+    }
+
+    /**
+     * (b) A malformed SECOND entry (invalid base64 content) must fail the whole run,
+     * not silently drop the entry and execute bound to only the first entry.
+     */
+    @Test
+    void runMalformedSecondEntryFailsClosed() {
+        ScriptRuntime runtime = new ScriptRuntime();
+
+        // First entry valid; second entry has invalid base64 content.
+        String inputsJson = String.format(
+                "{\"num1\": {\"content\": \"%s\", \"mimeType\": \"application/json\"}, " +
+                "\"num2\": {\"content\": \"@@@not-valid-base64@@@\", \"mimeType\": \"application/json\"}}",
+                encode(10));
+
+        // Script references only the first binding: pre-fix the second (malformed)
+        // entry would be silently dropped and this would wrongly succeed on num1 alone.
+        String result = runtime.run("num1", inputsJson);
+        assertFalse(Result.parse(result).success,
+                "Expected fail-closed on malformed second entry, got: " + result);
+        assertNotNull(Result.parse(result).error);
+
+        // And a script that references the malformed binding must not run on a missing var.
+        String result2 = runtime.run("num1 + num2", inputsJson);
+        assertFalse(Result.parse(result2).success,
+                "Expected fail-closed when referencing malformed binding, got: " + result2);
+    }
+
+    /** (c) A valid single-entry inputs doc must still run successfully (no regression). */
+    @Test
+    void runValidSingleEntryStillSucceeds() {
+        ScriptRuntime runtime = new ScriptRuntime();
+        String inputsJson = String.format(
+                "{\"num1\": {\"content\": \"%s\", \"mimeType\": \"application/json\"}}",
+                encode(41));
+        String result = runtime.run("num1 + 1", inputsJson);
+        assertTrue(Result.parse(result).success, "Expected success for valid inputs, got: " + result);
+        assertEquals("42", Result.parse(result).result);
+    }
+
+    /** runStreaming must return an error session on malformed inputs JSON. */
+    @Test
+    void runStreamingMalformedInputsJsonReturnsErrorSession() {
+        ScriptRuntime runtime = new ScriptRuntime();
+        StreamSession session = runtime.runStreaming("1 + 1", "{not json");
+        assertTrue(session.isError(), "Expected error session for malformed inputs JSON");
+        assertNotNull(session.getError());
+    }
+
     static class Result {
         boolean success;
         String result;
@@ -590,7 +762,7 @@ class ScriptRuntimeTest {
 
         static Result parse(String json) {
             Result result = new Result();
-            org.json.JSONObject obj = new org.json.JSONObject(json);
+            JSONObject obj = new JSONObject(json);
 
             result.success = obj.getBoolean("success");
             if (result.success) {

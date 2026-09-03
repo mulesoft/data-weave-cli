@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACCEPTED_BASELINE_MISMATCHES,
   CAPABILITY_EXCLUSIONS,
+  EXPECTED_EXECUTION_FAILURES,
   IGNORED_CASES,
   REENABLED_CASES,
   STRUCTURAL_MODULE_CASES,
@@ -43,9 +44,10 @@ describe("TCK ignore policy", () => {
     ]);
   });
 
-  it("reconciles exclusions into capability skips and strict xfails", () => {
+  it("reconciles exclusions into capability skips, strict xfails, and strict exec-xfails", () => {
     expect(Object.keys(CAPABILITY_EXCLUSIONS)).toHaveLength(32);
-    expect(Object.keys(ACCEPTED_BASELINE_MISMATCHES)).toHaveLength(21);
+    expect(Object.keys(ACCEPTED_BASELINE_MISMATCHES)).toHaveLength(15);
+    expect(Object.keys(EXPECTED_EXECUTION_FAILURES)).toHaveLength(6);
     expect(REENABLED_CASES).toHaveLength(6);
     expect(CAPABILITY_EXCLUSIONS).toHaveProperty("runtime/big_intersection-out.json");
     expect(IGNORED_CASES).toBe(CAPABILITY_EXCLUSIONS);
@@ -53,6 +55,8 @@ describe("TCK ignore policy", () => {
       CAPABILITY_EXCLUSIONS,
       ACCEPTED_BASELINE_MISMATCHES,
       REENABLED_CASES,
+      undefined,
+      EXPECTED_EXECUTION_FAILURES,
     )).toEqual([]);
   });
 
@@ -90,6 +94,27 @@ describe("TCK ignore policy", () => {
       "expected 729 runnable cases, discovered 728",
       "expected 193 structurally skipped cases, discovered 194",
     ]);
+  });
+
+  const EXEC_FAILURE_TABLE = [
+    ["core-modules/multipart-mixed-message-out.multipart:out.multipart", "Multipart Object has empty `parts`"],
+    ["core-modules/multipart-write-message-out.multipart:out.multipart", "Multipart Object has empty `parts`"],
+    ["core-modules/multipart-write-subtype-override-out.multipart:out.multipart", "Multipart Object has empty `parts`"],
+    ["runtime/access_raw_value-out.json:out.json", "Cannot coerce Null to String"],
+    ["runtime/read-concat-out.json:out.json", "Cannot coerce Null to String"],
+    ["runtime/update-op-out.dwl:out.dwl", "Cannot coerce Null (null) to Number"],
+  ] as const;
+
+  it("has exactly the expected 6 execution-failure scenario identifiers", () => {
+    expect(Object.keys(EXPECTED_EXECUTION_FAILURES)).toEqual(EXEC_FAILURE_TABLE.map(([scenarioId]) => scenarioId));
+  });
+
+  it.each(EXEC_FAILURE_TABLE)("classifies %s as a strict expected execution failure", (scenarioId, errorMatch) => {
+    expect(EXPECTED_EXECUTION_FAILURES).toHaveProperty([scenarioId]);
+    expect(EXPECTED_EXECUTION_FAILURES[scenarioId].errorMatch).toBe(errorMatch);
+    const caseId = scenarioId.slice(0, scenarioId.lastIndexOf(":"));
+    expect(CAPABILITY_EXCLUSIONS).not.toHaveProperty([caseId]);
+    expect(ACCEPTED_BASELINE_MISMATCHES).not.toHaveProperty([scenarioId]);
   });
 });
 

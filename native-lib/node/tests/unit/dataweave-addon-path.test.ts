@@ -9,11 +9,13 @@ vi.mock("node:fs", () => ({ existsSync: vi.fn() }));
 vi.mock("../../src/addon-path", () => ({ resolveAddonPath: vi.fn() }));
 vi.mock("../../src/ffi", () => ({
   initialize: vi.fn(),
+  createEngine: vi.fn(),
+  createEngineWithResolver: vi.fn(),
+  destroyEngine: vi.fn(),
+  runScriptEngine: vi.fn(),
+  runScriptStreamingEngine: vi.fn(),
+  runScriptTransformEngine: vi.fn(),
   cleanup: vi.fn(),
-  runScript: vi.fn(),
-  runScriptStreaming: vi.fn(),
-  runScriptTransform: vi.fn(),
-  runWithResolver: vi.fn(),
 }));
 
 const mockedExistsSync = vi.mocked(existsSync);
