@@ -9,6 +9,7 @@ This is achieved by overriding the bdist_wheel command to set platform-specific
 tags based on the current build environment.
 """
 
+import os
 import platform
 import struct
 import sys
@@ -106,4 +107,7 @@ cmdclass = {}
 if bdist_wheel is not None:
     cmdclass["bdist_wheel"] = bdist_wheel
 
-setup(cmdclass=cmdclass)
+setup(
+    version=os.environ.get("NATIVE_VERSION", "0.0.1"),
+    cmdclass=cmdclass,
+)

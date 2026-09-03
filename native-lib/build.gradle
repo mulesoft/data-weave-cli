@@ -135,6 +135,7 @@ tasks.register('buildPythonWheel', Exec) {
   inputs.file("${projectDir}/python/setup.py")
   inputs.file("${projectDir}/python/setup.cfg")
   inputs.file("${projectDir}/python/pyproject.toml")
+  inputs.property('nativeVersion', project.version.toString())
   outputs.dir("${projectDir}/python/dist")
   doFirst {
     // Clean old wheels and build artifacts to ensure fresh build
@@ -145,6 +146,7 @@ tasks.register('buildPythonWheel', Exec) {
   // Use setup.py bdist_wheel to generate platform-specific wheel tags
   // The custom setup.py overrides bdist_wheel to set correct platform tags
   // for the bundled native library (dwlib)
+  environment 'NATIVE_VERSION', project.version.toString()
   commandLine(pythonExe, 'setup.py', 'bdist_wheel', '-d', 'dist')
 }
 

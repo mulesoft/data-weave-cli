@@ -22,7 +22,7 @@ After building:
 
 ```bash
 ./gradlew :native-lib:buildPythonWheel
-python3 -m pip install native-lib/python/dist/dataweave_native-0.0.1-*.whl
+python3 -m pip install native-lib/python/dist/dataweave_native-*-py3-*.whl
 ```
 
 ### Option B: Editable install for development

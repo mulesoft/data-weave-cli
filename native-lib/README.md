@@ -82,7 +82,7 @@ The wheel will be created in:
 After `:native-lib:buildPythonWheel`:
 
 ```bash
-python3 -m pip install native-lib/python/dist/dataweave_native-0.0.1-*.whl
+python3 -m pip install native-lib/python/dist/dataweave_native-*-py3-*.whl
 ```
 
 This wheel includes the `dwlib.*` shared library inside the Python package.
