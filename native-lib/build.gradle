@@ -246,8 +246,7 @@ tasks.register('pythonTck', Exec) {
   inputs.dir("${projectDir}/python/tests/tck")
   inputs.dir(tckSuitesDir)
   inputs.file("${projectDir}/python/pytest.ini")
-  commandLine(pythonExe, '-m', 'pytest', '-m', 'tck',
-    '--junitxml', "${layout.buildDirectory.get().asFile}/test-results/pythonTck.xml")
+  commandLine(pythonExe, '-m', 'pytest', '-m', 'tck')
 }
 
 tasks.register('buildNodePackage', Exec) {
