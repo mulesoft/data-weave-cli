@@ -56,7 +56,7 @@ def test_python_tck_is_gated_by_the_master_only_workflow_input():
 
 
 @pytest.mark.unit
-def test_python_artifact_owns_test_dependencies_and_tck_junit_upload():
+def test_python_artifact_owns_test_dependencies():
     root = Path(__file__).resolve().parents[4]
     foundation = (root / ".github/actions/build-foundation/action.yml").read_text()
     action = (root / ".github/actions/python/action.yml").read_text()
@@ -64,14 +64,11 @@ def test_python_artifact_owns_test_dependencies_and_tck_junit_upload():
     assert "Install Python test dependencies" not in foundation
     assert "native-lib/python[test]" in action
     assert "platform:" in action
-    assert "python-tck-junit-${{ inputs.platform }}" in action
     assert action.index("Create Native Lib Python Wheel") < action.index("Run Python TCK Conformance")
     assert action.index("Upload Python wheel (artifact)") < action.index("Run Python TCK Conformance")
     assert "Upload Python wheel to release" not in action
     assert "svenstaro/upload-release-action" not in action
-    assert action.index("Run Python TCK Conformance") < action.index("Upload Python TCK JUnit")
     assert named_step_if(action, "Run Python TCK Conformance") == "always() && inputs.run-tck == 'true'"
-    assert "native-lib/build/test-results/pythonTck.xml" in action
 
 
 @pytest.mark.unit

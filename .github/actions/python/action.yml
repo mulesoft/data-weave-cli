@@ -61,11 +61,3 @@ runs:
       if: always() && inputs.run-tck == 'true'
       run: ./gradlew --stacktrace --no-problems-report native-lib:pythonTck
       shell: bash
-
-    - name: Upload Python TCK JUnit
-      if: always() && inputs.run-tck == 'true'
-      uses: actions/upload-artifact@v7.0.1
-      with:
-        name: python-tck-junit-${{ inputs.platform }}
-        path: native-lib/build/test-results/pythonTck.xml
-        if-no-files-found: error
