@@ -22,13 +22,51 @@ The main purpose is to allow non-JVM consumers (most notably the Python package 
 │  ┌────────────────────────────────────────┐ │
 │  │  Native Shared Library (dwlib)         │ │
 │  │  ┌──────────────────────────────────┐  │ │
-│  │  │  GraalVM Isolate                 │  │ │
-│  │  │  - NativeLib.run_script()        │  │ │
+│  │  │  GraalVM Isolate (process-wide)  │  │ │
+│  │  │  - create_engine /                │  │ │
+│  │  │    create_engine_with_resolver    │  │ │
+│  │  │  - run_script_engine /            │  │ │
+│  │  │    run_script_callback_engine /   │  │ │
+│  │  │    run_script_input_output_       │  │ │
+│  │  │    callback_engine                │  │ │
+│  │  │  - destroy_engine                 │  │ │
 │  │  │  - DataWeave script execution    │  │ │
 │  │  └──────────────────────────────────┘  │ │
 │  └────────────────────────────────────────┘ │
 └─────────────────────────────────────────────┘
 ```
+
+Each engine is a handle-addressed object created with `create_engine` (or
+`create_engine_with_resolver`, which additionally registers a module-resolve
+callback) and run via `run_script_engine`, `run_script_callback_engine`, or
+`run_script_input_output_callback_engine`, then released with `destroy_engine`.
+
+**Raw C ABI (caller-managed isolate).** At the C level the isolate lifecycle is
+the caller's responsibility. A direct consumer creates and attaches the GraalVM
+isolate itself via `graal_create_isolate` / `graal_attach_thread`, creates and
+destroys any number of engines within it (`create_engine` /
+`create_engine_with_resolver` … `destroy_engine`), and tears the isolate down
+with `graal_tear_down_isolate` when done. `destroy_engine` only unregisters that
+engine from the runtime; it never tears down the isolate. There is no built-in
+reference counting at the ABI — the C consumer decides when the isolate is no
+longer needed.
+
+**Node / Python bindings (reference-counted isolate).** The bindings layer this
+policy on top of the raw ABI: each maintains a single process-wide GraalVM
+isolate, reference-counted by the number of live engines across all instances.
+The isolate is created and attached on first use and torn down via
+`graal_tear_down_isolate` only after the final engine in the process has been
+released. Teardown failure has two contracts. An **ordinary** failure (teardown
+fails but the worker thread detaches cleanly) retains the live isolate and
+retries teardown later, with a binding-specific trigger: **Node** retries at the
+next initialization or when an in-flight operation finishes draining (async
+op-completion); **Python** retries synchronously at the next initialization. A
+**teardown-plus-detach double failure** (in Python, also a bootstrap
+detach-plus-teardown double failure) is treated as **unrecoverable** — the
+binding resets its published state, emits a diagnostic, deliberately leaks the
+isolate for the process lifetime, and lets a future initialization build a fresh
+isolate. This ref-counting and teardown policy lives in the binding code, not in
+the dwlib engine ABI.
 
 ## Building with Gradle
 
@@ -458,14 +496,24 @@ import { DataWeave } from "dataweave-native";
 
 const dw = new DataWeave();
 dw.initialize();
+try {
+  const r1 = dw.run("2 + 2");
+  const r2 = dw.run("x + y", { x: 10, y: 32 });
 
-const r1 = dw.run("2 + 2");
-const r2 = dw.run("x + y", { x: 10, y: 32 });
-
-console.log(r1.getString()); // "4"
-console.log(r2.getString()); // "42"
-
-dw.cleanup();
+  console.log(r1.getString()); // "4"
+  console.log(r2.getString()); // "42"
+} finally {
+  // cleanup() returns a Promise; await it. When this releases the FINAL shared
+  // native reference in the process, it drains any in-flight streaming/transform
+  // op, attempts isolate teardown, and resolves once that attempt completes --
+  // guaranteeing logical release, not necessarily physical reclamation: an
+  // ordinary teardown failure retains the live isolate and retries where safe,
+  // and an unrecoverable teardown-plus-detach double failure intentionally
+  // leaks it until process exit (with a diagnostic on stderr). When other
+  // initialized instances remain, it resolves as soon as this instance is
+  // released, leaving the shared isolate live for them.
+  await dw.cleanup();
+}
 ```
 
 ### 5) Error handling
@@ -643,11 +691,20 @@ for await (const chunk of gen) {
 
 ### 9) Cleanup
 
-The module registers a `process.on('exit')` handler to clean up automatically. For explicit control:
+The module registers two process hooks to clean up automatically: `beforeExit`
+(async — it awaits cleanup so an in-flight streaming/transform op drains before
+the process exits normally) and `exit` (a synchronous best-effort fallback for
+`process.exit()` and uncaught exceptions, which cannot await the drain). Neither
+hook fires on `SIGTERM`/`SIGINT`/`SIGKILL`, so install your own signal handler
+that awaits `cleanup()` if you need a graceful drain on termination. For explicit
+control:
 
 ```typescript
 import { cleanup } from "dataweave-native";
 
-// When done with all DataWeave operations
-cleanup();
+// When done with all DataWeave operations. cleanup() returns a Promise; await it.
+// Draining in-flight streaming/transform work and tearing down the isolate happen
+// only when this releases the final shared native reference; if other initialized
+// instances remain, it resolves as soon as this instance is released.
+await cleanup();
 ```

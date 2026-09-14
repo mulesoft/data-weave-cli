@@ -6,8 +6,8 @@ import { describe, it, expect, afterAll } from "vitest";
 import { DataWeave, run, runStreaming, runTransform, cleanup } from "../../src/index";
 import type { StreamingResult } from "../../src/types";
 
-afterAll(() => {
-  cleanup();
+afterAll(async () => {
+  await cleanup();
 });
 
 /** Drains a streaming/transform generator, returning its chunks and terminal metadata. */
@@ -61,7 +61,7 @@ describe("runTransform with async-iterable input", () => {
 });
 
 describe("multi-instance lifecycle", () => {
-  it("runs two independent instances and cleans them up independently", () => {
+  it("runs two independent instances and cleans them up independently", async () => {
     const a = new DataWeave();
     const b = new DataWeave();
     a.initialize();
@@ -70,8 +70,8 @@ describe("multi-instance lifecycle", () => {
       expect(a.run("1 + 1").getString()).toBe("2");
       expect(b.run("2 + 3").getString()).toBe("5");
     } finally {
-      a.cleanup();
-      b.cleanup();
+      await a.cleanup();
+      await b.cleanup();
     }
     // After cleanup, a fresh instance still works (runtime not permanently torn down).
     const c = new DataWeave();
@@ -79,22 +79,22 @@ describe("multi-instance lifecycle", () => {
     try {
       expect(c.run("6 * 7").getString()).toBe("42");
     } finally {
-      c.cleanup();
+      await c.cleanup();
     }
   });
 
-  it("initialize is idempotent and re-initialization after cleanup works", () => {
+  it("initialize is idempotent and re-initialization after cleanup works", async () => {
     const dw = new DataWeave();
     dw.initialize();
     dw.initialize(); // no-op, must not throw
     expect(dw.run("1").getString()).toBe("1");
-    dw.cleanup();
-    dw.cleanup(); // double cleanup, must not throw
+    await dw.cleanup();
+    await dw.cleanup(); // double cleanup, must not throw
     dw.initialize(); // re-init
     try {
       expect(dw.run("2").getString()).toBe("2");
     } finally {
-      dw.cleanup();
+      await dw.cleanup();
     }
   });
 

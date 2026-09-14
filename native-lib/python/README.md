@@ -204,11 +204,29 @@ source, credentials, and local paths are not exposed. Set
 `DATAWEAVE_RESOLVER_DEBUG=1` only in a trusted debugging environment to include
 the exception type, message, and traceback.
 
-Each initialized explicit Python `DataWeave` instance owns a dedicated Graal
-isolate. Its first resolver-backed run installs that instance's resolver; later
-runs reuse it. The instance retains the resolver callback until successful
-isolate teardown, then releases callback references during `cleanup()`.
-Different live instances can therefore use different resolvers.
+There is a single process-wide GraalVM isolate, reference-counted by the
+number of live engines across all `DataWeave` instances; it is created on the
+first engine and torn down when the last one is released. If that final
+teardown fails but the worker thread detaches cleanly, the live isolate is
+retained and teardown is retried on the next initialization; if teardown and
+detachment both fail (or the bootstrap attach path hits a detach-plus-teardown
+double failure), the isolate is unrecoverable — the binding clears its module
+state, leaks the isolate for the process lifetime, and a later initialization
+builds a fresh one. Each `DataWeave` instance
+owns its own handle-addressed engine within that shared isolate.
+Initialization binds the resolver to that engine — `DataWeave.initialize()`
+creates the engine via `create_engine_with_resolver`, so the resolver is
+installed once, up front, not on first use. Subsequent runs reuse the same
+resolver and its compiled-module cache. The instance retains the resolver
+callback until its engine is destroyed, then releases callback references
+during `cleanup()`. Different live instances can therefore use different
+resolvers.
+
+### Custom module resolution scope
+
+- A `resolve_module` you configure applies to `run()`.
+- Built-in modules (e.g. `dw::core::*`) resolve everywhere — `run()`, `run_streaming()`, `run_transform()`, and the low-level callback APIs.
+- Custom modules do **not** resolve inside `run_streaming()`, `run_transform()`, or the low-level callback APIs: those execute on a background thread that must not call back into your resolver, so such a script fails closed (reports the module as not found) rather than making an unsafe cross-thread call. If you need a custom module in a streamed/transform/callback script, resolve it via `run()` instead, or inline the module into the script.
 
 ### Error Handling
 

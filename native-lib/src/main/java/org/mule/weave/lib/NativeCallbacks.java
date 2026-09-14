@@ -55,6 +55,6 @@ public final class NativeCallbacks {
      */
     public interface ResolveModuleCallback extends CFunctionPointer {
         @InvokeCFunctionPointer
-        CCharPointer invoke(IsolateThread thread, CCharPointer modulePath);
+        CCharPointer invoke(IsolateThread thread, PointerBase ctx, CCharPointer modulePath);
     }
 }

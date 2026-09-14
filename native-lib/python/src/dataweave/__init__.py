@@ -1,6 +1,7 @@
 """Public facade for the DataWeave Python native binding."""
 
 import ctypes
+import threading
 
 from typing import Any, Dict, Iterable, Optional
 
@@ -34,16 +35,19 @@ from .runtime import DataWeave
 
 
 _global_instance: Optional[DataWeave] = None
+_global_lock = threading.Lock()
 
 
 def _get_global_instance() -> DataWeave:
     global _global_instance
-    if _global_instance is None:
-        import atexit
-        _global_instance = DataWeave()
-        _global_instance.initialize()
-        atexit.register(cleanup)
-    return _global_instance
+    with _global_lock:
+        if _global_instance is None:
+            import atexit
+            candidate = DataWeave()
+            candidate.initialize()
+            _global_instance = candidate
+            atexit.register(cleanup)
+        return _global_instance
 
 
 def run(script: str, inputs: Optional[Dict[str, Any]] = None, raise_on_error: bool = False) -> ExecutionResult:
@@ -68,9 +72,12 @@ def run_input_output_callback(script: str, input_name: str, input_mime_type: str
 
 def cleanup() -> None:
     global _global_instance
-    if _global_instance is not None:
-        _global_instance.cleanup()
-        _global_instance = None
+    with _global_lock:
+        if _global_instance is not None:
+            instance, _global_instance = _global_instance, None
+        else:
+            return
+    instance.cleanup()
 
 
 __all__ = [

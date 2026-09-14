@@ -1,8 +1,28 @@
 # Design: External DataWeave Module Support in Node.js Binding
 
 **Date:** 2026-08-04  
-**Status:** Approved for implementation  
+**Status:** Superseded  
 **Related Proposal:** [docs/proposals/nodejs-external-modules.md](../../proposals/nodejs-external-modules.md)
+
+> **⚠️ Superseded (2026-08-31).** This document describes the original
+> single-resolver Node external-module design. It is retained for historical
+> context only. The shipped design is
+> [`2026-08-07-native-lib-multi-engine-design.md`](2026-08-07-native-lib-multi-engine-design.md).
+> The following assertions below are stale and no longer accurate:
+> - **Resolver scope.** A custom resolver does *not* apply to all three
+>   execution APIs. It resolves custom modules only for `run()`; `runStreaming()`
+>   and `runTransform()` execute on a background worker that must not call back
+>   into the resolver, so custom-module imports there fail closed (report the
+>   module as not found) rather than routing to the callback. Built-in modules
+>   still resolve everywhere.
+> - **One resolver per process.** Resolvers are no longer process-global. Each
+>   `DataWeave` instance owns its own handle-addressed engine with its own
+>   resolver; multiple independent resolver-backed engines can coexist in one
+>   process (each bound to the thread that created it).
+> - **Resolver ABI and lifecycle.** The old process-wide resolver ABI is
+>   replaced by the handle-based `create_engine_with_resolver` + `run_script_engine`
+>   ABI; a resolver is bound at engine creation and released with that engine's
+>   `cleanup()`, not installed process-wide.
 
 ## Goal
 
