@@ -1,0 +1,135 @@
+name: Benchmark release artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: GitHub release tag to benchmark (for example, v1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: Benchmark ${{ inputs.tag }}
+    runs-on: mulesoft-ubuntu
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Initialize benchmark output
+        run: |
+          mkdir -p benchmark-artifacts/results
+
+      - name: Download and install release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$TAG" != v* || -z "${TAG#v}" ]]; then
+            echo "tag must be a v-prefixed release tag, such as v1.2.3" >&2
+            exit 2
+          fi
+
+          VERSION="${TAG#v}"
+          RELEASE_DIR="$RUNNER_TEMP/dataweave-release-artifacts"
+          mkdir -p "$RELEASE_DIR/node" "$RELEASE_DIR/python" "$RELEASE_DIR/cli"
+
+          gh release download "$TAG" \
+            --pattern "dataweave-native-${VERSION}.tgz" \
+            --pattern "dataweave-native-linux-x64-${VERSION}.tgz" \
+            --pattern "dataweave_native-${VERSION}-py3-none-*linux*_x86_64.whl" \
+            --pattern "dw-cli-${VERSION}-linux-x86_64.zip" \
+            --dir "$RELEASE_DIR"
+
+          node_metadata="$RELEASE_DIR/dataweave-native-${VERSION}.tgz"
+          node_platform="$RELEASE_DIR/dataweave-native-linux-x64-${VERSION}.tgz"
+          cli_archive="$RELEASE_DIR/dw-cli-${VERSION}-linux-x86_64.zip"
+          python_wheels=("$RELEASE_DIR"/dataweave_native-"${VERSION}"-py3-none-*linux*_x86_64.whl)
+
+          [[ -f "$node_metadata" ]] || { echo "Node metadata release asset is missing" >&2; exit 1; }
+          [[ -f "$node_platform" ]] || { echo "Linux Node release asset is missing" >&2; exit 1; }
+          [[ -f "$cli_archive" ]] || { echo "Linux CLI release asset is missing" >&2; exit 1; }
+          if (( ${#python_wheels[@]} != 1 )) || [[ ! -f "${python_wheels[0]}" ]]; then
+            echo "Expected exactly one Linux Python wheel for ${TAG}" >&2
+            exit 1
+          fi
+
+          npm install --prefix "$RELEASE_DIR/node" --ignore-scripts --no-package-lock \
+            "$node_metadata" "$node_platform"
+          python3 -m pip install --target "$RELEASE_DIR/python" "${python_wheels[0]}"
+          unzip -q "$cli_archive" -d "$RELEASE_DIR/cli"
+
+          [[ -f "$RELEASE_DIR/node/node_modules/dataweave-native/dist/index.js" ]] || {
+            echo "Node release artifact has no dist/index.js" >&2
+            exit 1
+          }
+          [[ -f "$RELEASE_DIR/python/dataweave/__init__.py" ]] || {
+            echo "Python release artifact has no dataweave/__init__.py" >&2
+            exit 1
+          }
+          [[ -x "$RELEASE_DIR/cli/bin/dw" ]] || {
+            echo "CLI release artifact has no executable bin/dw" >&2
+            exit 1
+          }
+
+          {
+            echo "DW_BENCH_NODE_PACKAGE=$RELEASE_DIR/node/node_modules/dataweave-native"
+            echo "DW_BENCH_PY_SITE=$RELEASE_DIR/python"
+            echo "DW_BENCH_BIN=$RELEASE_DIR/cli/bin/dw"
+          } >> "$GITHUB_ENV"
+
+      - name: Run benchmark suite
+        id: benchmark
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          ./gradlew benchmarkCompare -Pbenchmark=true 2>&1 | tee benchmark-artifacts/benchmark.log
+
+      - name: Render benchmark report
+        if: always()
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          result_files=(benchmarks/results/*.json)
+          if (( ${#result_files[@]} > 0 )); then
+            cp "${result_files[@]}" benchmark-artifacts/results/
+          fi
+          if (( ${#result_files[@]} == 4 )); then
+            node benchmarks/report/report.mjs "${result_files[@]}" --markdown benchmark-artifacts/RESULTS.md
+          else
+            {
+              echo "# DataWeave release benchmark"
+              echo
+              echo "The benchmark suite did not produce all four runner result files."
+              echo "See \`benchmark.log\` in the workflow artifact for details."
+            } > benchmark-artifacts/RESULTS.md
+          fi
+          cat benchmark-artifacts/RESULTS.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: benchmark-${{ inputs.tag }}-${{ github.run_id }}
+          path: benchmark-artifacts
+          if-no-files-found: error
+
+      - name: Fail if benchmark suite failed
+        if: steps.benchmark.outcome == 'failure'
+        run: exit 1
