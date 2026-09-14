@@ -56,4 +56,50 @@ describe("resolver callback reentrancy guard", () => {
       outerResult: [2, 4, 6],
     });
   });
+
+  it("contains exceptions from hostile resolver diagnostic accessors", () => {
+    const child = spawnSync(process.execPath, [FIXTURE, "hostile-diagnostic"], {
+      encoding: "utf-8",
+      timeout: 30_000,
+      env: {
+        ...process.env,
+        DATAWEAVE_RESOLVER_DEBUG: "1",
+      },
+    });
+
+    expect(child.error, child.error?.message).toBeUndefined();
+    expect(child.signal, child.stderr).toBeNull();
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stderr).toContain("(Unable to extract exception details)");
+    expect(child.stderr).not.toContain("resolver diagnostic getter exploded");
+    expect(JSON.parse(child.stdout.trim())).toEqual({
+      failedSuccess: false,
+      failedHasError: true,
+      messageGetterRan: true,
+      healthySuccess: true,
+      healthyResult: "42",
+    });
+  });
+
+  it("fails closed when the original resolver callback exception cannot be cleared", () => {
+    const child = spawnSync(
+      process.execPath,
+      [FIXTURE, "unclearable-original-exception"],
+      {
+        encoding: "utf-8",
+        timeout: 30_000,
+        env: { ...process.env, DATAWEAVE_TEST_HOOKS: "1" },
+      }
+    );
+
+    expect(child.error, child.error?.message).toBeUndefined();
+    expect(child.status === 0 && child.signal === null, child.stderr).toBe(false);
+    expect(child.signal, child.stderr).not.toBe("SIGSEGV");
+    expect(child.stderr).toContain("resolver callback reached");
+    expect(child.stderr).toContain(
+      "Failed to clear the original resolver callback exception"
+    );
+    expect(child.stderr).not.toContain("unexpected completion");
+    expect(child.stderr).not.toContain("unexpected timeout");
+  });
 });

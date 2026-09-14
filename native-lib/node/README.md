@@ -576,6 +576,15 @@ This should not happen with the N-API implementation. If you encounter this:
 2. Verify the native library is compatible with your platform
 3. Check for library version mismatches
 
+### Read callback diagnostics
+
+If an input read callback throws, the addon logs a fixed diagnostic to stderr but
+suppresses the exception message and stack because they may contain input data,
+credentials, paths, or other callback-controlled data. To include those details
+while debugging in a trusted environment, set `DATAWEAVE_READ_CALLBACK_DEBUG=1`
+before starting the process. Do not enable it where stderr is collected in shared
+logs.
+
 ### TypeScript Errors
 
 The package includes full TypeScript definitions. If types aren't recognized:

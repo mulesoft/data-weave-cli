@@ -397,6 +397,196 @@ def test_engine_create_failure_releases_isolate_ref(monkeypatch):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("failure_source", ["attach", "create"])
+def test_initialize_base_exception_rolls_back_isolate_and_resolver(
+    monkeypatch, failure_source
+):
+    library = FakeLibrary()
+    primary = CallbackBaseException(f"{failure_source} failed")
+    if failure_source == "attach":
+        attach_results = [primary]
+
+        def attach_once_then_succeed(isolate, thread):
+            if attach_results:
+                raise attach_results.pop()
+            return library._attach_thread(isolate, thread)
+
+        library.graal_attach_thread = CallableFunction(attach_once_then_succeed)
+    else:
+        library.create_engine_with_resolver = CallableFunction(
+            lambda _thread, _callback, _ctx: (_ for _ in ()).throw(primary)
+        )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.install_resolver(lambda _path: "source")
+    token = runtime._resolver_token
+
+    try:
+        with pytest.raises(CallbackBaseException) as raised:
+            runtime.initialize()
+
+        assert raised.value is primary
+        assert runtime.lib is None
+        assert runtime.isolate is None
+        assert runtime._resolver_token == 0
+        assert token not in native._resolver_registry
+        assert native._isolate_ref_count == 0
+        assert native._isolate is None
+    finally:
+        native._resolver_registry.pop(token, None)
+        if native._isolate_ref_count:
+            native._release_isolate()
+
+
+@pytest.mark.unit
+def test_initialize_base_exception_is_not_replaced_by_release_base_exception(monkeypatch):
+    library = FakeLibrary()
+    primary = CallbackBaseException("create failed")
+    release_error = CallbackBaseException("release failed")
+    library.create_engine = CallableFunction(
+        lambda _thread: (_ for _ in ()).throw(primary)
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    original_release = native._release_isolate
+
+    def release_then_fail():
+        original_release()
+        raise release_error
+
+    monkeypatch.setattr(native, "_release_isolate", release_then_fail)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+
+    try:
+        with pytest.raises(CallbackBaseException) as raised:
+            runtime.initialize()
+
+        assert raised.value is primary
+        assert native._isolate_ref_count == 0
+        assert native._isolate is None
+    finally:
+        if native._isolate_ref_count:
+            original_release()
+
+
+@pytest.mark.unit
+def test_cleanup_base_exception_is_not_replaced_by_release_base_exception(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    primary = CallbackBaseException("destroy failed")
+    release_error = CallbackBaseException("release failed")
+    library.destroy_engine = CallableFunction(
+        lambda _thread, _handle: (_ for _ in ()).throw(primary)
+    )
+    original_release = native._release_isolate
+
+    def release_then_fail():
+        original_release()
+        raise release_error
+
+    monkeypatch.setattr(native, "_release_isolate", release_then_fail)
+
+    with pytest.raises(CallbackBaseException) as raised:
+        runtime.cleanup()
+
+    assert raised.value is primary
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None
+
+
+@pytest.mark.unit
+def test_cleanup_propagates_release_base_exception_without_primary(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    release_error = CallbackBaseException("release failed")
+    original_release = native._release_isolate
+
+    def release_then_fail():
+        original_release()
+        raise release_error
+
+    monkeypatch.setattr(native, "_release_isolate", release_then_fail)
+
+    with pytest.raises(CallbackBaseException) as raised:
+        runtime.cleanup()
+
+    assert raised.value is release_error
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None
+
+
+@pytest.mark.unit
+def test_create_failure_preserves_primary_error_when_isolate_teardown_also_fails(monkeypatch):
+    library = FakeLibrary()
+    library.create_engine = CallableFunction(
+        lambda _thread: (_ for _ in ()).throw(RuntimeError("distinctive create failure"))
+    )
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 1)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+
+    with pytest.raises(
+        native.DataWeaveError,
+        match="Failed to create DataWeave engine: distinctive create failure",
+    ):
+        runtime.initialize()
+
+    assert runtime.initialized is False
+    assert runtime.lib is None
+    assert runtime.isolate is None
+    assert native._isolate_ref_count == 0
+    assert native._isolate is not None
+    assert native._teardown_needed is True
+
+    library.create_engine = CallableFunction(library._create_engine)
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 0)
+    runtime.initialize()
+    assert runtime.initialized is True
+    assert native._teardown_needed is False
+    assert native._isolate_ref_count == 1
+    runtime.cleanup()
+
+
+@pytest.mark.unit
+def test_destroy_failure_preserves_primary_error_when_isolate_teardown_also_fails(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    library.destroy_engine = CallableFunction(
+        lambda _thread, _handle: (_ for _ in ()).throw(RuntimeError("distinctive destroy failure"))
+    )
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 1)
+
+    with pytest.raises(RuntimeError, match="distinctive destroy failure"):
+        runtime.cleanup()
+
+    assert runtime.initialized is False
+    assert runtime._engine_operation is None
+    assert runtime.lib is None
+    assert runtime.isolate is None
+    assert native._isolate_ref_count == 0
+    assert native._isolate is not None
+    assert native._teardown_needed is True
+
+    library.destroy_engine = CallableFunction(
+        lambda thread, handle: (
+            library.destroy_engine_threads.append(thread),
+            library.destroyed_engines.append(handle),
+        )
+    )
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 0)
+    runtime.initialize()
+    assert runtime.initialized is True
+    assert native._teardown_needed is False
+    assert native._isolate_ref_count == 1
+    runtime.cleanup()
+
+
+@pytest.mark.unit
 def test_parse_native_response_rejects_malformed_json():
     result = dataweave._parse_native_encoded_response("not json")
 
@@ -666,6 +856,72 @@ def test_detach_failure_poisoning_skips_final_isolate_teardown(monkeypatch):
 
     assert native._isolate is None
     assert native._isolate_ref_count == 0
+
+
+@pytest.mark.unit
+def test_detach_base_exception_propagates_and_poisoned_release_skips_teardown(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    detach_error = CallbackBaseException("detach interrupted")
+    original_detach = library.graal_detach_thread
+    library.graal_detach_thread = CallableFunction(
+        lambda _thread: (_ for _ in ()).throw(detach_error)
+    )
+
+    with pytest.raises(CallbackBaseException) as raised:
+        runtime.detach_thread(native.GraalIsolateThreadPointer())
+
+    assert raised.value is detach_error
+    assert native._isolate_poisoned is True
+    library.graal_detach_thread = original_detach
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda _thread: pytest.fail("poisoned isolate must not be torn down")
+    )
+    with pytest.raises(dataweave.DataWeaveError, match="poisoned"):
+        runtime.cleanup()
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None
+    assert native._isolate_poisoned is False
+
+
+@pytest.mark.unit
+def test_initialize_preserves_create_base_exception_when_detach_raises_base_exception(monkeypatch):
+    library = FakeLibrary()
+    primary = CallbackBaseException("create interrupted")
+    detach_error = CallbackBaseException("detach interrupted")
+    detach_calls = 0
+
+    def detach_bootstrap_then_fail(_thread):
+        nonlocal detach_calls
+        detach_calls += 1
+        if detach_calls == 1:
+            return 0
+        raise detach_error
+
+    library.create_engine = CallableFunction(
+        lambda _thread: (_ for _ in ()).throw(primary)
+    )
+    library.graal_detach_thread = CallableFunction(detach_bootstrap_then_fail)
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda _thread: pytest.fail("poisoned isolate must not be torn down")
+    )
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+
+    with pytest.raises(CallbackBaseException) as raised:
+        runtime.initialize()
+
+    assert raised.value is primary
+    assert detach_calls == 2
+    assert runtime.initialized is False
+    assert runtime._engine_operation is None
+    assert runtime.lib is None
+    assert runtime.isolate is None
+    assert native._isolate_ref_count == 0
+    assert native._isolate is None
+    assert native._isolate_poisoned is False
 
 
 @pytest.mark.unit
@@ -1530,6 +1786,58 @@ def test_failed_init_with_resolver_unregisters_the_token(monkeypatch):
 
 
 @pytest.mark.unit
+def test_resolver_initialize_retry_registers_a_fresh_callback_token(monkeypatch):
+    library = FakeLibrary()
+    create_calls = []
+
+    def fail_twice_then_create(thread, callback, ctx):
+        create_calls.append((callback, ctx))
+        if len(create_calls) <= 2:
+            raise RuntimeError(f"create attempt {len(create_calls)} failed")
+        return library._create_engine_with_resolver(thread, callback, ctx)
+
+    library.create_engine_with_resolver = CallableFunction(fail_twice_then_create)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.install_resolver(lambda path: f"source:{path}")
+    failed_token = runtime._resolver_token
+
+    with pytest.raises(native.DataWeaveError, match="create attempt 1 failed"):
+        runtime.initialize()
+
+    assert failed_token not in native._resolver_registry
+    assert runtime._resolver_token == 0
+
+    with pytest.raises(native.DataWeaveError, match="create attempt 2 failed"):
+        runtime.initialize()
+
+    failed_retry_token = create_calls[1][1]
+    assert failed_retry_token != 0
+    assert failed_retry_token != failed_token
+    assert failed_retry_token not in native._resolver_registry
+    assert runtime._resolver_token == 0
+
+    runtime.initialize()
+    callback, retry_token = create_calls[2]
+    try:
+        with runtime._resolver_scope():
+            resolved = callback(None, retry_token, b"org/example.dwl")
+            resolved_source = ctypes.string_at(resolved) if resolved is not None else None
+
+        assert resolved is not None
+        assert resolved_source == b"source:org/example.dwl"
+        assert retry_token != 0
+        assert retry_token != failed_token
+        assert runtime._resolver_token == retry_token
+        assert native._resolver_registry.get(retry_token) is runtime
+    finally:
+        runtime.cleanup()
+
+    assert retry_token not in native._resolver_registry
+
+
+@pytest.mark.unit
 def test_failed_acquire_with_resolver_unregisters_the_token(monkeypatch):
     """A library-load failure inside _acquire_isolate must still roll back the
     resolver token (regression: _acquire_isolate was called outside
@@ -1650,6 +1958,37 @@ def test_release_teardown_and_detach_both_failing_leaks_isolate_without_arming_r
 
 
 @pytest.mark.unit
+def test_release_teardown_base_exception_survives_detach_base_exception_and_repairs_state(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    native._acquire_isolate("/tmp/dwlib")
+    teardown_error = CallbackBaseException("teardown interrupted")
+    detach_error = CallbackBaseException("detach interrupted")
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda _thread: (_ for _ in ()).throw(teardown_error)
+    )
+    library.graal_detach_thread = CallableFunction(
+        lambda _thread: (_ for _ in ()).throw(detach_error)
+    )
+
+    with pytest.raises(CallbackBaseException) as raised:
+        native._release_isolate()
+
+    assert raised.value is teardown_error
+    assert native._lib is None
+    assert native._isolate is None
+    assert native._isolate_ref_count == 0
+    assert native._teardown_needed is False
+
+    healthy = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: healthy)
+    lib, isolate = native._acquire_isolate("/tmp/dwlib")
+    assert lib is healthy
+    assert isolate is native._isolate
+    native._release_isolate()
+
+
+@pytest.mark.unit
 def test_retry_teardown_and_detach_both_failing_leaks_isolate_without_arming_retry(monkeypatch):
     """review #16 #2: the retry path (_retry_pending_teardown_locked) attaches a
     fresh worker. If its teardown fails AND detaching that worker fails, arming
@@ -1679,4 +2018,41 @@ def test_retry_teardown_and_detach_both_failing_leaks_isolate_without_arming_ret
     monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: healthy)
     lib2, isolate2 = native._acquire_isolate("/tmp/dwlib")
     assert native._isolate is not None
+    native._release_isolate()
+
+
+@pytest.mark.unit
+def test_retry_teardown_base_exception_survives_detach_base_exception_and_repairs_state(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    native._acquire_isolate("/tmp/dwlib")
+
+    library.graal_tear_down_isolate = CallableFunction(lambda _thread: 1)
+    with pytest.raises(native.DataWeaveError):
+        native._release_isolate()
+    assert native._teardown_needed is True
+
+    teardown_error = CallbackBaseException("retry teardown interrupted")
+    detach_error = CallbackBaseException("retry detach interrupted")
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda _thread: (_ for _ in ()).throw(teardown_error)
+    )
+    library.graal_detach_thread = CallableFunction(
+        lambda _thread: (_ for _ in ()).throw(detach_error)
+    )
+
+    with pytest.raises(CallbackBaseException) as raised:
+        native._acquire_isolate("/tmp/dwlib")
+
+    assert raised.value is teardown_error
+    assert native._lib is None
+    assert native._isolate is None
+    assert native._isolate_ref_count == 0
+    assert native._teardown_needed is False
+
+    healthy = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: healthy)
+    lib, isolate = native._acquire_isolate("/tmp/dwlib")
+    assert lib is healthy
+    assert isolate is native._isolate
     native._release_isolate()

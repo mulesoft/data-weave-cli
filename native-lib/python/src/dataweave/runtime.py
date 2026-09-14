@@ -145,7 +145,7 @@ class DataWeave:
         queue: Queue = Queue(maxsize=_OUTPUT_QUEUE_MAXSIZE)
 
         class CleanupFailure:
-            def __init__(self, error: Exception):
+            def __init__(self, error: BaseException):
                 self.error = error
 
         def publish(item) -> None:
@@ -180,14 +180,18 @@ class DataWeave:
                 primary_error = error
                 publish({"success": False, "error": str(error)})
             finally:
-                if worker_thread is not None:
+                try:
+                    if worker_thread is not None:
+                        try:
+                            self._native.detach_thread(worker_thread)
+                        except BaseException as error:
+                            if primary_error is None and not primary_outcome:
+                                publish(CleanupFailure(error))
+                finally:
                     try:
-                        self._native.detach_thread(worker_thread)
-                    except Exception as error:
-                        if primary_error is None and not primary_outcome:
-                            publish(CleanupFailure(error))
-                publish(sentinel)
-                self._unregister_stream_worker()
+                        publish(sentinel)
+                    finally:
+                        self._unregister_stream_worker()
 
         # Python cannot cancel a native call. Daemon workers keep an abandoned
         # call from extending interpreter lifetime after bounded cancellation.
@@ -304,7 +308,7 @@ class DataWeave:
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
             self.cleanup()
-        except Exception:
+        except BaseException:
             if exc_type is None:
                 raise
         return False

@@ -40,6 +40,8 @@ static uv_mutex_t g_mutex;
 static uv_mutex_t g_test_output_mutex;
 static uv_key_t g_native_callback_depth;
 static int g_native_callback_depth_status;
+static bool g_read_callback_debug = false;
+static bool g_resolver_debug = false;
 // Guards initialization of the process-global g_mutex. Init() runs once per
 // Worker environment that loads this addon, but g_mutex is process-global —
 // re-running uv_mutex_init() on an already-initialized mutex from a second
@@ -47,6 +49,18 @@ static int g_native_callback_depth_status;
 // every other thread already relying on it). uv_once ensures the real init
 // body runs exactly once per process regardless of how many Workers load us.
 static uv_once_t g_mutex_once = UV_ONCE_INIT;
+// Environment-backed diagnostics settings are process-global and immutable.
+// Initialize them once while the addon loads, before worker callbacks run.
+static uv_once_t g_diagnostic_settings_once = UV_ONCE_INIT;
+
+static void init_diagnostic_settings(void) {
+    const char* read_callback_debug = getenv("DATAWEAVE_READ_CALLBACK_DEBUG");
+    g_read_callback_debug = read_callback_debug != NULL &&
+                            strcmp(read_callback_debug, "1") == 0;
+    const char* resolver_debug = getenv("DATAWEAVE_RESOLVER_DEBUG");
+    g_resolver_debug = resolver_debug != NULL &&
+                       strcmp(resolver_debug, "1") == 0;
+}
 
 #define CALLBACK_REENTRANCY_CODE "ERR_DATAWEAVE_CALLBACK_REENTRANCY"
 #define ISOLATE_POISONED_MESSAGE \
@@ -251,10 +265,28 @@ typedef enum {
   OUTPUT_EXCEPTION_CLEAR_FAULT_GET_AND_CLEAR,
 } output_exception_clear_fault_t;
 
+typedef enum {
+  READ_CALLBACK_FAULT_NONE = 0,
+  READ_CALLBACK_FAULT_CREATE_SIZE,
+  READ_CALLBACK_FAULT_GET_GLOBAL,
+  READ_CALLBACK_FAULT_IS_BUFFER,
+  READ_CALLBACK_FAULT_GET_BUFFER_INFO,
+} read_callback_fault_t;
+
+typedef enum {
+  CALLBACK_EXCEPTION_CLEAR_FAULT_NONE = 0,
+  CALLBACK_EXCEPTION_CLEAR_FAULT_READ,
+  CALLBACK_EXCEPTION_CLEAR_FAULT_RESOLVER,
+} callback_exception_clear_fault_t;
+
 static output_settlement_fault_t g_test_next_output_settlement_fault =
   OUTPUT_SETTLEMENT_FAULT_NONE;
 static output_exception_clear_fault_t g_test_next_output_exception_clear_fault =
   OUTPUT_EXCEPTION_CLEAR_FAULT_NONE;
+static read_callback_fault_t g_test_next_read_callback_fault =
+  READ_CALLBACK_FAULT_NONE;
+static callback_exception_clear_fault_t g_test_next_callback_exception_clear_fault =
+  CALLBACK_EXCEPTION_CLEAR_FAULT_NONE;
 static bool g_test_hold_next_output_delivery = false;
 static bool g_test_output_delivery_held = false;
 static bool g_test_release_output_delivery = false;
@@ -2350,6 +2382,21 @@ static void output_settlement_fail_closed(napi_status status) {
   );
 }
 
+static void callback_exception_fail_closed(const char* callback_name) {
+  char message[128];
+  int length = snprintf(
+    message, sizeof(message),
+    "Failed to clear the original %s callback exception", callback_name
+  );
+  size_t message_length = length > 0
+    ? ((size_t)length < sizeof(message) ? (size_t)length : sizeof(message) - 1)
+    : 0;
+  static const char location[] = "DataWeave Node addon";
+  napi_fatal_error(
+    location, sizeof(location) - 1, message, message_length
+  );
+}
+
 static napi_status settle_output_deferred(
     napi_env env, napi_deferred deferred, output_flow_t* flow,
     const char* result_json) {
@@ -3028,6 +3075,85 @@ struct read_request {
   int ready;
 };
 
+static bool test_consume_read_callback_fault(read_callback_fault_t fault) {
+  if (!g_test_hooks) return false;
+  uv_mutex_lock(&g_test_output_mutex);
+  bool consume = g_test_next_read_callback_fault == fault;
+  if (consume) g_test_next_read_callback_fault = READ_CALLBACK_FAULT_NONE;
+  uv_mutex_unlock(&g_test_output_mutex);
+  return consume;
+}
+
+static napi_status read_create_int32(
+    napi_env env, int32_t value, napi_value* result) {
+  napi_status status = napi_create_int32(env, value, result);
+  return test_consume_read_callback_fault(READ_CALLBACK_FAULT_CREATE_SIZE)
+    ? napi_generic_failure : status;
+}
+
+static napi_status read_get_global(napi_env env, napi_value* result) {
+  napi_status status = napi_get_global(env, result);
+  return test_consume_read_callback_fault(READ_CALLBACK_FAULT_GET_GLOBAL)
+    ? napi_generic_failure : status;
+}
+
+static napi_status read_is_buffer(napi_env env, napi_value value, bool* result) {
+  napi_status status = napi_is_buffer(env, value, result);
+  return test_consume_read_callback_fault(READ_CALLBACK_FAULT_IS_BUFFER)
+    ? napi_generic_failure : status;
+}
+
+static napi_status read_get_buffer_info(
+    napi_env env, napi_value value, void** data, size_t* length) {
+  napi_status status = napi_get_buffer_info(env, value, data, length);
+  return test_consume_read_callback_fault(READ_CALLBACK_FAULT_GET_BUFFER_INFO)
+    ? napi_generic_failure : status;
+}
+
+static bool clear_diagnostic_exception(napi_env env) {
+  napi_value diagnostic_exception;
+  return napi_get_and_clear_last_exception(env, &diagnostic_exception) == napi_ok;
+}
+
+static void clear_original_callback_exception(
+    napi_env env, napi_value* exception,
+    callback_exception_clear_fault_t expected_fault,
+    const char* callback_name) {
+  bool fail = false;
+  if (g_test_hooks) {
+    uv_mutex_lock(&g_test_output_mutex);
+    fail = g_test_next_callback_exception_clear_fault == expected_fault;
+    if (fail) {
+      g_test_next_callback_exception_clear_fault =
+        CALLBACK_EXCEPTION_CLEAR_FAULT_NONE;
+    }
+    uv_mutex_unlock(&g_test_output_mutex);
+  }
+  napi_status status = fail
+    ? napi_generic_failure
+    : napi_get_and_clear_last_exception(env, exception);
+  if (status != napi_ok) {
+    callback_exception_fail_closed(callback_name);
+  }
+}
+
+static bool callback_exception_detail(
+    napi_env env, napi_value exception, const char* property,
+    char* buffer, size_t buffer_size, size_t* length,
+    const char* callback_name) {
+  napi_value value;
+  napi_status status = napi_get_named_property(env, exception, property, &value);
+  if (status == napi_ok) {
+    status = napi_get_value_string_utf8(env, value, buffer, buffer_size, length);
+  }
+  if (status == napi_ok) return true;
+
+  if (status == napi_pending_exception && !clear_diagnostic_exception(env)) {
+    callback_exception_fail_closed(callback_name);
+  }
+  return false;
+}
+
 static void call_js_read(napi_env env, napi_value js_callback, void* context, void* data) {
   if (data == NULL) return;  // nothing to signal
   struct read_request* req = (struct read_request*)data;
@@ -3043,62 +3169,69 @@ static void call_js_read(napi_env env, napi_value js_callback, void* context, vo
     // and the worker can detach from the isolate instead of hanging forever.
     req->bytes_read = -1;
   } else {
-    napi_value buf_size_val;
-    napi_create_int32(env, req->buffer_size, &buf_size_val);
-
-    napi_value global;
-    napi_get_global(env, &global);
-
-    napi_value result;
-    native_callback_enter();
-    napi_status status = napi_call_function(env, global, js_callback, 1, &buf_size_val, &result);
-    native_callback_exit();
+    napi_value buf_size_val = NULL;
+    napi_value global = NULL;
+    napi_value result = NULL;
+    napi_status status = read_create_int32(env, req->buffer_size, &buf_size_val);
+    if (status == napi_ok) status = read_get_global(env, &global);
+    if (status == napi_ok) {
+      native_callback_enter();
+      status = napi_call_function(env, global, js_callback, 1, &buf_size_val, &result);
+      native_callback_exit();
+    }
 
     if (status == napi_ok && result != NULL) {
-      bool is_buffer;
-      napi_is_buffer(env, result, &is_buffer);
-      if (is_buffer) {
-        void* buf_data;
-        size_t buf_len;
-        napi_get_buffer_info(env, result, &buf_data, &buf_len);
-        int n = (int)buf_len < req->buffer_size ? (int)buf_len : req->buffer_size;
-        if (n > 0) memcpy(req->buffer, buf_data, n);
-        req->bytes_read = n;
-      } else {
+      bool is_buffer = false;
+      status = read_is_buffer(env, result, &is_buffer);
+      if (status == napi_ok && is_buffer) {
+        void* buf_data = NULL;
+        size_t buf_len = 0;
+        status = read_get_buffer_info(env, result, &buf_data, &buf_len);
+        if (status == napi_ok) {
+          size_t copy_len = buf_len < (size_t)req->buffer_size
+            ? buf_len : (size_t)req->buffer_size;
+          if (copy_len > 0) memcpy(req->buffer, buf_data, copy_len);
+          req->bytes_read = (int)copy_len;
+        }
+      } else if (status == napi_ok) {
         req->bytes_read = 0;
       }
-    } else {
+    }
+    if (status != napi_ok || result == NULL) {
       // Clear pending exception to prevent propagation
       if (status == napi_pending_exception) {
         napi_value exception;
-        napi_get_and_clear_last_exception(env, &exception);
+        clear_original_callback_exception(
+          env, &exception, CALLBACK_EXCEPTION_CLEAR_FAULT_READ, "read");
 
-        // Extract and log exception details before discarding
-        napi_value message_prop, stack_prop;
-        char message_buf[512] = {0};
-        char stack_buf[2048] = {0};
-        size_t message_len = 0, stack_len = 0;
+        if (!g_read_callback_debug) {
+          fprintf(stderr,
+                  "[DataWeave Node addon] Read callback threw an exception "
+                  "(details suppressed; set DATAWEAVE_READ_CALLBACK_DEBUG=1 to log "
+                  "message/stack — may expose callback-controlled data).\n");
+        } else {
+          char message_buf[512] = {0};
+          char stack_buf[2048] = {0};
+          size_t message_len = 0, stack_len = 0;
 
-        // Try to get the message property
-        if (napi_get_named_property(env, exception, "message", &message_prop) == napi_ok) {
-          napi_get_value_string_utf8(env, message_prop, message_buf, sizeof(message_buf), &message_len);
-        }
+          if (callback_exception_detail(
+                env, exception, "message", message_buf, sizeof(message_buf),
+                &message_len, "read")) {
+            callback_exception_detail(
+              env, exception, "stack", stack_buf, sizeof(stack_buf), &stack_len,
+              "read");
+          }
 
-        // Try to get the stack property
-        if (napi_get_named_property(env, exception, "stack", &stack_prop) == napi_ok) {
-          napi_get_value_string_utf8(env, stack_prop, stack_buf, sizeof(stack_buf), &stack_len);
-        }
-
-        // Log the exception to stderr for diagnostics
-        fprintf(stderr, "[DataWeave Node addon] Read callback threw exception:\n");
-        if (message_len > 0) {
-          fprintf(stderr, "  Message: %s\n", message_buf);
-        }
-        if (stack_len > 0) {
-          fprintf(stderr, "  Stack:\n%s\n", stack_buf);
-        }
-        if (message_len == 0 && stack_len == 0) {
-          fprintf(stderr, "  (Unable to extract exception details)\n");
+          fprintf(stderr, "[DataWeave Node addon] Read callback threw exception:\n");
+          if (message_len > 0) {
+            fprintf(stderr, "  Message: %s\n", message_buf);
+          }
+          if (stack_len > 0) {
+            fprintf(stderr, "  Stack:\n%s\n", stack_buf);
+          }
+          if (message_len == 0 && stack_len == 0) {
+            fprintf(stderr, "  (Unable to extract exception details)\n");
+          }
         }
       }
       req->bytes_read = -1;  // Signal error
@@ -3713,41 +3846,32 @@ static char* resolve_module_callback(void* thread, void* ctx, const char* module
         // report "not found".
         if (status == napi_pending_exception) {
             napi_value exception;
-            napi_get_and_clear_last_exception(env, &exception);
+            clear_original_callback_exception(
+              env, &exception, CALLBACK_EXCEPTION_CLEAR_FAULT_RESOLVER,
+              "resolver");
 
             // The resolver is user-provided code; its exception message/stack
             // can carry module source, file paths, credentials, or other
             // tenant data. Logging that to stderr by default risks leaking it
             // into aggregated log systems. Only log a fixed, content-free
             // diagnostic unless the caller has opted in via
-            // DATAWEAVE_RESOLVER_DEBUG=1 (checked once and cached, since
-            // getenv() is not safe to call from arbitrary threads on all
-            // platforms and this callback can run off the JS thread).
-            static int debug_checked = 0;
-            static int debug_enabled = 0;
-            if (!debug_checked) {
-                const char* debug_env = getenv("DATAWEAVE_RESOLVER_DEBUG");
-                debug_enabled = (debug_env != NULL && strcmp(debug_env, "1") == 0);
-                debug_checked = 1;
-            }
-
-            if (!debug_enabled) {
+            // DATAWEAVE_RESOLVER_DEBUG=1 (read once at addon initialization).
+            if (!g_resolver_debug) {
                 fprintf(stderr,
                     "[DataWeave Node addon] Resolver callback threw an exception "
                     "(details suppressed; set DATAWEAVE_RESOLVER_DEBUG=1 to log "
                     "message/stack — may expose resolver-controlled data).\n");
             } else {
-                napi_value message_prop, stack_prop;
                 char message_buf[512] = {0};
                 char stack_buf[2048] = {0};
                 size_t message_len = 0, stack_len = 0;
 
-                if (napi_get_named_property(env, exception, "message", &message_prop) == napi_ok) {
-                    napi_get_value_string_utf8(env, message_prop, message_buf, sizeof(message_buf), &message_len);
-                }
-
-                if (napi_get_named_property(env, exception, "stack", &stack_prop) == napi_ok) {
-                    napi_get_value_string_utf8(env, stack_prop, stack_buf, sizeof(stack_buf), &stack_len);
+                if (callback_exception_detail(
+                      env, exception, "message", message_buf, sizeof(message_buf),
+                      &message_len, "resolver")) {
+                    callback_exception_detail(
+                      env, exception, "stack", stack_buf, sizeof(stack_buf),
+                      &stack_len, "resolver");
                 }
 
                 fprintf(stderr, "[DataWeave Node addon] Resolver callback threw exception:\n");
@@ -5495,6 +5619,72 @@ static napi_value napi_test_fail_next_output_exception_clear(
   return NULL;
 }
 
+static napi_value napi_test_fail_next_read_callback(
+    napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  size_t length;
+  char stage[32];
+  if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok || argc < 1 ||
+      napi_get_value_string_utf8(env, argv[0], stage, sizeof(stage), &length) != napi_ok) {
+    napi_throw_type_error(env, NULL, "A read callback fault stage is required");
+    return NULL;
+  }
+  read_callback_fault_t fault = READ_CALLBACK_FAULT_NONE;
+  if (strcmp(stage, "create-size") == 0) {
+    fault = READ_CALLBACK_FAULT_CREATE_SIZE;
+  } else if (strcmp(stage, "get-global") == 0) {
+    fault = READ_CALLBACK_FAULT_GET_GLOBAL;
+  } else if (strcmp(stage, "is-buffer") == 0) {
+    fault = READ_CALLBACK_FAULT_IS_BUFFER;
+  } else if (strcmp(stage, "get-buffer-info") == 0) {
+    fault = READ_CALLBACK_FAULT_GET_BUFFER_INFO;
+  } else {
+    napi_throw_range_error(env, NULL, "Unknown read callback fault stage");
+    return NULL;
+  }
+  uv_mutex_lock(&g_test_output_mutex);
+  if (g_test_next_read_callback_fault != READ_CALLBACK_FAULT_NONE) {
+    uv_mutex_unlock(&g_test_output_mutex);
+    napi_throw_error(env, NULL, "A read callback fault is already armed");
+    return NULL;
+  }
+  g_test_next_read_callback_fault = fault;
+  uv_mutex_unlock(&g_test_output_mutex);
+  return NULL;
+}
+
+static napi_value napi_test_fail_next_read_exception_clear(
+    napi_env env, napi_callback_info info) {
+  (void)info;
+  uv_mutex_lock(&g_test_output_mutex);
+  if (g_test_next_callback_exception_clear_fault !=
+      CALLBACK_EXCEPTION_CLEAR_FAULT_NONE) {
+    uv_mutex_unlock(&g_test_output_mutex);
+    napi_throw_error(env, NULL, "A callback exception clear fault is already armed");
+    return NULL;
+  }
+  g_test_next_callback_exception_clear_fault = CALLBACK_EXCEPTION_CLEAR_FAULT_READ;
+  uv_mutex_unlock(&g_test_output_mutex);
+  return NULL;
+}
+
+static napi_value napi_test_fail_next_resolver_exception_clear(
+    napi_env env, napi_callback_info info) {
+  (void)info;
+  uv_mutex_lock(&g_test_output_mutex);
+  if (g_test_next_callback_exception_clear_fault !=
+      CALLBACK_EXCEPTION_CLEAR_FAULT_NONE) {
+    uv_mutex_unlock(&g_test_output_mutex);
+    napi_throw_error(env, NULL, "A callback exception clear fault is already armed");
+    return NULL;
+  }
+  g_test_next_callback_exception_clear_fault =
+    CALLBACK_EXCEPTION_CLEAR_FAULT_RESOLVER;
+  uv_mutex_unlock(&g_test_output_mutex);
+  return NULL;
+}
+
 static napi_value napi_test_hold_next_output_delivery(
     napi_env env, napi_callback_info info) {
   (void)info;
@@ -5642,6 +5832,7 @@ static bool export_function(napi_env env, napi_value exports, const char* name,
 
 static napi_value Init(napi_env env, napi_value exports) {
   uv_once(&g_mutex_once, init_g_mutex);
+  uv_once(&g_diagnostic_settings_once, init_diagnostic_settings);
 
   if (g_native_callback_depth_status != 0) {
     char message[128];
@@ -5699,6 +5890,9 @@ static napi_value Init(napi_env env, napi_value exports) {
         !export_function(env, exports, "__test_createForeignWrappedObject", napi_test_create_foreign_wrapped_object) ||
         !export_function(env, exports, "__test_failNextOutputSettlement", napi_test_fail_next_output_settlement) ||
         !export_function(env, exports, "__test_failNextOutputExceptionClear", napi_test_fail_next_output_exception_clear) ||
+        !export_function(env, exports, "__test_failNextReadCallback", napi_test_fail_next_read_callback) ||
+        !export_function(env, exports, "__test_failNextReadExceptionClear", napi_test_fail_next_read_exception_clear) ||
+        !export_function(env, exports, "__test_failNextResolverExceptionClear", napi_test_fail_next_resolver_exception_clear) ||
         !export_function(env, exports, "__test_holdNextOutputDelivery", napi_test_hold_next_output_delivery) ||
         !export_function(env, exports, "__test_heldOutputDelivery", napi_test_held_output_delivery) ||
         !export_function(env, exports, "__test_releaseOutputDelivery", napi_test_release_output_delivery)) {

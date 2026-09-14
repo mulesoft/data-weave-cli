@@ -887,6 +887,30 @@ def test_run_streaming_surfaces_detach_failure_without_primary_execution_failure
 
 
 @pytest.mark.unit
+def test_run_streaming_detach_base_exception_does_not_strand_completion_or_registration(monkeypatch):
+    runtime = configured_runtime(FakeNative('{"success": true}'))
+    detach_error = CallbackBaseException("detach interrupted")
+    original_detach = runtime._native.detach_thread
+    runtime._native.detach_thread = lambda _thread: (_ for _ in ()).throw(detach_error)
+    monkeypatch.setattr(runtime_module, "_WORKER_TIMEOUT_SECONDS", 0.01)
+
+    consumer_error = None
+    try:
+        list(runtime.run_streaming("script"))
+    except BaseException as error:
+        consumer_error = error
+
+    runtime._native.detach_thread = original_detach
+    cleanup_error = None
+    try:
+        runtime.cleanup()
+    except BaseException as error:
+        cleanup_error = error
+
+    assert (consumer_error, cleanup_error) == (detach_error, None)
+
+
+@pytest.mark.unit
 def test_run_streaming_preserves_unsuccessful_metadata_when_detach_fails():
     class DetachFailingNative(FakeNative):
         def graal_detach_thread(self, thread):

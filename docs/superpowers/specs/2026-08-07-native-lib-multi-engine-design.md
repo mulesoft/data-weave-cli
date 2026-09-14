@@ -575,6 +575,14 @@ allowing teardown to race an attached worker thread.
   the split finalize. The legacy `dw_napi_run_script` path and its `run_script` dlsym are removed.
 - N-API methods: `createEngine`, `createEngineWithResolver`, `destroyEngine`, and handle-taking
   `runScriptEngine`, `runScriptStreamingEngine`, `runScriptTransformEngine`.
+- **Callback diagnostics:** read and resolver callback failures emit fixed, content-free stderr
+  diagnostics by default. Detailed message/stack extraction is a process-start opt-in through
+  `DATAWEAVE_READ_CALLBACK_DEBUG=1` or `DATAWEAVE_RESOLVER_DEBUG=1`; enabling either may expose
+  callback-controlled data and must be treated as a diagnostic-only setting. Exception properties
+  are hostile accessors: any exception raised while reading or converting `message`/`stack` is
+  cleared and contained before the native callback returns. If the original callback exception or
+  a diagnostic accessor exception cannot be cleared, the addon terminates through its named
+  fail-closed N-API fatal-error path rather than returning with stale pending exception state.
 
 ### Layer 3 — Node TypeScript (`native-lib/node/src/`)
 

@@ -142,6 +142,64 @@ async function runRawOutput(mode) {
   }
 }
 
+async function runHostileDiagnostic() {
+  const addon = require(path.join(ROOT, "build", "Release", "dwlib_addon.node"));
+  const { findLibrary } = require(path.join(ROOT, "dist", "utils.js"));
+  let handle = null;
+  let messageGetterCalls = 0;
+  const thrown = new Proxy({}, {
+    get(_target, property) {
+      if (property === "message") {
+        messageGetterCalls++;
+        throw new Error("resolver diagnostic getter exploded");
+      }
+      return undefined;
+    },
+  });
+
+  addon.initialize(findLibrary());
+  try {
+    handle = addon.createEngineWithResolver(() => { throw thrown; });
+    const failed = JSON.parse(addon.runScriptEngine(handle, OUTER_SCRIPT, "{}"));
+    const healthy = JSON.parse(addon.runScriptEngine(
+      handle,
+      "%dw 2.0\noutput application/json\n---\n6 * 7",
+      "{}"
+    ));
+    console.log(JSON.stringify({
+      failedSuccess: failed.success,
+      failedHasError: Boolean(failed.error),
+      messageGetterRan: messageGetterCalls > 0,
+      healthySuccess: healthy.success,
+      healthyResult: Buffer.from(healthy.result, "base64").toString("utf-8"),
+    }));
+  } finally {
+    try {
+      if (handle !== null) addon.destroyEngine(handle);
+    } finally {
+      await addon.cleanup();
+    }
+  }
+}
+
+async function runUnclearableOriginalException() {
+  const addon = require(path.join(ROOT, "build", "Release", "dwlib_addon.node"));
+  const { findLibrary } = require(path.join(ROOT, "dist", "utils.js"));
+
+  addon.initialize(findLibrary());
+  addon.__test_failNextResolverExceptionClear();
+  const handle = addon.createEngineWithResolver(() => {
+    process.stderr.write("resolver callback reached\n");
+    throw new Error("original resolver callback exception");
+  });
+  setTimeout(() => {
+    process.stderr.write("unexpected timeout\n");
+    process.exitCode = 91;
+  }, 5_000).unref();
+  addon.runScriptEngine(handle, OUTER_SCRIPT, "{}");
+  process.stderr.write("unexpected completion\n");
+}
+
 const mode = process.argv[2];
 const run = mode === "facade"
   ? runFacade
@@ -151,7 +209,11 @@ const run = mode === "facade"
       ? () => runRawOutput(mode)
       : mode === "raw-transform"
         ? () => runRawOutput(mode)
-        : null;
+        : mode === "hostile-diagnostic"
+          ? runHostileDiagnostic
+          : mode === "unclearable-original-exception"
+            ? runUnclearableOriginalException
+            : null;
 if (run === null) {
   console.error(`unknown mode: ${mode}`);
   process.exit(2);

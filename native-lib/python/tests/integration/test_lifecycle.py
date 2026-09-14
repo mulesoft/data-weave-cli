@@ -10,6 +10,10 @@ import pytest
 import dataweave
 
 
+class CallbackBaseException(BaseException):
+    pass
+
+
 def _run_raw_abi_child(code):
     source_dir = Path(__file__).resolve().parents[2] / "src"
     environment = os.environ.copy()
@@ -58,6 +62,33 @@ def test_context_exit_surfaces_cleanup_failure_without_body_exception(monkeypatc
 
     with pytest.raises(dataweave.DataWeaveError, match="cleanup failed"):
         runtime.__exit__(None, None, None)
+
+
+@pytest.mark.unit
+def test_context_exit_preserves_body_exception_when_cleanup_raises_base_exception(monkeypatch):
+    runtime = dataweave.DataWeave.__new__(dataweave.DataWeave)
+    monkeypatch.setattr(runtime, "initialize", lambda: None)
+    cleanup_failure = CallbackBaseException("cleanup failed")
+    monkeypatch.setattr(runtime, "cleanup", lambda: (_ for _ in ()).throw(cleanup_failure))
+    body_failure = ValueError("body failed")
+
+    with pytest.raises(ValueError) as raised:
+        with runtime:
+            raise body_failure
+
+    assert raised.value is body_failure
+
+
+@pytest.mark.unit
+def test_context_exit_surfaces_exact_cleanup_base_exception_without_body_exception(monkeypatch):
+    runtime = dataweave.DataWeave.__new__(dataweave.DataWeave)
+    cleanup_failure = CallbackBaseException("cleanup failed")
+    monkeypatch.setattr(runtime, "cleanup", lambda: (_ for _ in ()).throw(cleanup_failure))
+
+    with pytest.raises(CallbackBaseException) as raised:
+        runtime.__exit__(None, None, None)
+
+    assert raised.value is cleanup_failure
 
 
 @pytest.mark.integration

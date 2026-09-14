@@ -170,7 +170,7 @@ def _retry_pending_teardown_locked() -> None:
         detach_failed = False
         try:
             detach_failed = lib.graal_detach_thread(worker) != 0
-        except Exception:
+        except BaseException:
             detach_failed = True
         if detach_failed:
             # Double failure: another retry would stack a second stuck worker and
@@ -309,7 +309,7 @@ def _release_isolate() -> None:
             detach_failed = False
             try:
                 detach_failed = lib.graal_detach_thread(worker) != 0
-            except Exception:
+            except BaseException:
                 detach_failed = True
             if detach_failed:
                 # Teardown AND detach both failed. Arming a retry would attach yet
@@ -427,10 +427,15 @@ class NativeRuntime:
                     return
                 acquired = False
                 try:
+                    if self._resolver is not None and not self._resolver_token:
+                        self._resolver_token = _next_resolver_token()
+                        self._resolver_callback = self._make_trampoline()
+                        with _resolver_lock_global:
+                            _resolver_registry[self._resolver_token] = self
                     self.lib, self.isolate = _acquire_isolate(self.lib_path)
                     acquired = True
                     handle = self._create_engine()
-                except Exception:
+                except BaseException:
                     # Roll back the ref we just took (if any) so a failed init leaks
                     # nothing.
                     self.lib = self.isolate = None
@@ -446,7 +451,10 @@ class NativeRuntime:
                     # _acquire_isolate never increments the refcount, so releasing here
                     # unconditionally would decrement someone else's live reference).
                     if acquired:
-                        _release_isolate()
+                        try:
+                            _release_isolate()
+                        except BaseException:
+                            pass
                     raise
                 self.handle = handle
                 self._generation += 1
@@ -496,6 +504,9 @@ class NativeRuntime:
             except Exception as error:
                 _isolate_poisoned = True
                 raise DataWeaveError(f"Failed to detach worker thread from isolate: {error}") from error
+            except BaseException:
+                _isolate_poisoned = True
+                raise
             if result != 0:
                 _isolate_poisoned = True
                 raise DataWeaveError(f"Failed to detach worker thread from isolate. Error code: {result}")
@@ -642,10 +653,14 @@ class NativeRuntime:
                 operation = self._engine_operation
                 self.initialized = False
                 self._engine_operation = None
+            primary_error = None
             try:
                 if operation is not None:
                     with self._current_thread_attachment(self.thread) as thread:
                         self.lib.destroy_engine(thread, operation.handle)
+            except BaseException as error:
+                primary_error = error
+                raise
             finally:
                 # Release the isolate ref even if destroy_engine throws, so a
                 # throwing destroy cannot strand the isolate.
@@ -659,7 +674,11 @@ class NativeRuntime:
                     with _resolver_lock_global:
                         _resolver_registry.pop(self._resolver_token, None)
                     self._resolver_token = 0
-                _release_isolate()
+                try:
+                    _release_isolate()
+                except BaseException:
+                    if primary_error is None:
+                        raise
 
     @contextmanager
     def _serialized_native_operation(self, expected: Optional[_EngineOperation] = None):
@@ -726,6 +745,6 @@ class NativeRuntime:
         finally:
             try:
                 self.detach_thread(attached_thread)
-            except Exception:
+            except BaseException:
                 if primary_error is None:
                     raise
