@@ -276,10 +276,11 @@ export class DataWeave {
    * @throws DataWeaveScriptError if the script fails and `opts.raiseOnError` is set.
    */
   run(script: string, inputs?: Inputs, opts?: { raiseOnError?: boolean }): ExecutionResult {
-    this.ensureReady();
+    const token = this.captureOperationToken();
     const inputsJson = buildInputsJson(inputs ?? {});
 
-    const raw = ffi.runScriptEngine(this.engineHandle!, script, inputsJson);
+    this.assertCurrentOperation(token);
+    const raw = ffi.runScriptEngine(token.handle, script, inputsJson);
 
     const result = parseNativeResponse(raw);
 

@@ -69,6 +69,10 @@ _isolate_ref_count = 0
 # Node's g_teardown_needed retryable-teardown model. Only read/written while
 # holding _isolate_lock.
 _teardown_needed = False
+# A failed detach can leave a dead OS thread attached to the isolate. Do not
+# admit more work or attempt teardown, which could block forever waiting on it.
+# The final release leaks that isolate and resets this flag for a fresh one.
+_isolate_poisoned = False
 
 
 # Per-engine resolver dispatch. The ctx passed to create_engine_with_resolver is
@@ -194,8 +198,10 @@ def _retry_pending_teardown_locked() -> None:
 def _acquire_isolate(lib_path: str):
     """Returns (lib, isolate), creating the shared isolate on the first reference.
     Increments the refcount only on success."""
-    global _lib, _lib_path, _isolate, _isolate_ref_count, _teardown_needed
+    global _lib, _lib_path, _isolate, _isolate_ref_count, _teardown_needed, _isolate_poisoned
     with _isolate_lock:
+        if _isolate_poisoned:
+            raise DataWeaveError("GraalVM isolate is poisoned by a failed thread detach.")
         _retry_pending_teardown_locked()
         if _isolate is None:
             try:
@@ -261,12 +267,22 @@ def _release_isolate() -> None:
     arms _teardown_needed for a retry at the next acquire, instead of nulling
     the globals -- nulling would let the next initialize() build a second live
     isolate while the first is still alive."""
-    global _lib, _lib_path, _isolate, _isolate_ref_count, _teardown_needed
+    global _lib, _lib_path, _isolate, _isolate_ref_count, _teardown_needed, _isolate_poisoned
     with _isolate_lock:
         if _isolate_ref_count == 0:
             return
         _isolate_ref_count -= 1
         if _isolate_ref_count > 0:
+            return
+        if _isolate_poisoned:
+            _lib = _lib_path = _isolate = None
+            _teardown_needed = False
+            _isolate_poisoned = False
+            print(
+                "DataWeave: GraalVM isolate is poisoned by a failed thread detach "
+                "and is leaked (a later initialize() will build a fresh one).",
+                file=sys.stderr,
+            )
             return
         # Last release: no thread is persistently attached (the bootstrap was
         # detached at create and every op detaches its own thread), so attach a
@@ -459,23 +475,30 @@ class NativeRuntime:
 
     def attach_thread(self):
         _raise_if_native_callback_active()
-        worker_thread = GraalIsolateThreadPointer()
-        try:
-            result = self.lib.graal_attach_thread(self.isolate, ctypes.byref(worker_thread))
-        except Exception as error:
-            raise DataWeaveError(f"Failed to attach worker thread to isolate: {error}") from error
-        if result != 0:
-            raise DataWeaveError(f"Failed to attach worker thread to isolate (code {result})")
-        return worker_thread
+        with _isolate_lock:
+            if _isolate_poisoned:
+                raise DataWeaveError("GraalVM isolate is poisoned by a failed thread detach.")
+            worker_thread = GraalIsolateThreadPointer()
+            try:
+                result = self.lib.graal_attach_thread(self.isolate, ctypes.byref(worker_thread))
+            except Exception as error:
+                raise DataWeaveError(f"Failed to attach worker thread to isolate: {error}") from error
+            if result != 0:
+                raise DataWeaveError(f"Failed to attach worker thread to isolate (code {result})")
+            return worker_thread
 
     def detach_thread(self, thread) -> None:
+        global _isolate_poisoned
         _raise_if_native_callback_active()
-        try:
-            result = self.lib.graal_detach_thread(thread)
-        except Exception as error:
-            raise DataWeaveError(f"Failed to detach worker thread from isolate: {error}") from error
-        if result != 0:
-            raise DataWeaveError(f"Failed to detach worker thread from isolate. Error code: {result}")
+        with _isolate_lock:
+            try:
+                result = self.lib.graal_detach_thread(thread)
+            except Exception as error:
+                _isolate_poisoned = True
+                raise DataWeaveError(f"Failed to detach worker thread from isolate: {error}") from error
+            if result != 0:
+                _isolate_poisoned = True
+                raise DataWeaveError(f"Failed to detach worker thread from isolate. Error code: {result}")
 
     def decode_and_free(self, ptr, thread=None) -> str:
         if not ptr:

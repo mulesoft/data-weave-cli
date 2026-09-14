@@ -640,6 +640,75 @@ def test_buffered_worker_execution_detaches_current_thread_after_failure(monkeyp
         assert library.detach_calls[detach_count_after_init][0] == library.attach_calls[attach_count_after_init][0]
 
 
+@pytest.mark.unit
+def test_detach_failure_poisoning_skips_final_isolate_teardown(monkeypatch):
+    library = FakeLibrary()
+    result_buffer = ctypes.create_string_buffer(b"result")
+    library.run_script_engine = CallableFunction(
+        lambda _thread, _handle, _script, _inputs: ctypes.addressof(result_buffer)
+    )
+    library.free_cstring = CallableFunction(lambda _thread, _ptr: None)
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    library.graal_detach_thread = CallableFunction(lambda _thread: 1)
+
+    with pytest.raises(dataweave.DataWeaveError, match="Failed to detach"):
+        runtime.run_engine_and_decode(
+            b"script", b"{}", operation=runtime.capture_operation()
+        )
+
+    library.graal_tear_down_isolate = CallableFunction(
+        lambda _thread: pytest.fail("poisoned isolate must not be torn down")
+    )
+    with pytest.raises(dataweave.DataWeaveError, match="poisoned"):
+        runtime.cleanup()
+
+    assert native._isolate is None
+    assert native._isolate_ref_count == 0
+
+
+@pytest.mark.unit
+def test_detach_failure_blocks_racing_attach_until_isolate_is_poisoned(monkeypatch):
+    library = FakeLibrary()
+    monkeypatch.setattr(native.ctypes, "CDLL", lambda _path: library)
+    runtime = native.NativeRuntime("/tmp/dwlib")
+    runtime.initialize()
+    detach_entered = Event()
+    release_detach = Event()
+
+    def detach_thread(_thread):
+        detach_entered.set()
+        assert release_detach.wait(1)
+        return 1
+
+    library.graal_detach_thread = CallableFunction(detach_thread)
+    detach_errors = []
+    attach_errors = []
+    detaching = Thread(
+        target=lambda: _capture_error(
+            detach_errors, lambda: runtime.detach_thread(native.GraalIsolateThreadPointer())
+        )
+    )
+    detaching.start()
+    assert detach_entered.wait(1)
+
+    attaching = Thread(target=lambda: _capture_error(attach_errors, runtime.attach_thread))
+    attaching.start()
+    assert attaching.is_alive()
+    release_detach.set()
+    detaching.join(1)
+    attaching.join(1)
+
+    assert not detaching.is_alive()
+    assert not attaching.is_alive()
+    assert len(detach_errors) == 1
+    assert len(attach_errors) == 1
+    assert "poisoned" in str(attach_errors[0])
+    with pytest.raises(dataweave.DataWeaveError, match="poisoned"):
+        runtime.cleanup()
+
+
 def _capture_error(errors, invoke):
     try:
         invoke()

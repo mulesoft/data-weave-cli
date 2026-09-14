@@ -465,6 +465,10 @@ attachment**, mirroring the Node and Go bindings:
   `create_engine[_with_resolver]`, `destroy_engine`) attaches a **fresh** thread on demand, uses it
   for the whole call, and detaches it when done (`_current_thread_attachment`). A stream-worker
   thread that has already attached its own IsolateThread passes it through unchanged.
+- **Any ordinary detach failure** poisons the shared isolate. The binding rejects further native
+  admission and, on the final reference release, clears its module globals and intentionally leaks
+  the isolate instead of attempting a teardown that can wait forever for the failed operation's
+  stuck attachment. A later initialization builds a fresh isolate.
 - **`_release_isolate`** (last ref): attaches a fresh thread solely to call
   `graal_tear_down_isolate`. On success it clears the globals; on failure (attach failure, or
   `graal_tear_down_isolate` itself failing) it now **retains the live isolate and arms
@@ -480,8 +484,9 @@ attachment**, mirroring the Node and Go bindings:
   are nulled, `_teardown_needed` is left unset, and the isolate leaks until process exit — the same
   leak-and-continue policy as the bootstrap double failure (§10).
 
-Because nothing stays attached between calls, teardown never blocks on a phantom attachment
-regardless of which OS thread performs the last release.
+Because nothing stays attached between calls, normal teardown never blocks on a phantom attachment
+regardless of which OS thread performs the last release; the detach-poison path fails closed and
+leaks rather than attempting unsafe teardown.
 
 ### 7.3 Instance lifecycle
 

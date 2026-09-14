@@ -1529,6 +1529,26 @@ describe("DataWeave.initialize() native ref-count safety", () => {
       expect((error as DataWeaveError).message).toBe(staleGenerationMessage);
     };
 
+    it("revalidates run after input serialization before native admission", async () => {
+      vi.mocked(ffi.createEngine).mockReturnValue(2);
+      const dw = new DataWeave("/fake/lib");
+      dw.initialize();
+
+      const inputs = {};
+      Object.defineProperty(inputs, "payload", {
+        enumerable: true,
+        get() {
+          void dw.cleanup();
+          return 1;
+        },
+      });
+
+      vi.mocked(ffi.runScriptEngine).mockClear();
+      expect(() => dw.run("output application/json --- payload", inputs)).toThrow(staleGenerationMessage);
+      expect(ffi.runScriptEngine).not.toHaveBeenCalled();
+      await dw.cleanup();
+    });
+
     it("rejects a lazy runStreaming operation after replacement with a different handle before native admission", async () => {
       vi.mocked(ffi.createEngine).mockReturnValueOnce(2).mockReturnValueOnce(3);
 
