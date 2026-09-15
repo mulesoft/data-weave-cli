@@ -199,3 +199,28 @@ def test_named_step_if_does_not_read_a_later_step_guard():
 
     with pytest.raises(AssertionError, match="missing if guard"):
         named_step_if(mutated_workflow, "Fail if binding artifacts failed")
+
+
+@pytest.mark.unit
+def test_examples_do_not_use_removed_module_level_runtime_api():
+    root = Path(__file__).resolve().parents[3]
+    examples = [
+        root / "example_dataweave_module.py",
+        root / "example_streaming.py",
+        root / "python" / "examples" / "simple_demo.py",
+        root / "python" / "examples" / "streaming_demo.py",
+        root / "example_streaming.mjs",
+    ]
+    removed = (
+        "dataweave.run(",
+        "dataweave.run_streaming(",
+        "dataweave.run_transform(",
+        "dataweave.run_callback(",
+        "dataweave.run_input_output_callback(",
+        "dataweave.cleanup(",
+        "import { runTransform, cleanup }",
+    )
+
+    for example in examples:
+        content = example.read_text(encoding="utf-8")
+        assert not any(symbol in content for symbol in removed), example

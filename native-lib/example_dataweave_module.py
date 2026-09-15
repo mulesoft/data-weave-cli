@@ -14,7 +14,7 @@ sys.path.insert(0, str(_PYTHON_SRC_DIR))
 
 import dataweave
 
-def example_simple_functions():
+def example_simple_functions(dw: dataweave.DataWeave):
     """Example using simple function API"""
     print("="*70)
     print("Example 1: Simple Function API")
@@ -25,46 +25,46 @@ def example_simple_functions():
     # Simple script execution
     print("\n[*] Simple arithmetic:")
     script = "2 + 2"
-    result = dataweave.run(script)
+    result = dw.run(script)
     ok = assert_result(script, result, "4") and ok
 
     print("\n[*] Square root:")
     script = "sqrt(144)"
-    result = dataweave.run(script)
+    result = dw.run(script)
     ok = assert_result(script, result, "12") and ok
 
     print("\n[*] Array operations:")
     script = "[1, 2, 3] map $ * 2"
-    result = dataweave.run(script)
+    result = dw.run(script)
     ok = assert_result(script, result, "[\n  2, \n  4, \n  6\n]") and ok
 
     print("\n[*] String operations:")
     script = "upper('hello world')"
-    result = dataweave.run(script)
+    result = dw.run(script)
     ok = assert_result(script, result, '"HELLO WORLD"') and ok
 
     # Script with inputs (simple values - auto-converted)
     print("\n[*] Script with inputs (auto-converted):")
     script = "num1 + num2"
-    result = dataweave.run(script, {"num1": 25, "num2": 17})
+    result = dw.run(script, {"num1": 25, "num2": 17})
     ok = assert_result(script, result, "42") and ok
 
     # Script with complex inputs
     print("\n[*] Script with complex object:")
     script = "payload.name"
-    result = dataweave.run(script, {"payload": {"content": '{"name": "John", "age": 30}', "mimeType": "application/json"}})
+    result = dw.run(script, {"payload": {"content": '{"name": "John", "age": 30}', "mimeType": "application/json"}})
     ok = assert_result(script, result, '"John"') and ok
 
     # Script with mixed input types
     print("\n[*] Script with mixed input types:")
     script = "greeting ++ ' ' ++ payload.name"
-    result = dataweave.run(script, {"greeting": "Hello", "payload": {"content": '{"name": "Alice", "role": "Developer"}', "mimeType": "application/json"}})
+    result = dw.run(script, {"greeting": "Hello", "payload": {"content": '{"name": "Alice", "role": "Developer"}', "mimeType": "application/json"}})
     ok = assert_result(script, result, '"Hello Alice"') and ok
 
     # Binary output
     print("\n[*] Binary output:")
     script = "output application/octet-stream\n---\ndw::core::Binaries::fromBase64(\"holamund\")"
-    result = dataweave.run(script)
+    result = dw.run(script)
     ok = assert_result(script, result, "holamund") and ok
 
     # Script with InputValue
@@ -75,13 +75,9 @@ def example_simple_functions():
         properties={"header": False, "separator": "4"}
     )
     script = "in0.column_1[0]"
-    result = dataweave.run(script, {"in0": input_value})
+    result = dw.run(script, {"in0": input_value})
     ok = assert_result(script, result, '"567"') and ok
 
-
-    # Cleanup when done
-    dataweave.cleanup()
-    print("\n[OK] Cleanup completed")
 
     return ok
 
@@ -98,7 +94,7 @@ def assert_result(script, result, expected):
     return ok
 
 
-def example_context_manager():
+def example_context_manager(dw: dataweave.DataWeave):
     """Example using context manager (recommended)"""
     print("\n" + "="*70)
     print("Example 2: Context Manager API (Recommended)")
@@ -106,27 +102,26 @@ def example_context_manager():
 
     ok = True
 
-    with dataweave.DataWeave() as dw:
-        print("\n[*] Multiple operations with same runtime:")
+    print("\n[*] Multiple operations with same runtime:")
 
-        script = "2 + 2"
-        result = dw.run(script)
-        ok = assert_result(script, result, "4") and ok
+    script = "2 + 2"
+    result = dw.run(script)
+    ok = assert_result(script, result, "4") and ok
 
-        script = "x + y + z"
-        result = dw.run(script, {"x": 1, "y": 2, "z": 3})
-        ok = assert_result(script, result, "6") and ok
+    script = "x + y + z"
+    result = dw.run(script, {"x": 1, "y": 2, "z": 3})
+    ok = assert_result(script, result, "6") and ok
 
-        script = "numbers map $ * multiplier"
-        result = dw.run(script, {"numbers": [1, 2, 3, 4, 5], "multiplier": 10})
-        ok = assert_result(script, result, "[\n  10, \n  20, \n  30, \n  40, \n  50\n]") and ok
+    script = "numbers map $ * multiplier"
+    result = dw.run(script, {"numbers": [1, 2, 3, 4, 5], "multiplier": 10})
+    ok = assert_result(script, result, "[\n  10, \n  20, \n  30, \n  40, \n  50\n]") and ok
 
-    print("\n[OK] Context manager automatically cleaned up resources")
+    print("\n[OK] Operations share the same runtime")
 
     return ok
 
 
-def example_explicit_format():
+def example_explicit_format(dw: dataweave.DataWeave):
     """Example using explicit content/mimeType format"""
     print("\n" + "="*70)
     print("Example 3: Explicit Format (Advanced)")
@@ -137,17 +132,17 @@ def example_explicit_format():
     ok = True
 
     script = "payload.message"
-    result = dataweave.run(script, {"payload": {"content": '{"message": "Hello from JSON!", "value": 42}', "mimeType": "application/json"}})
+    result = dw.run(script, {"payload": {"content": '{"message": "Hello from JSON!", "value": 42}', "mimeType": "application/json"}})
     ok = assert_result(script, result, '"Hello from JSON!"') and ok
 
     script = "payload.value + offset"
-    result = dataweave.run(script, {"payload": {"content": '{"value": 100}', "mimeType": "application/json"}, "offset": 50})
+    result = dw.run(script, {"payload": {"content": '{"value": 100}', "mimeType": "application/json"}, "offset": 50})
     ok = assert_result(script, result, "150") and ok
 
     return ok
 
 
-def example_error_handling():
+def example_error_handling(dw: dataweave.DataWeave):
     """Example with error handling"""
     print("\n" + "="*70)
     print("Example 4: Error Handling")
@@ -155,7 +150,7 @@ def example_error_handling():
     
     try:
         print("\n[*] Invalid script (will show error):")
-        result = dataweave.run("invalid syntax here", {})
+        result = dw.run("invalid syntax here", {})
         print(f"   Result: {result} {'[OK]' if result.success == False else '[FAIL]'}")
             
     except dataweave.DataWeaveLibraryNotFoundError as e:
@@ -174,11 +169,14 @@ def main():
     print("Just import and use - no ctypes, no manual memory management.\n")
     
     try:
-        all_ok = True
-        all_ok = example_simple_functions() and all_ok
-        all_ok = example_context_manager() and all_ok
-        all_ok = example_explicit_format() and all_ok
-        example_error_handling()
+        with dataweave.DataWeave() as dw:
+            all_ok = True
+            all_ok = example_simple_functions(dw) and all_ok
+            all_ok = example_context_manager(dw) and all_ok
+            all_ok = example_explicit_format(dw) and all_ok
+            example_error_handling(dw)
+
+        print("\n[OK] Context manager automatically cleaned up resources")
 
         print("\n" + "="*70)
         if all_ok:
