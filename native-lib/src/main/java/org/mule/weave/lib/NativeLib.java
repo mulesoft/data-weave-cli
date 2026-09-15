@@ -66,6 +66,9 @@ public class NativeLib {
         try {
             byte[] buf = new byte[CALLBACK_BUFFER_SIZE];
             CCharPointer nativeBuf = UnmanagedMemory.malloc(CALLBACK_BUFFER_SIZE);
+            if (nativeBuf.isNull()) {
+                return WordFactory.nullPointer();
+            }
             try {
                 int n;
                 while ((n = session.read(buf, buf.length)) > 0) {
@@ -141,6 +144,9 @@ public class NativeLib {
             try {
                 byte[] buf = new byte[CALLBACK_BUFFER_SIZE];
                 CCharPointer writeBuf = UnmanagedMemory.malloc(CALLBACK_BUFFER_SIZE);
+                if (writeBuf.isNull()) {
+                    return WordFactory.nullPointer();
+                }
                 try {
                     int n;
                     while ((n = session.read(buf, buf.length)) > 0) {
@@ -444,6 +450,10 @@ public class NativeLib {
             NativeCallbacks.ReadCallback cb = WordFactory.pointer(readCallbackAddr);
             PointerBase ctx = WordFactory.pointer(ctxAddr);
             CCharPointer buf = UnmanagedMemory.malloc(max);
+            if (buf.isNull()) {
+                feederError = "Failed to allocate native input callback buffer";
+                return -1;
+            }
             try {
                 int n = cb.invoke(ctx, buf, max);
                 // Reject a contract violation BEFORE the copy loop: n > max would index past
@@ -523,6 +533,9 @@ public class NativeLib {
     private static CCharPointer toUnmanagedCString(String value) {
         byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
         CCharPointer ptr = UnmanagedMemory.malloc(bytes.length + 1);
+        if (ptr.isNull()) {
+            return WordFactory.nullPointer();
+        }
         for (int i = 0; i < bytes.length; i++) {
             ptr.write(i, bytes[i]);
         }

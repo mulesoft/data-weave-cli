@@ -1,4 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
 import { DataWeave } from "../../src/dataweave";
 import { DataWeaveError } from "../../src/errors";
 import * as ffi from "../../src/ffi";
@@ -112,6 +115,27 @@ describe("instance lifecycle during cleanup (round 6)", () => {
     const a = dw.cleanup();
     const b = dw.cleanup(); // must return the same in-flight settlement, one native teardown
     await Promise.all([a, b]);
+  });
+});
+
+describe("process-wide native library path ownership", () => {
+  it("accepts equivalent canonical paths and rejects a different path while live", async () => {
+    const library = findLibrary();
+    const directory = mkdtempSync(join(tmpdir(), "dwlib-path-"));
+    const equivalentPath = relative(process.cwd(), library);
+    const differentPath = join(directory, "different-dwlib");
+    writeFileSync(differentPath, "not the active library");
+    const anchor = new DataWeave({ libPath: library });
+    const equivalent = new DataWeave({ libPath: equivalentPath });
+    const mismatched = new DataWeave({ libPath: differentPath });
+
+    anchor.initialize();
+    equivalent.initialize();
+    expect(() => mismatched.initialize()).toThrow(/different native library path/i);
+    expect(anchor.run("1 + 1").getString()).toBe("2");
+
+    await equivalent.cleanup();
+    await anchor.cleanup();
   });
 });
 

@@ -378,6 +378,57 @@ def test_shared_isolate_is_created_once_and_torn_down_on_last_release(monkeypatc
 
 
 @pytest.mark.unit
+def test_shared_isolate_rejects_a_different_native_library_path(monkeypatch, tmp_path):
+    library = FakeLibrary()
+    first_path = tmp_path / "dwlib-first"
+    second_path = tmp_path / "dwlib-second"
+    first_path.touch()
+    second_path.touch()
+    loaded_paths = []
+    monkeypatch.setattr(
+        native.ctypes,
+        "CDLL",
+        lambda path: loaded_paths.append(path) or library,
+    )
+    first = native.NativeRuntime(str(first_path))
+    second = native.NativeRuntime(str(second_path))
+    first.initialize()
+
+    with pytest.raises(native.DataWeaveError, match="different native library path"):
+        second.initialize()
+
+    assert native._isolate_ref_count == 1
+    assert second.initialized is False
+    assert loaded_paths == [str(first_path.resolve())]
+    first.cleanup()
+
+
+@pytest.mark.unit
+def test_shared_isolate_accepts_equivalent_canonical_library_paths(monkeypatch, tmp_path):
+    library = FakeLibrary()
+    real_path = tmp_path / "dwlib"
+    alias_path = tmp_path / "dwlib-alias"
+    real_path.touch()
+    alias_path.symlink_to(real_path)
+    loaded_paths = []
+    monkeypatch.setattr(
+        native.ctypes,
+        "CDLL",
+        lambda path: loaded_paths.append(path) or library,
+    )
+    first = native.NativeRuntime(str(real_path))
+    second = native.NativeRuntime(str(alias_path))
+    first.initialize()
+    second.initialize()
+
+    assert native._isolate_ref_count == 2
+    assert loaded_paths == [str(real_path.resolve())]
+
+    second.cleanup()
+    first.cleanup()
+
+
+@pytest.mark.unit
 def test_engine_create_failure_releases_isolate_ref(monkeypatch):
     library = FakeLibrary()
     library.create_engine = CallableFunction(

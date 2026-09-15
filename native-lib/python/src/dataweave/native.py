@@ -199,13 +199,19 @@ def _acquire_isolate(lib_path: str):
     """Returns (lib, isolate), creating the shared isolate on the first reference.
     Increments the refcount only on success."""
     global _lib, _lib_path, _isolate, _isolate_ref_count, _teardown_needed, _isolate_poisoned
+    canonical_path = str(Path(lib_path).resolve())
     with _isolate_lock:
         if _isolate_poisoned:
             raise DataWeaveError("GraalVM isolate is poisoned by a failed thread detach.")
         _retry_pending_teardown_locked()
+        if _isolate is not None and _lib_path != canonical_path:
+            raise DataWeaveError(
+                "Cannot initialize DataWeave with a different native library path "
+                f"while the shared isolate is live (active: {_lib_path}, requested: {canonical_path})."
+            )
         if _isolate is None:
             try:
-                lib = ctypes.CDLL(lib_path)
+                lib = ctypes.CDLL(canonical_path)
             except OSError as error:
                 raise DataWeaveError(f"Failed to load library from {lib_path}: {error}")
             _bind_abi(lib)
@@ -255,7 +261,7 @@ def _acquire_isolate(lib_path: str):
                     f"Failed to detach GraalVM isolate bootstrap thread. Error code: {detach_result}"
                 )
             _lib = lib
-            _lib_path = lib_path
+            _lib_path = canonical_path
             _isolate = isolate
         _isolate_ref_count += 1
         return _lib, _isolate

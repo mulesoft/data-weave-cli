@@ -32,6 +32,7 @@ typedef void* (*run_script_input_output_callback_engine_fn)(void*, long long, co
 // Global state
 static uv_lib_t g_lib;
 static int g_lib_loaded = 0;
+static char* g_lib_path = NULL;
 static void* g_isolate = NULL;
 static void* g_thread = NULL;
 static int g_initialized = 0;
@@ -66,6 +67,26 @@ static void init_diagnostic_settings(void) {
 #define ISOLATE_POISONED_MESSAGE \
     "DataWeave isolate is unavailable after a thread detach failure; clean up and initialize again."
 #define MAX_SAFE_ENGINE_HANDLE 9007199254740991LL
+
+static char* canonicalize_library_path(const char* path) {
+  uv_fs_t request;
+  int rc = uv_fs_realpath(NULL, &request, path, NULL);
+  if (rc < 0) {
+    uv_fs_req_cleanup(&request);
+    return NULL;
+  }
+  char* canonical = strdup((const char*)request.ptr);
+  uv_fs_req_cleanup(&request);
+  return canonical;
+}
+
+static bool same_library_path(const char* left, const char* right) {
+#ifdef _WIN32
+  return _stricmp(left, right) == 0;
+#else
+  return strcmp(left, right) == 0;
+#endif
+}
 
 static unsigned native_callback_depth(void) {
     return (unsigned)(uintptr_t)uv_key_get(&g_native_callback_depth);
@@ -1406,12 +1427,18 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
     napi_throw_error(env, NULL, "initialize: failed to read library path");
     return NULL;
   }
+  char* canonical_path = canonicalize_library_path(lib_path);
+  if (canonical_path == NULL) {
+    napi_throw_error(env, NULL, "initialize: failed to resolve native library path");
+    return NULL;
+  }
 
   uv_mutex_lock(&g_mutex);
   wait_for_detach_publication_locked();
   bool poisoned_before_drain = g_isolate_poisoned;
   uv_mutex_unlock(&g_mutex);
   if (poisoned_before_drain) {
+    free(canonical_path);
     napi_throw_error(env, NULL, ISOLATE_POISONED_MESSAGE);
     return NULL;
   }
@@ -1431,6 +1458,7 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   // not be adopted or reused; explicit cleanup must abandon it first.
   if (g_isolate_poisoned) {
     uv_mutex_unlock(&g_mutex);
+    free(canonical_path);
     napi_throw_error(env, NULL, ISOLATE_POISONED_MESSAGE);
     return NULL;
   }
@@ -1446,6 +1474,15 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   // malfunction). No-ops cheaply when nothing is stranded (flag clear -> return).
   retry_stranded_teardown_locked();
 
+  if (g_isolate != NULL && g_lib_path != NULL &&
+      !same_library_path(g_lib_path, canonical_path)) {
+    uv_mutex_unlock(&g_mutex);
+    free(canonical_path);
+    napi_throw_error(env, NULL,
+                     "Cannot initialize DataWeave with a different native library path while the shared isolate is live");
+    return NULL;
+  }
+
   // After the retry above, a PERSISTENTLY failing teardown leaves the isolate
   // live but unusable: g_isolate != NULL, g_initialized == 0, and
   // g_teardown_state == TEARDOWN_NONE (no teardown thread exists). The wait loop
@@ -1458,6 +1495,7 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   // it nor touch g_ref_count (still 0 == sum(init_refs), invariant intact).
   if (g_isolate != NULL && !g_initialized && g_teardown_state == TEARDOWN_NONE) {
     uv_mutex_unlock(&g_mutex);
+    free(canonical_path);
     napi_throw_error(env, NULL,
                      "DataWeave native runtime is stranded: a prior isolate "
                      "teardown failed and could not be reclaimed");
@@ -1484,11 +1522,13 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
       // to the ref-count path below is unnecessary -- return directly.
       if (g_isolate_poisoned) {
         uv_mutex_unlock(&g_mutex);
+        free(canonical_path);
         napi_throw_error(env, NULL, ISOLATE_POISONED_MESSAGE);
         return NULL;
       }
       if (!env_init_acquire_and_hook(env)) {
         uv_mutex_unlock(&g_mutex);
+        free(canonical_path);
         napi_throw_error(env, NULL, "Failed to allocate/register env init record");
         return NULL;
       }
@@ -1497,6 +1537,7 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
       g_teardown_needed = false;  // round-14: a new owner wants the isolate kept
       uv_cond_broadcast(&g_teardown_cond);
       uv_mutex_unlock(&g_mutex);
+      free(canonical_path);
       return NULL;
     }
     // TEARDOWN_TEARING_DOWN (or a transient g_isolate!=NULL && !g_initialized):
@@ -1510,22 +1551,32 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   if (g_initialized) {
     if (g_isolate_poisoned) {
       uv_mutex_unlock(&g_mutex);
+      free(canonical_path);
       napi_throw_error(env, NULL, ISOLATE_POISONED_MESSAGE);
+      return NULL;
+    }
+    if (g_lib_path == NULL || !same_library_path(g_lib_path, canonical_path)) {
+      uv_mutex_unlock(&g_mutex);
+      free(canonical_path);
+      napi_throw_error(env, NULL,
+                       "Cannot initialize DataWeave with a different native library path while the shared isolate is live");
       return NULL;
     }
     if (!env_init_acquire_and_hook(env)) {
       uv_mutex_unlock(&g_mutex);
+      free(canonical_path);
       napi_throw_error(env, NULL, "Failed to allocate/register env init record");
       return NULL;
     }
     g_ref_count++;
     g_teardown_needed = false;  // round-14: a new owner wants the isolate kept
     uv_mutex_unlock(&g_mutex);
+    free(canonical_path);
     return NULL;
   }
 
   struct init_args args;
-  args.lib_path = lib_path;
+  args.lib_path = canonical_path;
   args.result = -1;
   args.error[0] = '\0';
 
@@ -1536,6 +1587,7 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
   int spawn_rc = uv_thread_create_ex(&tid, &opts, init_thread_fn, &args);
   if (spawn_rc != 0) {
     uv_mutex_unlock(&g_mutex);
+    free(canonical_path);
     napi_throw_error(env, NULL, "Failed to spawn initialization thread");
     return NULL;
   }
@@ -1543,6 +1595,7 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
 
   if (args.result != 0) {
     uv_mutex_unlock(&g_mutex);
+    free(canonical_path);
     napi_throw_error(env, NULL, args.error[0] ? args.error : "Initialization failed");
     return NULL;
   }
@@ -1614,10 +1667,13 @@ static napi_value napi_initialize(napi_env env, napi_callback_info info) {
       g_teardown_needed = true;
     }
     uv_mutex_unlock(&g_mutex);
+    free(canonical_path);
     napi_throw_error(env, NULL, "Failed to allocate/register env init record");
     return NULL;
   }
   g_initialized = 1;
+  free(g_lib_path);
+  g_lib_path = canonical_path;
   g_ref_count++;
   // Round-14: defensive clear. A brand-new isolate can never carry a stale
   // stranded-teardown signal for itself (a new graal_create_isolate only runs
@@ -2815,7 +2871,10 @@ static napi_value napi_run_script_streaming_engine(napi_env env, napi_callback_i
 
   size_t argc = 4;
   napi_value argv[4];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok) {
+    napi_throw_error(env, NULL, "runScriptStreamingEngine: failed to read arguments");
+    return NULL;
+  }
 
   if (argc < 4) {
     napi_throw_error(env, NULL, "runScriptStreamingEngine requires (handle, script, inputsJson, chunkCallback)");
@@ -3523,7 +3582,10 @@ static napi_value napi_run_script_transform_engine(napi_env env, napi_callback_i
 
   size_t argc = 8;
   napi_value argv[8];
-  napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+  if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok) {
+    napi_throw_error(env, NULL, "runScriptTransformEngine: failed to read arguments");
+    return NULL;
+  }
 
   if (argc < 8) {
     napi_throw_error(env, NULL, "runScriptTransformEngine requires 8 arguments");
@@ -4087,7 +4149,17 @@ static napi_value napi_create_engine(napi_env env, napi_callback_info info) {
         return NULL;
     }
 
-    napi_value out; napi_create_int64(env, (int64_t)rec->handle, &out);
+    napi_value out;
+    if (napi_create_int64(env, (int64_t)rec->handle, &out) != napi_ok) {
+        uv_mutex_lock(&g_mutex);
+        engine_bridge_t** pp = &g_bridges;
+        while (*pp != NULL) { if (*pp == rec) { *pp = rec->next; break; } pp = &(*pp)->next; }
+        uv_mutex_unlock(&g_mutex);
+        bridge_finalize(rec, /*env_still_alive=*/true, /*do_registry_remove=*/true, /*may_rehook=*/false);
+        uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+        napi_throw_error(env, NULL, "Failed to create engine handle value");
+        return NULL;
+    }
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     return out;
 }
@@ -4097,7 +4169,10 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
     if (native_callback_active()) return throw_callback_reentrancy(env);
     if (!fn_create_engine_with_resolver) { napi_throw_error(env, NULL, "create_engine_with_resolver not available in native library"); return NULL; }
     size_t argc = 1; napi_value argv[1];
-    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok) {
+        napi_throw_error(env, NULL, "createEngineWithResolver: failed to read arguments");
+        return NULL;
+    }
     if (argc < 1) { napi_throw_error(env, NULL, "createEngineWithResolver requires (resolverCallback)"); return NULL; }
 
     engine_bridge_t* bridge = (engine_bridge_t*)calloc(1, sizeof(engine_bridge_t));
@@ -4229,7 +4304,17 @@ static napi_value napi_create_engine_with_resolver(napi_env env, napi_callback_i
         napi_throw_error(env, NULL, "Failed to register engine cleanup hook");
         return NULL;
     }
-    napi_value out; napi_create_int64(env, (int64_t)bridge->handle, &out);
+    napi_value out;
+    if (napi_create_int64(env, (int64_t)bridge->handle, &out) != napi_ok) {
+        uv_mutex_lock(&g_mutex);
+        engine_bridge_t** pp = &g_bridges;
+        while (*pp != NULL) { if (*pp == bridge) { *pp = bridge->next; break; } pp = &(*pp)->next; }
+        uv_mutex_unlock(&g_mutex);
+        bridge_finalize(bridge, /*env_still_alive=*/true, /*do_registry_remove=*/true, /*may_rehook=*/false);
+        uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
+        napi_throw_error(env, NULL, "Failed to create engine handle value");
+        return NULL;
+    }
     uv_mutex_lock(&g_mutex); g_active_ops--; uv_cond_broadcast(&g_teardown_cond); uv_mutex_unlock(&g_mutex);
     return out;
 }
@@ -4239,7 +4324,10 @@ static napi_value napi_destroy_engine(napi_env env, napi_callback_info info) {
     if (native_callback_active()) return throw_callback_reentrancy(env);
     if (!g_initialized) return NULL;
     size_t argc = 1; napi_value argv[1];
-    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok) {
+        napi_throw_error(env, NULL, "destroyEngine: failed to read arguments");
+        return NULL;
+    }
     if (argc < 1) { napi_throw_error(env, NULL, "destroyEngine requires (handle)"); return NULL; }
     int64_t handle64;
     if (napi_get_value_int64(env, argv[0], &handle64) != napi_ok) {
@@ -4381,7 +4469,10 @@ static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) 
     if (!g_initialized) { napi_throw_error(env, NULL, "Not initialized. Call initialize() first."); return NULL; }
     if (!fn_run_script_engine) { napi_throw_error(env, NULL, "run_script_engine not available in native library"); return NULL; }
     size_t argc = 3; napi_value argv[3];
-    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, NULL) != napi_ok) {
+        napi_throw_error(env, NULL, "runScriptEngine: failed to read arguments");
+        return NULL;
+    }
     if (argc < 3) { napi_throw_error(env, NULL, "runScriptEngine requires (handle, script, inputsJson)"); return NULL; }
     int64_t handle64;
     if (napi_get_value_int64(env, argv[0], &handle64) != napi_ok) {
@@ -4487,8 +4578,14 @@ static napi_value napi_run_script_engine(napi_env env, napi_callback_info info) 
     drain_stranded_bridges();
 
     napi_value out;
-    if (result_copy) { napi_create_string_utf8(env, result_copy, NAPI_AUTO_LENGTH, &out); free(result_copy); }
-    else { napi_create_string_utf8(env, "", 0, &out); }
+    napi_status value_status = result_copy
+        ? napi_create_string_utf8(env, result_copy, NAPI_AUTO_LENGTH, &out)
+        : napi_create_string_utf8(env, "", 0, &out);
+    free(result_copy);
+    if (value_status != napi_ok) {
+        napi_throw_error(env, NULL, "Failed to create script result value");
+        return NULL;
+    }
     return out;
 }
 
