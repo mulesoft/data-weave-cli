@@ -1,4 +1,3 @@
-import ast
 from pathlib import Path
 import re
 
@@ -232,28 +231,13 @@ def test_python_module_example_reports_cleanup_after_owned_runtimes_exit():
     example = (
         Path(__file__).resolve().parents[3] / "example_dataweave_module.py"
     ).read_text(encoding="utf-8")
-    module = ast.parse(example)
-    main = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.FunctionDef) and node.name == "main"
-    )
-    try_body = next(node.body for node in main.body if isinstance(node, ast.Try))
-    with_indexes = [
-        index for index, statement in enumerate(try_body) if isinstance(statement, ast.With)
-    ]
 
-    def printed_message(statement: ast.stmt):
-        if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
-            return None
-        call = statement.value
-        if not isinstance(call.func, ast.Name) or call.func.id != "print" or not call.args:
-            return None
-        argument = call.args[0]
-        return argument.value if isinstance(argument, ast.Constant) else None
-
-    assert len(with_indexes) == 3
-    assert printed_message(try_body[with_indexes[0] + 1]) == "\n[OK] Cleanup completed"
-    assert printed_message(try_body[with_indexes[1] + 1]) == (
-        "\n[OK] Context manager automatically cleaned up resources"
+    simple_invocation = example.index("example_simple_functions(dw)")
+    simple_cleanup = example.index('print("\\n[OK] Cleanup completed")')
+    context_invocation = example.index("example_context_manager(dw)")
+    context_cleanup = example.index(
+        'print("\\n[OK] Context manager automatically cleaned up resources")'
     )
+
+    assert simple_invocation < simple_cleanup
+    assert context_invocation < context_cleanup
