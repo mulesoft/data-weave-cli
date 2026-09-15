@@ -157,15 +157,14 @@ def _tck_report_identifier(report):
     return report.nodeid.split("::test_tck_scenario[", 1)[1].rsplit("]", 1)[0]
 
 
-@pytest.fixture(autouse=True)
-def clean_dataweave_runtime(request):
-    """Keep module-level isolate state from leaking between integration tests."""
-    if request.node.get_closest_marker("tck"):
-        yield
-        return
-    dataweave.cleanup()
-    yield
-    dataweave.cleanup()
+@pytest.fixture
+def runtime():
+    instance = dataweave.DataWeave()
+    instance.initialize()
+    try:
+        yield instance
+    finally:
+        instance.cleanup()
 
 
 def _tck_runtime():
