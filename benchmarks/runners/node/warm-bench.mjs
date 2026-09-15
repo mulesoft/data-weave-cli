@@ -34,7 +34,7 @@ async function drain(gen) {
 /**
  * @returns {Promise<Array<{id,metric,unit,stats,iterations}>>}
  */
-export async function runWarmAndStreaming(api, manifest) {
+export async function runWarmAndStreaming(dw, manifest) {
   const rows = [];
 
   for (const c of casesForMetric(manifest, "warm")) {
@@ -43,11 +43,11 @@ export async function runWarmAndStreaming(api, manifest) {
     const warmup = c.iterations?.warmup ?? 10;
     const iters = c.iterations?.warm ?? 100;
 
-    for (let i = 0; i < warmup; i++) assertOk(api.run(script, inputs));
+    for (let i = 0; i < warmup; i++) assertOk(dw.run(script, inputs));
     const samples = [];
     for (let i = 0; i < iters; i++) {
       const start = nowNs();
-      assertOk(api.run(script, inputs));
+      assertOk(dw.run(script, inputs));
       samples.push(msSince(start));
     }
     rows.push({ id: c.id, metric: "warm", unit: "ms", stats: computeStats(samples), iterations: iters });
@@ -62,7 +62,7 @@ export async function runWarmAndStreaming(api, manifest) {
     const mbps = [];
     for (let i = 0; i < iters; i++) {
       const start = nowNs();
-      const gen = api.runTransform(script, chunked(primary.buffer), {
+      const gen = dw.runTransform(script, chunked(primary.buffer), {
         inputName: primaryName,
         mimeType: primary.mimeType,
         charset: primary.charset,

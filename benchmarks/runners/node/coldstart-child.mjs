@@ -37,5 +37,5 @@ const result = dw.run(script, inputs);
 const firstRunMs = msSince(runStart);
 if (!result.success) throw new Error(`first run failed: ${result.error}`);
 
-dw.cleanup();
+await dw.cleanup();
 process.stdout.write(JSON.stringify({ firstRunMs }) + "\n");

@@ -42,12 +42,35 @@ test("DW_BENCH_NODE_PACKAGE set to valid package dir loads", async () => {
   const distDir = join(packageDir, "dist");
   mkdirSync(distDir, { recursive: true });
   writeFileSync(join(packageDir, "package.json"), '{"type":"module"}');
-  writeFileSync(join(distDir, "index.js"), "export function run() { return null; }");
+  writeFileSync(
+    join(distDir, "index.js"),
+    "export class DataWeave { initialize() {} run() { return null; } cleanup() {} }",
+  );
 
   process.env.DW_BENCH_NODE_PACKAGE = packageDir;
   try {
     const api = await loadWrapper();
-    assert.equal(typeof api.run, "function");
+    assert.equal(typeof api.DataWeave, "function");
+  } finally {
+    if (orig !== undefined) {
+      process.env.DW_BENCH_NODE_PACKAGE = orig;
+    } else {
+      delete process.env.DW_BENCH_NODE_PACKAGE;
+    }
+  }
+});
+
+test("DW_BENCH_NODE_PACKAGE without a DataWeave constructor throws", async () => {
+  const orig = process.env.DW_BENCH_NODE_PACKAGE;
+  const packageDir = makeTempDir();
+  const distDir = join(packageDir, "dist");
+  mkdirSync(distDir, { recursive: true });
+  writeFileSync(join(packageDir, "package.json"), '{"type":"module"}');
+  writeFileSync(join(distDir, "index.js"), "export function run() { return null; }");
+
+  process.env.DW_BENCH_NODE_PACKAGE = packageDir;
+  try {
+    await assert.rejects(loadWrapper, /did not export a DataWeave constructor/);
   } finally {
     if (orig !== undefined) {
       process.env.DW_BENCH_NODE_PACKAGE = orig;
@@ -64,7 +87,7 @@ test("DW_BENCH_NODE_PACKAGE resolves its wrapper and native library", () => {
   const nativeDir = join(packageDir, "native");
   mkdirSync(distDir, { recursive: true });
   mkdirSync(nativeDir, { recursive: true });
-  writeFileSync(join(distDir, "index.js"), "export function run() { return null; }");
+  writeFileSync(join(distDir, "index.js"), "export class DataWeave {}");
   writeFileSync(join(nativeDir, "dwlib.dylib"), "fixture native library");
 
   process.env.DW_BENCH_NODE_PACKAGE = packageDir;
