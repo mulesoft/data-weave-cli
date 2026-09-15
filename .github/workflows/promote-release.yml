@@ -17,7 +17,7 @@ on:
           - node
           - all
       dry_run:
-        description: Print formula changes without opening a tap PR
+        description: Validate the selected promotion and print changes without publishing
         required: false
         type: boolean
         default: false
