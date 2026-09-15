@@ -32,10 +32,12 @@ native worker attaches and detaches its own isolate thread. Callback exceptions
 return `-1` and never unwind across the C ABI. Stream input retains remainders
 when the iterable source provides chunks larger than the native buffer.
 
-`Stream.close()` and its context manager request cancellation. Python cannot
-forcibly interrupt a native call, so cleanup uses a short bounded join and an
-unresponsive worker is daemonized; finalization never raises. Low-level callback
-input larger than the supplied native buffer is rejected rather than truncated.
+`Stream.close()` and its context manager request cancellation. This design
+originally used a short bounded join and daemonized an unresponsive worker; that
+cleanup behavior was subsequently superseded. Python cannot forcibly interrupt
+a native call, so current explicit-instance `DataWeave.cleanup()` refuses while
+an active registered streaming worker remains attached. Low-level callback input
+larger than the supplied native buffer is rejected rather than truncated.
 
 ## Testing And TCK
 

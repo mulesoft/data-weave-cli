@@ -714,9 +714,10 @@ active worker at cleanup → reject without joining or cancelling the worker; it
   W-23692110 regression (two independent resolvers in one process); unknown/destroyed-handle
   envelopes for all three run paths; the deadlock regression (active stream + `cleanup()` +
   concurrent `run()` resolves within a bounded timeout); same-instance lifecycle; ref-count-proxy
-  teardown assertions; and `worker_threads` Worker lifecycle including **normal Worker exit without
-  `cleanup()`** (the abandonment / init-reference-release proof), `Worker.terminate()` mid-life,
-  and explicit in-Worker `cleanup()`.
+  teardown assertions; and `worker_threads` Worker lifecycle including **abnormal owner-env
+  reclamation when a Worker exits without `cleanup()`** (resource-safety coverage for the
+  abandonment / init-reference-release path, not an endorsed high-level lifecycle),
+  `Worker.terminate()` mid-life, and explicit in-Worker `cleanup()`.
 - **Node unit** (`ffi` mocked, no dwlib): `DataWeave.initialize()` ref-count/rollback safety;
   instance `cleanup()` coalescing; absence of package-level execution exports and process hooks;
   `stream.ts` rejection propagation; `runTransform` post-pre-buffer re-check; `doCleanup()`

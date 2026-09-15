@@ -109,22 +109,28 @@ try {
 ### `DataWeave` Class
 
 Construct one `DataWeave` per lifecycle owner, call `initialize()` before use,
-and always await `cleanup()` in `finally`. The examples below show method bodies;
-use them inside that lifecycle pattern.
+and always await `cleanup()` in `finally`.
 
 #### `dw.run(script, inputs?, opts?): ExecutionResult`
 
 Execute a DataWeave script and return the complete result.
 
 ```javascript
-const result = dw.run(
-  '%dw 2.0\noutput application/json\n---\npayload.items map $.price',
-  { payload: { items: [{ price: 10 }, { price: 20 }] } }
-);
+import { DataWeave } from 'dataweave-native';
 
-if (result.success) {
-  console.log(result.getString());  // "[10, 20]"
-  console.log(result.mimeType);     // "application/json"
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const result = dw.run(
+    '%dw 2.0\noutput application/json\n---\npayload.items map $.price',
+    { payload: { items: [{ price: 10 }, { price: 20 }] } }
+  );
+  if (result.success) {
+    console.log(result.getString());  // "[10, 20]"
+    console.log(result.mimeType);     // "application/json"
+  }
+} finally {
+  await dw.cleanup();
 }
 ```
 
@@ -149,21 +155,25 @@ if (result.success) {
 Execute a DataWeave script with streaming output.
 
 ```javascript
-const generator = dw.runStreaming(
-  '%dw 2.0\noutput application/json\n---\n[1, 2, 3, 4, 5]'
-);
+import { DataWeave } from 'dataweave-native';
 
-// Iterate manually with next() to capture the terminal return value. A
-// `for await` loop consumes the generator's return value internally, so a later
-// generator.return() would yield { value: undefined } -- drive next() yourself
-// and read the metadata off the terminal { done: true, value: StreamingResult }.
-let meta;
-while (true) {
-  const { value, done } = await generator.next();
-  if (done) { meta = value; break; }
-  console.log('Chunk:', value.toString());
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const generator = dw.runStreaming(
+    '%dw 2.0\noutput application/json\n---\n[1, 2, 3, 4, 5]'
+  );
+  // Drive next() manually to capture the terminal StreamingResult.
+  let meta;
+  while (true) {
+    const { value, done } = await generator.next();
+    if (done) { meta = value; break; }
+    console.log('Chunk:', value.toString());
+  }
+  console.log('MIME type:', meta.mimeType);
+} finally {
+  await dw.cleanup();
 }
-console.log('MIME type:', meta.mimeType);
 ```
 
 **Parameters:**
@@ -184,6 +194,7 @@ console.log('MIME type:', meta.mimeType);
 Execute a DataWeave script with streaming input and output (bidirectional streaming).
 
 ```javascript
+import { DataWeave } from 'dataweave-native';
 import { readFileSync } from 'fs';
 
 // The native read callback is synchronous, so an ASYNC input iterable (e.g.
@@ -196,19 +207,24 @@ function* chunked(buf, size = 65536) {
   for (let i = 0; i < buf.length; i += size) yield buf.subarray(i, i + size);
 }
 
-const generator = dw.runTransform(
-  '%dw 2.0\noutput application/json\n---\npayload',
-  chunked(readFileSync('large-file.csv')),
-  {
-    inputName: 'payload',
-    mimeType: 'application/csv',
-    charset: 'UTF-8',
-    inputs: { threshold: 100 }
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const generator = dw.runTransform(
+    '%dw 2.0\noutput application/json\n---\npayload',
+    chunked(readFileSync('large-file.csv')),
+    {
+      inputName: 'payload',
+      mimeType: 'application/csv',
+      charset: 'UTF-8',
+      inputs: { threshold: 100 }
+    }
+  );
+  for await (const chunk of generator) {
+    process.stdout.write(chunk);
   }
-);
-
-for await (const chunk of generator) {
-  process.stdout.write(chunk);
+} finally {
+  await dw.cleanup();
 }
 ```
 
@@ -508,18 +524,27 @@ try {
 ### Result-Based Error Handling
 
 ```javascript
-const result = dw.run('invalid syntax');
-if (!result.success) {
-  console.error('Execution failed:', result.error);
-  // Error: Unexpected token 'syntax'
+import { DataWeave } from 'dataweave-native';
+
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const result = dw.run('invalid syntax');
+  if (!result.success) {
+    console.error('Execution failed:', result.error);
+  }
+} finally {
+  await dw.cleanup();
 }
 ```
 
 ### Exception-Based Error Handling
 
 ```javascript
-import { DataWeaveScriptError } from 'dataweave-native';
+import { DataWeave, DataWeaveScriptError } from 'dataweave-native';
 
+const dw = new DataWeave();
+dw.initialize();
 try {
   dw.run('invalid syntax', {}, { raiseOnError: true });
 } catch (err) {
@@ -527,12 +552,18 @@ try {
     console.error('Script error:', err.message);
     console.error('Result:', err.result.error);
   }
+} finally {
+  await dw.cleanup();
 }
 ```
 
 ### Streaming Error Handling
 
 ```javascript
+import { DataWeave } from 'dataweave-native';
+
+const dw = new DataWeave();
+dw.initialize();
 try {
   const generator = dw.runStreaming('invalid syntax');
   // Drive next() manually so the terminal { done: true, value: StreamingResult }
@@ -549,6 +580,8 @@ try {
   }
 } catch (err) {
   console.error('Native error:', err);
+} finally {
+  await dw.cleanup();
 }
 ```
 

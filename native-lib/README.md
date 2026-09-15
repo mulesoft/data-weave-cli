@@ -613,21 +613,26 @@ try {
 Use `runStreaming` to execute a script and receive output chunks as they are produced, without buffering the entire result in memory. Returns an `AsyncGenerator<Buffer, StreamingResult>`.
 
 ```typescript
-const gen = dw.runStreaming(
-  'output application/json --- (1 to 10000) map {id: $, name: "item_" ++ $}'
-);
-
-let result = await gen.next();
-while (!result.done) {
-  process.stdout.write(result.value);
-  result = await gen.next();
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const gen = dw.runStreaming(
+    'output application/json --- (1 to 10000) map {id: $, name: "item_" ++ $}'
+  );
+  let result = await gen.next();
+  while (!result.done) {
+    process.stdout.write(result.value);
+    result = await gen.next();
+  }
+  const metadata = result.value; // StreamingResult
+  console.log(`\nDone: ${metadata.mimeType}, ${metadata.charset}`);
+} finally {
+  await dw.cleanup();
 }
-
-const metadata = result.value; // StreamingResult
-console.log(`\nDone: ${metadata.mimeType}, ${metadata.charset}`);
 ```
 
-Or with `for await`:
+Or replace the `try` body above with this `for await` fragment when terminal
+metadata is not needed:
 
 ```typescript
 const gen = dw.runStreaming("output application/csv --- payload", {
@@ -652,7 +657,7 @@ The native read callback is invoked synchronously on the JS main thread, which m
 - **Synchronous iterables** (arrays, generators) are consumed **on-demand** — only one chunk is held in memory at a time. This gives constant-memory streaming, comparable to the Python API.
 - **Async iterables** (e.g. `fs.createReadStream()`) **must be fully pre-buffered** into memory before the transform starts, because their `.next()` returns a Promise that cannot be awaited inside a synchronous callback.
 
-For large inputs, prefer a **synchronous generator** to get true streaming with minimal memory:
+For large inputs, prefer a **synchronous generator** to get true streaming with minimal memory. This complete example owns the instance:
 
 ```typescript
 import { readFileSync } from "fs";
@@ -663,11 +668,22 @@ function* chunked(data: Buffer, size = 8192): Generator<Buffer> {
     yield data.subarray(i, i + size);
   }
 }
-const gen = dw.runTransform("output csv --- payload", chunked(readFileSync("large.json")), {
-  mimeType: "application/json",
-});
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const gen = dw.runTransform("output csv --- payload", chunked(readFileSync("large.json")), {
+    mimeType: "application/json",
+  });
+  for await (const chunk of gen) {
+    process.stdout.write(chunk);
+  }
+} finally {
+  await dw.cleanup();
+}
 ```
 
+The remaining transform snippets are non-standalone `try`-body fragments for the
+same construct/initialize/`finally { await dw.cleanup(); }` lifecycle above.
 Using an async readable stream still works but will buffer the entire input first:
 
 ```typescript
