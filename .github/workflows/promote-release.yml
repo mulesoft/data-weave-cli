@@ -7,6 +7,15 @@ on:
         description: GitHub release tag (v1.2.3)
         required: true
         type: string
+      artifact:
+        description: Artifact to promote
+        required: true
+        type: choice
+        default: all
+        options:
+          - cli
+          - node
+          - all
       dry_run:
         description: Print formula changes without opening a tap PR
         required: false
@@ -18,6 +27,7 @@ permissions:
 
 jobs:
   homebrew:
+    if: inputs.artifact == 'cli' || inputs.artifact == 'all'
     runs-on: mulesoft-ubuntu
     steps:
       - uses: actions/checkout@v4
@@ -108,3 +118,115 @@ jobs:
               --title "Promote dw ${VERSION}" \
               --body "From ${TAG} asset ${ASSET} sha256 ${SHA}"
           fi
+
+  node:
+    if: inputs.artifact == 'node' || inputs.artifact == 'all'
+    runs-on: mulesoft-ubuntu
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: https://registry.npmjs.org
+      - name: Verify Node package versions are not published
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          PACKAGES=(
+            dataweave-native-linux-x64
+            dataweave-native-win32-x64
+            dataweave-native-darwin-arm64
+            dataweave-native
+          )
+
+          for PACKAGE in "${PACKAGES[@]}"; do
+            set +e
+            OUTPUT=$(npm view "${PACKAGE}@${VERSION}" version --json 2>&1)
+            STATUS=$?
+            set -e
+            if [ "$STATUS" -eq 0 ]; then
+              echo "Node package version already exists: ${PACKAGE}@${VERSION}"
+              exit 1
+            fi
+            if ! printf '%s\n' "$OUTPUT" | grep -q 'E404'; then
+              echo "Unable to determine whether ${PACKAGE}@${VERSION} exists"
+              printf '%s\n' "$OUTPUT"
+              exit "$STATUS"
+            fi
+          done
+      - name: Print Node package promotion
+        if: inputs.dry_run
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          for PACKAGE in \
+            dataweave-native-linux-x64 \
+            dataweave-native-win32-x64 \
+            dataweave-native-darwin-arm64 \
+            dataweave-native; do
+            echo "npm publish ${PACKAGE}-${VERSION}.tgz --access public"
+          done
+      - name: Download and validate Node packages
+        if: inputs.dry_run == false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          RELEASE_DIR=$(mktemp -d)
+          echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
+          gh release download "$TAG" --dir "$RELEASE_DIR" \
+            --pattern "dataweave-native-${VERSION}.tgz" \
+            --pattern "dataweave-native-linux-x64-${VERSION}.tgz" \
+            --pattern "dataweave-native-win32-x64-${VERSION}.tgz" \
+            --pattern "dataweave-native-darwin-arm64-${VERSION}.tgz"
+
+          ASSETS=(
+            "dataweave-native-linux-x64-${VERSION}.tgz"
+            "dataweave-native-win32-x64-${VERSION}.tgz"
+            "dataweave-native-darwin-arm64-${VERSION}.tgz"
+            "dataweave-native-${VERSION}.tgz"
+          )
+          PACKAGES=(
+            dataweave-native-linux-x64
+            dataweave-native-win32-x64
+            dataweave-native-darwin-arm64
+            dataweave-native
+          )
+
+          for INDEX in "${!ASSETS[@]}"; do
+            ASSET="$RELEASE_DIR/${ASSETS[$INDEX]}"
+            PACKAGE="${PACKAGES[$INDEX]}"
+            if [ ! -f "$ASSET" ]; then
+              echo "Release asset is missing: ${ASSETS[$INDEX]}"
+              exit 1
+            fi
+            tar -xOzf "$ASSET" package/package.json | node --input-type=module -e '
+              import { readFileSync } from "node:fs";
+              const packageJson = JSON.parse(readFileSync(0, "utf8"));
+              const [expectedName, expectedVersion] = process.argv.slice(1);
+              if (packageJson.name !== expectedName || packageJson.version !== expectedVersion) {
+                throw new Error(`Expected ${expectedName}@${expectedVersion}, found ${packageJson.name}@${packageJson.version}`);
+              }
+            ' "$PACKAGE" "$VERSION"
+          done
+      - name: Publish Node packages
+        if: inputs.dry_run == false
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          RELEASE_DIR: ${{ env.RELEASE_DIR }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          for ASSET in \
+            "dataweave-native-linux-x64-${VERSION}.tgz" \
+            "dataweave-native-win32-x64-${VERSION}.tgz" \
+            "dataweave-native-darwin-arm64-${VERSION}.tgz" \
+            "dataweave-native-${VERSION}.tgz"; do
+            npm publish "$RELEASE_DIR/$ASSET" --access public
+          done
