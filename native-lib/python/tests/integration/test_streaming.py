@@ -53,8 +53,8 @@ def test_real_native_precreated_stream_rejects_stale_generation(create_stream):
 
 
 @pytest.mark.integration
-def test_run_streaming_returns_chunks_and_metadata(collect_stream):
-    output, metadata = collect_stream(dataweave.run_streaming("output application/json --- {a: 1, b: 2}"))
+def test_run_streaming_returns_chunks_and_metadata(runtime, collect_stream):
+    output, metadata = collect_stream(runtime.run_streaming("output application/json --- {a: 1, b: 2}"))
 
     text = output.decode(metadata.charset or "utf-8")
     assert output
@@ -64,8 +64,8 @@ def test_run_streaming_returns_chunks_and_metadata(collect_stream):
 
 
 @pytest.mark.integration
-def test_run_streaming_splits_large_output_into_multiple_chunks(collect_stream):
-    stream = dataweave.run_streaming('output application/json --- (1 to 5000) map {id: $, name: "item_" ++ $}')
+def test_run_streaming_splits_large_output_into_multiple_chunks(runtime, collect_stream):
+    stream = runtime.run_streaming('output application/json --- (1 to 5000) map {id: $, name: "item_" ++ $}')
     chunks = list(stream)
     output = b"".join(chunks)
     metadata = stream.metadata
@@ -77,8 +77,8 @@ def test_run_streaming_splits_large_output_into_multiple_chunks(collect_stream):
 
 
 @pytest.mark.integration
-def test_run_streaming_returns_error_metadata(collect_stream):
-    output, metadata = collect_stream(dataweave.run_streaming("output application/json --- invalid_var"))
+def test_run_streaming_returns_error_metadata(runtime, collect_stream):
+    output, metadata = collect_stream(runtime.run_streaming("output application/json --- invalid_var"))
 
     assert metadata.success is False
     assert metadata.error is not None
@@ -86,16 +86,16 @@ def test_run_streaming_returns_error_metadata(collect_stream):
 
 
 @pytest.mark.integration
-def test_run_streaming_accepts_input_bindings(collect_stream):
-    output, metadata = collect_stream(dataweave.run_streaming("num1 + num2", {"num1": 25, "num2": 17}))
+def test_run_streaming_accepts_input_bindings(runtime, collect_stream):
+    output, metadata = collect_stream(runtime.run_streaming("num1 + num2", {"num1": 25, "num2": 17}))
 
     assert metadata.success is True
     assert output.decode(metadata.charset or "utf-8").strip() == "42"
 
 
 @pytest.mark.integration
-def test_run_transform_streams_iterable_input(collect_stream):
-    stream = dataweave.run_transform(
+def test_run_transform_streams_iterable_input(runtime, collect_stream):
+    stream = runtime.run_transform(
         "output application/json\n---\npayload map ($ * 2)",
         input_stream=[b"[10, 20, 30, 40, 50]"],
         input_mime_type="application/json",
@@ -109,14 +109,14 @@ def test_run_transform_streams_iterable_input(collect_stream):
 
 
 @pytest.mark.integration
-def test_run_transform_reads_chunked_input(collect_stream):
+def test_run_transform_reads_chunked_input(runtime, collect_stream):
     input_data = b"[" + b",".join(f'{{"id":{index}}}'.encode() for index in range(1, 1001)) + b"]"
 
     def chunked():
         for index in range(0, len(input_data), 4096):
             yield input_data[index:index + 4096]
 
-    stream = dataweave.run_transform(
+    stream = runtime.run_transform(
         "output application/json\n---\nsizeOf(payload)",
         input_stream=chunked(),
         input_mime_type="application/json",
@@ -128,11 +128,11 @@ def test_run_transform_reads_chunked_input(collect_stream):
 
 
 @pytest.mark.integration
-def test_run_transform_preserves_large_single_input_chunk(collect_stream):
+def test_run_transform_preserves_large_single_input_chunk(runtime, collect_stream):
     payload = json.dumps([{"id": index, "name": f"item_{index}", "value": index * 3} for index in range(1, 2001)]).encode()
     assert len(payload) > 8192
 
-    stream = dataweave.run_transform(
+    stream = runtime.run_transform(
         "output application/json\n---\nsizeOf(payload)",
         input_stream=iter([payload]),
         input_mime_type="application/json",
@@ -144,10 +144,10 @@ def test_run_transform_preserves_large_single_input_chunk(collect_stream):
 
 
 @pytest.mark.integration
-def test_run_transform_reads_file_input(collect_stream):
+def test_run_transform_reads_file_input(runtime, collect_stream):
     xml_path = Path(__file__).resolve().parents[1] / "person.xml"
     with xml_path.open("rb") as source:
-        stream = dataweave.run_transform(
+        stream = runtime.run_transform(
             "output application/csv header=true\n---\n[payload.person]",
             input_stream=iter(lambda: source.read(4096), b""),
             input_mime_type="application/xml",
