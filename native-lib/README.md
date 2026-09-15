@@ -173,12 +173,16 @@ All examples below assume:
 import dataweave
 ```
 
+Each `DataWeave` instance owns an engine. Use a context manager so the engine is
+destroyed and its shared-isolate reference is released deterministically.
+
 ### 1) Simple script
 
 ```python
-result = dataweave.run("2 + 2")
-assert result.success is True
-print(result.get_string())  # "4"
+with dataweave.DataWeave() as dw:
+    result = dw.run("2 + 2")
+    assert result.success is True
+    print(result.get_string())  # "4"
 ```
 
 ### 2) Script with inputs (auto-detected types)
@@ -186,11 +190,12 @@ print(result.get_string())  # "4"
 Inputs can be plain Python values. The module auto-encodes them as JSON or text.
 
 ```python
-result = dataweave.run(
-    "num1 + num2",
-    {"num1": 25, "num2": 17},
-)
-print(result.get_string())  # "42"
+with dataweave.DataWeave() as dw:
+    result = dw.run(
+        "num1 + num2",
+        {"num1": 25, "num2": 17},
+    )
+    print(result.get_string())  # "42"
 ```
 
 ### 3) Script with inputs (explicit mime type, charset, properties)
@@ -201,25 +206,26 @@ Use an explicit input dict when you need full control over how DataWeave interpr
 script = "payload.person"
 xml_bytes = b"<?xml version=\"1.0\" encoding=\"UTF-16\"?><person><name>Billy</name><age>31</age></person>".decode("utf-8").encode("utf-16")
 
-result = dataweave.run(
-    script,
-    {
-        "payload": {
-            "content": xml_bytes,
-            "mimeType": "application/xml",
-            "charset": "UTF-16",
-            "properties": {
-                "nullValueOn": "empty",
-                "maxAttributeSize": 256
-            },
-        }
-    },
-)
+with dataweave.DataWeave() as dw:
+    result = dw.run(
+        script,
+        {
+            "payload": {
+                "content": xml_bytes,
+                "mimeType": "application/xml",
+                "charset": "UTF-16",
+                "properties": {
+                    "nullValueOn": "empty",
+                    "maxAttributeSize": 256
+                },
+            }
+        },
+    )
 
-if result.success:
-    print(result.get_string())
-else:
-    print(result.error)
+    if result.success:
+        print(result.get_string())
+    else:
+        print(result.error)
 ```
 
 You can also use `InputValue` for the same purpose:
@@ -231,13 +237,16 @@ input_value = dataweave.InputValue(
     properties={"header": False, "separator": "4"},
 )
 
-result = dataweave.run("in0.column_1[0]", {"in0": input_value})
-print(result.get_string())  # '"567"'
+with dataweave.DataWeave() as dw:
+    result = dw.run("in0.column_1[0]", {"in0": input_value})
+    print(result.get_string())  # '"567"'
 ```
 
-### 4) Context manager (explicit lifecycle)
+### 4) Reuse one instance
 
-The module-level API (`dataweave.run(...)`) uses a shared singleton. Use `DataWeave` directly when you need explicit control over isolate lifecycle or want multiple independent instances:
+Reuse one initialized instance for related calls. Different instances own
+independent engine handles and may use different module resolvers, while sharing
+the binding's process-wide GraalVM isolate:
 
 ```python
 with dataweave.DataWeave() as dw:
@@ -260,8 +269,9 @@ There are three error types:
 
 ```python
 try:
-    result = dataweave.run("invalid syntax here", raise_on_error=True)
-    print(result.get_string())
+    with dataweave.DataWeave() as dw:
+        result = dw.run("invalid syntax here", raise_on_error=True)
+        print(result.get_string())
 
 except dataweave.DataWeaveScriptError as e:
     print(f"Script error: {e.result.error}")
@@ -274,12 +284,13 @@ except dataweave.DataWeaveLibraryNotFoundError:
 **Option B: Check `result.success` manually (default, backward-compatible)**
 
 ```python
-result = dataweave.run("invalid syntax here")
+with dataweave.DataWeave() as dw:
+    result = dw.run("invalid syntax here")
 
-if not result.success:
-    print(f"Error: {result.error}")
-else:
-    print(result.get_string())
+    if not result.success:
+        print(f"Error: {result.error}")
+    else:
+        print(result.get_string())
 ```
 
 ### 6) Output streaming
@@ -295,41 +306,36 @@ with dataweave.DataWeave() as dw:
     print(f"\nDone: {metadata.mime_type}, {metadata.charset}")
 ```
 
-Or with the module-level API:
-
-```python
-stream = dataweave.run_streaming("output application/csv --- payload", {"payload": [1, 2, 3]})
-output = b"".join(stream)
-```
-
 ### 7) Input and output streaming
 
 Use `run_transform` to stream both input and output — feed an iterable of bytes in, receive a generator of bytes out. Ideal for processing large files or network streams with constant memory.
 
 ```python
 # Stream a file through DataWeave
-with open("large.json", "rb") as f:
-    stream = dataweave.run_transform(
-        "output application/csv --- payload",
-        input_stream=iter(lambda: f.read(8192), b""),
-        input_mime_type="application/json",
-    )
-    with open("output.csv", "wb") as out:
-        for chunk in stream:
-            out.write(chunk)
-    metadata = stream.metadata
+with dataweave.DataWeave() as dw:
+    with open("large.json", "rb") as f:
+        stream = dw.run_transform(
+            "output application/csv --- payload",
+            input_stream=iter(lambda: f.read(8192), b""),
+            input_mime_type="application/json",
+        )
+        with open("output.csv", "wb") as out:
+            for chunk in stream:
+                out.write(chunk)
+        metadata = stream.metadata
 ```
 
 Works with any iterable — generators, lists, network sockets:
 
 ```python
 # From an in-memory list
-stream = dataweave.run_transform(
-    "output application/json --- payload map ($ * $)",
-    input_stream=[b"[1,2,3,4,5]"],
-    input_mime_type="application/json",
-)
-print(b"".join(stream))  # [1,4,9,16,25]
+with dataweave.DataWeave() as dw:
+    stream = dw.run_transform(
+        "output application/json --- payload map ($ * $)",
+        input_stream=[b"[1,2,3,4,5]"],
+        input_mime_type="application/json",
+    )
+    print(b"".join(stream))  # [1,4,9,16,25]
 ```
 
 ```python
@@ -338,13 +344,14 @@ def read_from_network(sock):
     while chunk := sock.recv(4096):
         yield chunk
 
-stream = dataweave.run_transform(
-    "output application/json --- sizeOf(payload)",
-    input_stream=read_from_network(conn),
-    input_mime_type="application/json",
-)
-for chunk in stream:
-    process(chunk)
+with dataweave.DataWeave() as dw:
+    stream = dw.run_transform(
+        "output application/json --- sizeOf(payload)",
+        input_stream=read_from_network(conn),
+        input_mime_type="application/json",
+    )
+    for chunk in stream:
+        process(chunk)
 ```
 
 ### 8) I/O streaming with callbacks (low-level)
@@ -366,16 +373,17 @@ def write_cb(data):
     chunks.append(data)
     return 0  # 0 = success
 
-result = dataweave.run_input_output_callback(
-    "output application/json deferred=true --- payload map ($ * $)",
-    input_name="payload",
-    input_mime_type="application/json",
-    read_callback=read_cb,
-    write_callback=write_cb,
-)
+with dataweave.DataWeave() as dw:
+    result = dw.run_input_output_callback(
+        "output application/json deferred=true --- payload map ($ * $)",
+        input_name="payload",
+        input_mime_type="application/json",
+        read_callback=read_cb,
+        write_callback=write_cb,
+    )
 
-print(result)            # StreamingResult(success=True, ...)
-print(b"".join(chunks))  # [1,4,9,16,25]
+    print(result)            # StreamingResult(success=True, ...)
+    print(b"".join(chunks))  # [1,4,9,16,25]
 ```
 
 ---
@@ -458,14 +466,23 @@ The module also searches:
 All examples below assume:
 
 ```typescript
-import { run, runStreaming, runTransform, cleanup } from "dataweave-native";
+import { DataWeave } from "dataweave-native";
 ```
+
+Construct and initialize an instance before execution, then await its cleanup in
+a `finally` block. Node cleanup is asynchronous.
 
 ### 1) Simple script
 
 ```typescript
-const result = run("2 + 2");
-console.log(result.getString()); // "4"
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const result = dw.run("2 + 2");
+  console.log(result.getString()); // "4"
+} finally {
+  await dw.cleanup();
+}
 ```
 
 ### 2) Script with inputs (auto-detected types)
@@ -473,8 +490,14 @@ console.log(result.getString()); // "4"
 Inputs can be plain JS values. The module auto-encodes them as JSON.
 
 ```typescript
-const result = run("num1 + num2", { num1: 25, num2: 17 });
-console.log(result.getString()); // "42"
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const result = dw.run("num1 + num2", { num1: 25, num2: 17 });
+  console.log(result.getString()); // "42"
+} finally {
+  await dw.cleanup();
+}
 ```
 
 ### 3) Script with inputs (explicit mime type, charset, properties)
@@ -486,28 +509,34 @@ import { readFileSync } from "fs";
 
 const xmlBytes = readFileSync("person.xml");
 
-const result = run("payload.person", {
-  payload: {
-    content: xmlBytes,
-    mimeType: "application/xml",
-    charset: "UTF-16",
-    properties: {
-      nullValueOn: "empty",
-      maxAttributeSize: 256,
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const result = dw.run("payload.person", {
+    payload: {
+      content: xmlBytes,
+      mimeType: "application/xml",
+      charset: "UTF-16",
+      properties: {
+        nullValueOn: "empty",
+        maxAttributeSize: 256,
+      },
     },
-  },
-});
+  });
 
-if (result.success) {
-  console.log(result.getString());
-} else {
-  console.error(result.error);
+  if (result.success) {
+    console.log(result.getString());
+  } else {
+    console.error(result.error);
+  }
+} finally {
+  await dw.cleanup();
 }
 ```
 
-### 4) Explicit instance lifecycle
+### 4) Reuse one instance
 
-The module-level API (`run(...)`) uses a shared singleton. Use the `DataWeave` class directly when you need explicit control over isolate lifecycle:
+Reuse an initialized instance for related calls:
 
 ```typescript
 import { DataWeave } from "dataweave-native";
@@ -544,10 +573,12 @@ There are two error classes:
 **Option A: Use `raiseOnError: true` for try/catch (recommended)**
 
 ```typescript
-import { run, DataWeaveScriptError } from "dataweave-native";
+import { DataWeave, DataWeaveScriptError } from "dataweave-native";
 
+const dw = new DataWeave();
+dw.initialize();
 try {
-  const result = run("invalid syntax here", {}, { raiseOnError: true });
+  const result = dw.run("invalid syntax here", {}, { raiseOnError: true });
   console.log(result.getString());
 } catch (e) {
   if (e instanceof DataWeaveScriptError) {
@@ -555,18 +586,25 @@ try {
   } else {
     throw e;
   }
+} finally {
+  await dw.cleanup();
 }
 ```
 
 **Option B: Check `result.success` manually (default)**
 
 ```typescript
-const result = run("invalid syntax here");
-
-if (!result.success) {
-  console.error(`Error: ${result.error}`);
-} else {
-  console.log(result.getString());
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const result = dw.run("invalid syntax here");
+  if (!result.success) {
+    console.error(`Error: ${result.error}`);
+  } else {
+    console.log(result.getString());
+  }
+} finally {
+  await dw.cleanup();
 }
 ```
 
@@ -575,7 +613,7 @@ if (!result.success) {
 Use `runStreaming` to execute a script and receive output chunks as they are produced, without buffering the entire result in memory. Returns an `AsyncGenerator<Buffer, StreamingResult>`.
 
 ```typescript
-const gen = runStreaming(
+const gen = dw.runStreaming(
   'output application/json --- (1 to 10000) map {id: $, name: "item_" ++ $}'
 );
 
@@ -592,7 +630,7 @@ console.log(`\nDone: ${metadata.mimeType}, ${metadata.charset}`);
 Or with `for await`:
 
 ```typescript
-const gen = runStreaming("output application/csv --- payload", {
+const gen = dw.runStreaming("output application/csv --- payload", {
   payload: [1, 2, 3],
 });
 
@@ -625,7 +663,7 @@ function* chunked(data: Buffer, size = 8192): Generator<Buffer> {
     yield data.subarray(i, i + size);
   }
 }
-const gen = runTransform("output csv --- payload", chunked(readFileSync("large.json")), {
+const gen = dw.runTransform("output csv --- payload", chunked(readFileSync("large.json")), {
   mimeType: "application/json",
 });
 ```
@@ -638,7 +676,7 @@ import { createWriteStream } from "fs";
 
 // Works but pre-buffers the full input into memory
 const input = createReadStream("large.json");
-const gen = runTransform("output application/csv --- payload", input, {
+const gen = dw.runTransform("output application/csv --- payload", input, {
   mimeType: "application/json",
 });
 
@@ -654,7 +692,7 @@ Works with any iterable — arrays, generators, streams:
 ```typescript
 // From an in-memory array
 const input = [Buffer.from("[1,2,3,4,5]")];
-const gen = runTransform(
+const gen = dw.runTransform(
   "output application/json --- payload map ($ * $)",
   input,
   { mimeType: "application/json" }
@@ -676,7 +714,7 @@ function* chunked(data: Buffer, size = 4096): Generator<Buffer> {
 }
 
 const largeJson = Buffer.from(JSON.stringify(Array.from({ length: 1000 }, (_, i) => ({ id: i }))));
-const gen = runTransform(
+const gen = dw.runTransform(
   "output application/json --- sizeOf(payload)",
   chunked(largeJson),
   { mimeType: "application/json" }
@@ -693,7 +731,7 @@ Pass extra named inputs alongside the streamed input:
 
 ```typescript
 const input = [Buffer.from('[{"price": 100}, {"price": 200}]')];
-const gen = runTransform(
+const gen = dw.runTransform(
   "output application/json --- payload map ($.price * rate)",
   input,
   {
@@ -709,20 +747,15 @@ for await (const chunk of gen) {
 
 ### 9) Cleanup
 
-The module registers two process hooks to clean up automatically: `beforeExit`
-(async — it awaits cleanup so an in-flight streaming/transform op drains before
-the process exits normally) and `exit` (a synchronous best-effort fallback for
-`process.exit()` and uncaught exceptions, which cannot await the drain). Neither
-hook fires on `SIGTERM`/`SIGINT`/`SIGKILL`, so install your own signal handler
-that awaits `cleanup()` if you need a graceful drain on termination. For explicit
-control:
+The binding does not register process exit or signal hooks. Always call and await
+`dw.cleanup()` in `finally`. Cleanup closes this instance to new work, cancels and
+drains its active streaming/transform operations, destroys its engine, and
+releases its shared-isolate reference. If that is the final reference, the
+promise resolves after isolate teardown is attempted. An ordinary teardown
+failure retains the live isolate for a safe retry; an unrecoverable teardown and
+detach double failure emits a diagnostic and deliberately leaks that isolate for
+the remaining process lifetime. Other initialized instances remain usable.
 
-```typescript
-import { cleanup } from "dataweave-native";
-
-// When done with all DataWeave operations. cleanup() returns a Promise; await it.
-// Draining in-flight streaming/transform work and tearing down the isolate happen
-// only when this releases the final shared native reference; if other initialized
-// instances remain, it resolves as soon as this instance is released.
-await cleanup();
-```
+For graceful signal handling, have the signal handler begin application
+shutdown and await the same owned instance's `cleanup()` before exiting. There
+is no cleanup that can be awaited for `SIGKILL`.

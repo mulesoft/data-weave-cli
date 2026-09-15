@@ -30,9 +30,12 @@ try {
 }
 ```
 
-**Important:** The module-level convenience functions (`run()`, `runStreaming()`, `runTransform()` exported directly from `dataweave-native`) operate on a lazily-initialized singleton that takes no constructor options and therefore cannot be configured with `resolveModule` — you **must** construct your own `DataWeave` instance to use external modules, as shown above.
-
-Additionally, external module resolution is currently supported only through `.run()` (the synchronous API). For a resolver-backed engine, `.runStreaming()` and `.runTransform()` execute on a background thread and cannot invoke that engine's `resolveModule` callback — they always resolve only built-in modules, and any custom-module import fails closed (module "not found") rather than crashing or hanging.
+Configure external modules with the `resolveModule` constructor option. Custom
+modules resolve for `dw.run()`. They do not resolve inside
+`dw.runStreaming()`/`dw.runTransform()` because those operations execute on a
+background thread that cannot safely call the JavaScript resolver. Those methods
+can still import built-in modules; a custom-module import fails closed (module
+"not found") rather than crashing or hanging.
 
 ## Resolver Factories
 

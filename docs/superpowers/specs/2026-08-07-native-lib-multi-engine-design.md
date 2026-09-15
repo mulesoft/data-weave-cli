@@ -72,7 +72,10 @@ ABI (§7).
   instance owns an engine handle for its whole lifecycle.
 - Python layer (`native-lib/python/src/dataweave/{native,runtime,models}.py`): move off
   isolate-per-instance and off the legacy singleton onto a module-level reference-counted shared
-  isolate with one engine handle per `DataWeave` instance (§7). The public Python API is unchanged.
+  isolate with one engine handle per `DataWeave` instance (§7). That unification
+  initially preserved the public Python facade; the module-level execution and
+  cleanup functions were subsequently removed by the explicit-instance-only
+  design.
 
 **Out of scope:**
 - Separate GraalVM isolates per engine — rejected as the isolation mechanism (see §5).
@@ -368,21 +371,14 @@ because a boolean cannot represent the window during which `cleanup()` has start
   Overlapping calls coalesce on `this.cleanupPromise` (one native teardown). `cleanup()` returns
   `Promise<void>`.
 
-**Module-level convenience API** (`run`/`cleanup`) drives a lazily-created singleton:
-- `getGlobalInstance()` initializes a **local candidate** and publishes `globalInstance` only after
-  `initialize()` succeeds — a failed first init leaves the singleton null so the next call retries
-  cleanly, instead of poisoning it into permanent "not initialized".
-- Process exit hooks (`beforeExit` async-drains, `exit` best-effort sync) are registered **once
-  per process** (module-scoped `exitHooksRegistered`, never reset), not per singleton, so
-  init→cleanup→reinit cycles don't accumulate listeners. `exit` is documented as best-effort:
-  Node does not emit it for termination signals (SIGTERM/SIGKILL) or all fatal modes; callers
-  needing guaranteed graceful shutdown register and await their own signal handlers.
-- Module-level `cleanup()` coalesces overlapping calls via a module-scoped `cleanupPromise` (it
-  nulls `globalInstance` synchronously so new work builds a fresh instance, but overlapping
-  `cleanup()`s await the same drain and resolve once the native teardown *attempt* completes --
-  guaranteeing logical release, not necessarily physical reclamation: an ordinary teardown failure
-  retains the live isolate and retries where safe, and an unrecoverable teardown-plus-detach double
-  failure leaks it for the process lifetime with a stderr diagnostic (§6.2)).
+**High-level execution is explicit-instance-only.** The later
+[`2026-09-15-explicit-instance-only-bindings-design.md`](2026-09-15-explicit-instance-only-bindings-design.md)
+removed Node's module execution/cleanup functions, hidden engine generations,
+and process exit hooks. Callers construct and initialize each `DataWeave`, submit
+all work through that instance, and await its `cleanup()` in `finally`. The
+three-state instance lifecycle and native shared-isolate machinery above remain
+unchanged; "no singleton" here refers to the high-level execution facade, not
+the module-scoped ref-count and isolate state in `addon.c`.
 
 ### 6.5 Robustness of native allocation and streaming
 
@@ -427,9 +423,10 @@ its isolate/thread glue (`native-lib/python/src/dataweave/native.py`) is much si
 ctypes calls are synchronous and Python owns its stream-worker threads directly, so it needs none
 of Node's *asynchronous* `PENDING_WAIT`/waiter-thread/adoption machinery. It still needs a
 reference count, synchronous refusal while an active registered worker exists, normal teardown
-after that worker unregisters, and a simpler *synchronous* teardown retry (`_teardown_needed`,
-retried on the next `initialize()` — see §7.2). Unlike Node (§6), Python cleanup does not cancel or
-wait for an active worker. The **public Python API is unchanged** by the unification.
+  after that worker unregisters, and a simpler *synchronous* teardown retry (`_teardown_needed`,
+  retried on the next `initialize()` — see §7.2). Unlike Node (§6), Python cleanup does not cancel or
+  wait for an active worker. The unification initially preserved the public Python API; the later
+  explicit-instance-only change removed its module execution and cleanup functions.
 
 ### 7.1 Shared state and the reference-count invariant
 
@@ -453,7 +450,7 @@ the shared isolate.
 
 `graal_tear_down_isolate` blocks forever waiting for every *other* GraalVM-attached thread to reach
 a safepoint. If the isolate's creating ("bootstrap") thread stayed attached for the isolate's life,
-a last-release teardown running on a *different* OS thread — e.g. an `atexit`/interpreter-shutdown
+a last-release teardown running on a *different* OS thread — e.g. explicit
 cleanup on the main thread after the first `run()` happened on a worker, or two instances torn down
 from different threads — would block forever. The binding therefore holds **no persistent
 attachment**, mirroring the Node and Go bindings:
@@ -589,8 +586,8 @@ allowing teardown to race an attached worker thread.
 - **`ffi.ts`** — `createEngine`, `createEngineWithResolver`, `destroyEngine`, and handle-taking
   `runScriptEngine`, `runScriptStreamingEngine`, `runScriptTransformEngine`. `runScript` /
   `runWithResolver` removed.
-- **`dataweave.ts`** — `DataWeave` owns a `private engineHandle`, the three-state lifecycle
-  machine, and the module-level singleton/exit-hook/coalescing logic (§6.4). `initialize()` calls
+- **`dataweave.ts`** — `DataWeave` owns a `private engineHandle` and the three-state lifecycle
+  machine (§6.4). `initialize()` calls
   `ffi.createEngineWithResolver(this.resolveModule)` or `ffi.createEngine()`; run methods route
   through the handle-based FFI (one code path per method, parameterized by handle);
   `cleanup()` calls `ffi.destroyEngine` then `ffi.cleanup`.
@@ -607,8 +604,9 @@ allowing teardown to race an attached worker thread.
 - **`runtime.py` (`DataWeave`)** — `initialize()` acquires an isolate ref + creates one engine and
   stores its generation-bound operation token; run methods route through the `*_engine` entrypoints.
   Cleanup refuses while an active stream worker is registered; registration validates the token so
-  stale work cannot be admitted. It then destroys the engine and releases the ref. The public API
-  surface is unchanged.
+  stale work cannot be admitted. It then destroys the engine and releases the ref. The later
+  explicit-instance-only change removed module execution/cleanup functions while retaining this
+  class surface.
 - **`models.py`** — `RESOLVE_MODULE_CALLBACK` ctypes signature carries the `ctx` argument.
 
 ## 9. Data Flow
@@ -702,7 +700,9 @@ active worker at cleanup → reject without joining or cancelling the worker; it
   + `create_engine[_with_resolver]` + `destroy_engine` set; `ResolveModuleCallback` is 3-arg only;
   Java `getInstance()`/`defaultInstance` are removed. dwlib is consumed by this repo's own Python
   and Node bindings in lockstep. Node `DataWeave.cleanup()` changed from `void` to `Promise<void>`.
-  The **Python public API is unchanged** — only `native.py`'s internal ABI changed.
+  This work initially left the Python public API unchanged and altered only
+  `native.py`'s internal ABI. The 2026-09-15 explicit-instance-only change later
+  removed the module execution and cleanup functions.
 
 ## 11. Testing Strategy
 
@@ -718,9 +718,9 @@ active worker at cleanup → reject without joining or cancelling the worker; it
   `cleanup()`** (the abandonment / init-reference-release proof), `Worker.terminate()` mid-life,
   and explicit in-Worker `cleanup()`.
 - **Node unit** (`ffi` mocked, no dwlib): `DataWeave.initialize()` ref-count/rollback safety;
-  module singleton poisoning recovery; module + instance `cleanup()` coalescing; `stream.ts`
-  rejection propagation; `runTransform` post-pre-buffer re-check; `doCleanup()` releasing the init
-  reference even when `destroyEngine` throws.
+  instance `cleanup()` coalescing; absence of package-level execution exports and process hooks;
+  `stream.ts` rejection propagation; `runTransform` post-pre-buffer re-check; `doCleanup()`
+  releasing the init reference even when `destroyEngine` throws.
 - **Python unit** (fake/mocked lib, no dwlib): refcount create/reuse/last-release-teardown;
   attach-on-demand thread accounting (bootstrap detached after create; every op attaches+detaches
   its own thread; teardown attaches a fresh thread); ctx→resolver trampoline dispatch (two handles →
@@ -815,7 +815,7 @@ internal, non-public test details, not stable APIs.
 | WriteCallback/ReadCallback ctx idiom | `native-lib/src/main/java/org/mule/weave/lib/NativeCallbacks.java` |
 | Java engine registry / entrypoints | `native-lib/src/main/java/org/mule/weave/lib/{ScriptRuntime,NativeLib,NativeCallbacks}.java` |
 | Node concurrency & lifecycle machinery | `native-lib/node/src/addon.c` |
-| Node JS lifecycle / singleton / exit hooks | `native-lib/node/src/dataweave.ts` |
+| Node JS explicit-instance lifecycle | `native-lib/node/src/dataweave.ts` |
 | Node stream error propagation | `native-lib/node/src/stream.ts` |
 | Python isolate/engine glue | `native-lib/python/src/dataweave/{native,runtime,models}.py` |
 | Node binding API + lifecycle docs | `native-lib/node/README.md`, `native-lib/node/docs/external-modules.md` |
@@ -838,11 +838,11 @@ file.
 | 8 (08-18 oom-setup) | §6.5 | OOM-safe streaming/transform setup allocations. |
 | 9 (08-18 engine/worker-oom) | §6.3, §6.5 | Deferred registry removal for all engines; worker/callback OOM → terminal result; N-API-create checks. |
 | 10 (08-19 dangling-ctx) | §6.3, §6.4 | Env-cleanup removes the Java registry entry (`deferred_registry_remove`); shutdown-doc accuracy. |
-| 11 (08-19 engine-pin) | §6.1, §6.3, §6.4 | Env hook + owner-guard for every engine; admission-time engine pin in all 3 paths; register-once exit hooks. |
-| 12 (08-19 worker-ref-leak) | §6.1, §6.3, §6.4 | Init-reference release on abandoned env; teardown-guarded split finalize; module `cleanup()` coalescing; `runTransform` re-check; all-or-nothing engine creation. |
+| 11 (08-19 engine-pin) | §6.1, §6.3, §6.4 | Env hook + owner-guard for every engine; admission-time engine pin in all 3 paths. Historical high-level exit-hook work was later removed. |
+| 12 (08-19 worker-ref-leak) | §6.1, §6.3, §6.4 | Init-reference release on abandoned env; teardown-guarded split finalize; instance cleanup coalescing; `runTransform` re-check; all-or-nothing engine creation. |
 | 13 (08-20 per-env init) | §6.1 | Per-`napi_env` init-reference ownership; `g_ref_count == Σ init_refs`. |
 | 14 (08-21 review5) | §6.2, §6.3 | Engine-creation admission requires an owned init reference; `g_teardown_needed` retry flag; `doCleanup()` releases the ref even when destroy throws. |
-| 15 (08-21 review6) | §6.2, §6.4, §6.5 | Singleton-poisoning fix; stream rejection propagation; teardown return-code checks; init-driven stranded-teardown retry. |
+| 15 (08-21 review6) | §6.2, §6.4, §6.5 | Stream rejection propagation; teardown return-code checks; init-driven stranded-teardown retry. Historical high-level singleton recovery was later removed. |
 | 16 (08-24 review7) | §6.2, §6.4, §6.5, §10 | Detach on failed teardown; init-hook-failure retry arming; observable init rollback; `Promise.reject(undefined)` fix; lifecycle-doc accuracy. |
 | Python unification (08-26) | §2, §5, §7, §8 (Layer 1/4), §10–§12 | Remove `ScriptRuntime` singleton + 3 legacy C entrypoints; Python onto shared refcounted isolate + handle engines via `*_engine` ABI; 3-arg ctx resolver trampoline. |
 | PR157 review 10 (08-27) | §6.3, §6.5, §7.2, §7.4 | Python `_release_isolate`/`_acquire_isolate` retryable-teardown model brought to parity with Node's `g_teardown_needed` (retains the live isolate on failed teardown instead of nulling globals); Node streaming/transform completion sentinel pre-allocated in synchronous setup (worker terminal path now allocation-free, closing a stranded-hang window); stranded-bridge free confirmed conditional on registry removal, with the non-`in_flight`-pinned residual window documented as reachable only via unsupported cross-Worker handle sharing / API misuse; raw `napi_initialize` validates its library-path argument synchronously; user-facing custom-module resolution scope (`run()`-only) documented in both READMEs, cross-referencing the existing streaming-resolver-guard tests. |

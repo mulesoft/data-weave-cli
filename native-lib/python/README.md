@@ -50,16 +50,22 @@ python3 -m pip install -e native-lib/python
 
 ## Usage
 
+The binding exposes execution only through caller-owned `DataWeave` instances.
+Use the context manager for lexical lifetimes; it initializes on entry and
+cleans up on exit. For longer-lived instances, call `initialize()` explicitly
+and ensure `cleanup()` runs in `finally`.
+
 ### Basic Script Execution
 
 ```python
 import dataweave
 
-result = dataweave.run("2 + 2")
-if result.success:
-    print(result.get_string())  # "4"
-else:
-    print(f"Error: {result.error}")
+with dataweave.DataWeave() as dw:
+    result = dw.run("2 + 2")
+    if result.success:
+        print(result.get_string())  # "4"
+    else:
+        print(f"Error: {result.error}")
 ```
 
 ### Script with Inputs
@@ -67,11 +73,12 @@ else:
 Inputs can be plain Python values (auto-encoded):
 
 ```python
-result = dataweave.run(
-    "num1 + num2",
-    {"num1": 25, "num2": 17}
-)
-print(result.get_string())  # "42"
+with dataweave.DataWeave() as dw:
+    result = dw.run(
+        "num1 + num2",
+        {"num1": 25, "num2": 17}
+    )
+    print(result.get_string())  # "42"
 ```
 
 ### Script with Explicit Input Configuration
@@ -81,20 +88,21 @@ Use a dict with `content`, `mimeType`, and `properties` for full control:
 ```python
 xml_bytes = b"<?xml version='1.0'?><person><name>Alice</name></person>"
 
-result = dataweave.run(
-    "payload.person.name",
-    {
-        "payload": {
-            "content": xml_bytes,
-            "mimeType": "application/xml",
-            "charset": "UTF-8",
-            "properties": {
-                "nullValueOn": "empty"
+with dataweave.DataWeave() as dw:
+    result = dw.run(
+        "payload.person.name",
+        {
+            "payload": {
+                "content": xml_bytes,
+                "mimeType": "application/xml",
+                "charset": "UTF-8",
+                "properties": {
+                    "nullValueOn": "empty"
+                }
             }
         }
-    }
-)
-print(result.get_string())  # '"Alice"'
+    )
+    print(result.get_string())  # '"Alice"'
 ```
 
 Or use the `InputValue` helper:
@@ -106,13 +114,14 @@ input_value = dataweave.InputValue(
     properties={"header": False, "separator": ","}
 )
 
-result = dataweave.run("payload.column_1[0]", {"payload": input_value})
-print(result.get_string())  # '"123"'
+with dataweave.DataWeave() as dw:
+    result = dw.run("payload.column_1[0]", {"payload": input_value})
+    print(result.get_string())  # '"123"'
 ```
 
-### Context Manager (Explicit Lifecycle)
+### Reusing an Instance
 
-The module-level API uses a shared singleton. Use `DataWeave` directly for explicit control:
+Reuse one context-managed instance for related calls:
 
 ```python
 with dataweave.DataWeave() as dw:
@@ -150,9 +159,8 @@ assert result.get_string() == '"Hello World"'
 ```
 
 The `ModuleResolver` contract is a synchronous callable from a module key to
-the module source string or `None`. Custom resolver configuration is available
-only on an explicit `DataWeave` instance; the module-level `dataweave.run()`
-singleton does not accept `resolve_module`. `run_streaming()`,
+the module source string or `None`. Custom resolver configuration is provided
+through the `resolve_module` option on each `DataWeave` instance. `run_streaming()`,
 `run_transform()`, and the low-level callback streaming API do not use custom
 resolvers and can import only built-in modules.
 
@@ -254,8 +262,9 @@ admit work for an old generation.
 
 ```python
 try:
-    result = dataweave.run("invalid syntax", raise_on_error=True)
-    print(result.get_string())
+    with dataweave.DataWeave() as dw:
+        result = dw.run("invalid syntax", raise_on_error=True)
+        print(result.get_string())
 
 except dataweave.DataWeaveScriptError as e:
     print(f"Script error: {e.result.error}")
@@ -268,12 +277,13 @@ except dataweave.DataWeaveLibraryNotFoundError:
 **Option B: Check `result.success` manually**
 
 ```python
-result = dataweave.run("invalid syntax")
+with dataweave.DataWeave() as dw:
+    result = dw.run("invalid syntax")
 
-if not result.success:
-    print(f"Error: {result.error}")
-else:
-    print(result.get_string())
+    if not result.success:
+        print(f"Error: {result.error}")
+    else:
+        print(result.get_string())
 ```
 
 ### Output Streaming
@@ -283,13 +293,14 @@ Stream output chunks as they're produced, without buffering the entire result:
 ```python
 import sys
 
-stream = dataweave.run_streaming("output application/json --- (1 to 10000) map {id: $}")
-with stream:
-    for chunk in stream:
-        sys.stdout.buffer.write(chunk)
+with dataweave.DataWeave() as dw:
+    stream = dw.run_streaming("output application/json --- (1 to 10000) map {id: $}")
+    with stream:
+        for chunk in stream:
+            sys.stdout.buffer.write(chunk)
 
-metadata = stream.metadata
-print(f"\nDone: {metadata.mime_type}, {metadata.charset}")
+    metadata = stream.metadata
+    print(f"\nDone: {metadata.mime_type}, {metadata.charset}")
 ```
 
 Call `stream.close()` when stopping consumption early. `Stream` also supports a
@@ -315,31 +326,33 @@ itself can still buffer while parsing or evaluating a transform.
 
 ```python
 # Stream a file through DataWeave
-with open("large.json", "rb") as f:
-    stream = dataweave.run_transform(
-        "output application/csv --- payload",
-        input_stream=iter(lambda: f.read(8192), b""),
-        input_mime_type="application/json",
-    )
-    
-    with open("output.csv", "wb") as out:
-        for chunk in stream:
-            out.write(chunk)
-    
-    metadata = stream.metadata
-    print(f"Converted: {metadata.mime_type}")
+with dataweave.DataWeave() as dw:
+    with open("large.json", "rb") as f:
+        stream = dw.run_transform(
+            "output application/csv --- payload",
+            input_stream=iter(lambda: f.read(8192), b""),
+            input_mime_type="application/json",
+        )
+
+        with open("output.csv", "wb") as out:
+            for chunk in stream:
+                out.write(chunk)
+
+        metadata = stream.metadata
+        print(f"Converted: {metadata.mime_type}")
 ```
 
 Works with any iterable:
 
 ```python
 # From an in-memory list
-stream = dataweave.run_transform(
-    "output application/json --- payload map ($ * $)",
-    input_stream=[b"[1,2,3,4,5]"],
-    input_mime_type="application/json",
-)
-print(b"".join(stream))  # b'[1,4,9,16,25]'
+with dataweave.DataWeave() as dw:
+    stream = dw.run_transform(
+        "output application/json --- payload map ($ * $)",
+        input_stream=[b"[1,2,3,4,5]"],
+        input_mime_type="application/json",
+    )
+    print(b"".join(stream))  # b'[1,4,9,16,25]'
 ```
 
 ```python
@@ -348,13 +361,14 @@ def read_from_network(sock):
     while chunk := sock.recv(4096):
         yield chunk
 
-stream = dataweave.run_transform(
-    "output application/json --- sizeOf(payload)",
-    input_stream=read_from_network(conn),
-    input_mime_type="application/json",
-)
-for chunk in stream:
-    process(chunk)
+with dataweave.DataWeave() as dw:
+    stream = dw.run_transform(
+        "output application/json --- sizeOf(payload)",
+        input_stream=read_from_network(conn),
+        input_mime_type="application/json",
+    )
+    for chunk in stream:
+        process(chunk)
 ```
 
 ### Low-Level Callback API
@@ -376,16 +390,17 @@ def write_cb(data):
     chunks.append(data)
     return 0  # 0 = success
 
-result = dataweave.run_input_output_callback(
-    "output application/json deferred=true --- payload map ($ * $)",
-    input_name="payload",
-    input_mime_type="application/json",
-    read_callback=read_cb,
-    write_callback=write_cb,
-)
+with dataweave.DataWeave() as dw:
+    result = dw.run_input_output_callback(
+        "output application/json deferred=true --- payload map ($ * $)",
+        input_name="payload",
+        input_mime_type="application/json",
+        read_callback=read_cb,
+        write_callback=write_cb,
+    )
 
-print(result)            # StreamingResult(success=True, ...)
-print(b"".join(chunks))  # b'[1,4,9,16,25]'
+    print(result)            # StreamingResult(success=True, ...)
+    print(b"".join(chunks))  # b'[1,4,9,16,25]'
 ```
 
 Read callbacks return bytes and are called with the native buffer size. Return
@@ -447,9 +462,14 @@ python3 native-lib/python/examples/streaming_demo.py
 
 ## API Reference
 
-### Module-Level Functions
+### `DataWeave` Class
 
-#### `run(script, inputs=None, raise_on_error=False) -> ExecutionResult`
+#### `DataWeave(lib_path=None, *, resolve_module=None)`
+
+Caller-owned runtime and context manager. `resolve_module` accepts a synchronous
+`ModuleResolver` for `run()` calls.
+
+#### `dw.run(script, inputs=None, raise_on_error=False) -> ExecutionResult`
 
 Execute a DataWeave script with the given inputs.
 
@@ -460,13 +480,13 @@ Execute a DataWeave script with the given inputs.
 
 **Returns:** `ExecutionResult` with output and metadata
 
-#### `run_streaming(script, inputs=None) -> Stream`
+#### `dw.run_streaming(script, inputs=None) -> Stream`
 
 Execute a script and stream the output.
 
 **Returns:** `Stream` iterator yielding chunks, with `.metadata` attribute
 
-#### `run_transform(script, input_stream, input_name="payload", input_mime_type="application/json", input_charset=None, inputs=None) -> Stream`
+#### `dw.run_transform(script, input_stream, input_name="payload", input_mime_type="application/json", input_charset=None, inputs=None) -> Stream`
 
 Execute a script with streaming input and output.
 
@@ -478,24 +498,20 @@ Execute a script with streaming input and output.
 
 **Returns:** `Stream` iterator yielding output chunks
 
-#### `run_input_output_callback(script, input_name, input_mime_type, read_callback, write_callback, input_charset=None, inputs=None) -> StreamingResult`
+#### `dw.run_input_output_callback(script, input_name, input_mime_type, read_callback, write_callback, input_charset=None, inputs=None) -> StreamingResult`
 
 Low-level callback API for advanced use cases.
 
 **Returns:** `StreamingResult` with success/error/metadata
 
-### `DataWeave` Class
-
-#### `DataWeave(lib_path=None, *, resolve_module=None)`
-
-Context manager for explicit lifecycle control. `resolve_module` accepts a
-synchronous `ModuleResolver` for `run()` calls.
-
 **Methods:**
-- `run(...)` - Same as module-level `run()`
-- `run_streaming(...)` - Same as module-level `run_streaming()`
-- `run_transform(...)` - Same as module-level `run_transform()`
-- `run_input_output_callback(...)` - Same as module-level API
+- `initialize()` - Create this instance's engine; context-manager entry calls it
+- `cleanup()` - Destroy this instance's engine; context-manager exit calls it
+- `run(...)` - Execute and buffer a complete result
+- `run_streaming(...)` - Stream output through a `Stream`
+- `run_transform(...)` - Stream input and output through a `Stream`
+- `run_callback(...)` - Stream output to a write callback
+- `run_input_output_callback(...)` - Use low-level read and write callbacks
 
 **Usage:**
 ```python
@@ -591,9 +607,10 @@ These set `result.success = False` and populate `result.error`.
 
 ```python
 try:
-    result = dataweave.run(user_script, user_inputs, raise_on_error=True)
-    output = result.get_string()
-    # Process output...
+    with dataweave.DataWeave() as dw:
+        result = dw.run(user_script, user_inputs, raise_on_error=True)
+        output = result.get_string()
+        # Process output...
 
 except dataweave.DataWeaveScriptError as e:
     # Handle script error
@@ -645,12 +662,13 @@ python3 -m pip install -e native-lib/python
 
 **Solution**: Streaming errors appear in `stream.metadata` after iteration:
 ```python
-stream = dataweave.run_streaming(script, inputs)
-for chunk in stream:
-    process(chunk)
+with dataweave.DataWeave() as dw:
+    stream = dw.run_streaming(script, inputs)
+    for chunk in stream:
+        process(chunk)
 
-if not stream.metadata.success:
-    print(f"Error: {stream.metadata.error}")
+    if not stream.metadata.success:
+        print(f"Error: {stream.metadata.error}")
 ```
 
 ## Performance Considerations

@@ -18,6 +18,11 @@
 >   instances share one process-wide isolate, addressed by opaque handles.
 > - The resolver is bound at `DataWeave.initialize()` (via
 >   `create_engine_with_resolver`), not installed on the first `run()`.
+>
+> **Further superseded (2026-09-15).** The module-level execution and cleanup
+> functions discussed below were subsequently removed. The current public API
+> is defined by
+> [`2026-09-15-explicit-instance-only-bindings-design.md`](2026-09-15-explicit-instance-only-bindings-design.md).
 
 ## Problem
 
@@ -106,8 +111,9 @@ with DataWeave(resolve_module=resolver) as dw:
 Export `ModuleResolver`, all four factories, and the existing public symbols
 from `dataweave.__init__`.
 
-The module-level convenience functions remain unchanged. Like Node, callers
-must construct a `DataWeave` instance to provide `resolve_module`.
+This proposal originally left module-level convenience functions unchanged.
+They were subsequently removed; every caller now constructs a `DataWeave`
+instance, including callers that provide `resolve_module`.
 
 ## Resolver Factories
 
@@ -332,7 +338,8 @@ No file under `native-lib/node` is modified.
 - content-free default diagnostics and debug opt-in;
 - missing `run_script_with_resolver` capability;
 - resolver-less versus resolver-aware `DataWeave.run()` dispatch;
-- module-level convenience API remains resolver-less.
+- module-level convenience API remained resolver-less in this proposal (it was
+  subsequently removed).
 
 ### Native Integration
 

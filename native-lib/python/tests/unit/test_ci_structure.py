@@ -25,9 +25,8 @@ def assert_resolver_restrictions(document: str) -> None:
         "key to the module source string or `None`."
     ) in normalized
     assert (
-        "Custom resolver configuration is available only on an explicit "
-        "`DataWeave` instance; the module-level `dataweave.run()` singleton "
-        "does not accept `resolve_module`."
+        "Custom resolver configuration is provided through the `resolve_module` "
+        "option on each `DataWeave` instance."
     ) in normalized
     assert (
         "`run_streaming()`, `run_transform()`, and the low-level callback "
@@ -117,8 +116,8 @@ def test_python_readme_documents_module_resolver_contract():
             "The `ModuleResolver` contract is an asynchronous callable",
         ),
         (
-            "singleton does not accept `resolve_module`",
-            "singleton does accept `resolve_module`",
+            "provided through the `resolve_module` option",
+            "not provided through the `resolve_module` option",
         ),
         (
             "streaming API do not use custom resolvers and can import only built-in modules",

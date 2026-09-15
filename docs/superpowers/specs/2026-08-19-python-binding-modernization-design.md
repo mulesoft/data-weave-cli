@@ -1,5 +1,10 @@
 # Python Binding Modernization Design
 
+> **Superseded in part (2026-09-15).** The architecture and streaming work in
+> this historical design remains relevant, but its module-level convenience API
+> was subsequently removed. Current public lifecycle semantics are defined by
+> [`2026-09-15-explicit-instance-only-bindings-design.md`](2026-09-15-explicit-instance-only-bindings-design.md).
+
 ## Goal
 
 Modernize the Python `dataweave` binding without changing its supported public
@@ -14,10 +19,11 @@ types live in `models.py`; input/output wire conversion lives in `encoding.py`;
 `native.py` owns ctypes library loading, isolate lifecycle, ABI signatures, and
 native string release; `runtime.py` owns `DataWeave` orchestration.
 
-`DataWeave` composes one `NativeRuntime`. Module-level functions retain the
-existing lazy singleton behavior. Explicit callers can use `DataWeave` as a
-context manager. Native failures raise `DataWeaveError`; script failures remain
-result envelopes unless the caller selects `raise_on_error`.
+`DataWeave` composes one `NativeRuntime`. This design originally retained
+module-level functions with lazy singleton behavior; those functions were
+subsequently removed. Callers use `DataWeave` as a context manager or manage its
+lifecycle explicitly. Native failures raise `DataWeaveError`; script failures
+remain result envelopes unless the caller selects `raise_on_error`.
 
 ## Streaming
 

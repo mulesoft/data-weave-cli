@@ -1,5 +1,11 @@
 # Node.js API for DataWeave Native Library — Implementation Plan
 
+> **Superseded in part (2026-09-15).** This historical implementation plan
+> originally shipped module-level convenience functions. Those functions and
+> their automatic process hooks were subsequently removed. The current public
+> lifecycle is defined by
+> [`../../docs/superpowers/specs/2026-09-15-explicit-instance-only-bindings-design.md`](../../docs/superpowers/specs/2026-09-15-explicit-instance-only-bindings-design.md).
+
 ## Overview
 
 Add a Node.js package (`@dataweave/native`) that mirrors the existing Python API, exposing the DataWeave native shared library (`dwlib`) via a N-API native addon. The package will be built as a platform-specific tarball (`.tgz`) and uploaded to GitHub Releases alongside the Python wheel.
@@ -37,7 +43,7 @@ native-lib/
     ├── binding.gyp          # node-gyp build config for native addon
     ├── src/
     │   ├── addon.c          # N-API native addon (libuv threads + GraalVM FFI)
-    │   ├── index.ts         # Public API (module-level + class)
+    │   ├── index.ts         # Public API (DataWeave class + supporting exports)
     │   ├── ffi.ts           # TypeScript wrapper loading .node addon
     │   ├── types.ts         # TypeScript interfaces & types
     │   └── utils.ts         # Input normalization, library path resolution
@@ -53,34 +59,19 @@ native-lib/
 ### API Design (mirrors Python)
 
 ```typescript
-// Module-level convenience (lazy-initializes a global instance)
-import { run, runStreaming, runTransform, cleanup } from '@dataweave/native';
-
-const result = run('2 + 2');
-console.log(result.getString()); // "4"
-
-// Streaming output (AsyncGenerator)
-for await (const chunk of runStreaming('output json --- (1 to 10000) map {id: $}')) {
-  process.stdout.write(chunk);
-}
-
-// Bidirectional streaming
-import { createReadStream } from 'fs';
-const output = runTransform(
-  'output csv --- payload',
-  createReadStream('large.json'),
-  { mimeType: 'application/json' }
-);
-for await (const chunk of output) {
-  process.stdout.write(chunk);
-}
-
-// Explicit lifecycle
 import { DataWeave } from '@dataweave/native';
 const dw = new DataWeave();
 dw.initialize();
-const result = dw.run('2 + 2');
-dw.cleanup();
+try {
+  const result = dw.run('2 + 2');
+  console.log(result.getString()); // "4"
+
+  for await (const chunk of dw.runStreaming('output json --- (1 to 10000) map {id: $}')) {
+    process.stdout.write(chunk);
+  }
+} finally {
+  await dw.cleanup();
+}
 ```
 
 ## Implementation Status
@@ -108,7 +99,7 @@ dw.cleanup();
 
 ### ✅ Phase 5: Public API (`src/index.ts`)
 - `DataWeave` class: `initialize()`, `cleanup()`, `run()`, `runStreaming()`, `runTransform()`
-- Module-level convenience functions with lazy singleton
+- Module-level convenience functions with lazy singleton (subsequently removed)
 - `runStreaming` → `AsyncGenerator<Buffer, StreamingResult>`
 - `runTransform` → accepts `AsyncIterable<Buffer>`, returns `AsyncGenerator<Buffer, StreamingResult>`
 
