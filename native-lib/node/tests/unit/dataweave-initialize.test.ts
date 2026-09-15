@@ -22,7 +22,7 @@ vi.mock("../../src/reader", async () => {
 });
 
 import * as ffi from "../../src/ffi";
-import { DataWeave, run, cleanup } from "../../src/dataweave";
+import { DataWeave } from "../../src/dataweave";
 import { DataWeaveError } from "../../src/errors";
 import { createChunkReader } from "../../src/reader";
 import type { NativeStreamingOperation } from "../../src/ffi";
@@ -241,33 +241,16 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     expect(ffi.destroyEngine).toHaveBeenCalledTimes(1);
   });
 
-  it("does not accumulate process exit listeners across init/cleanup cycles", async () => {
-    // The module-level `run`/`cleanup` convenience API drives the lazily
-    // created singleton through `getGlobalInstance()`, which is what
-    // registers the process-wide beforeExit/exit hooks (registerExitHooksOnce
-    // in src/dataweave.ts). Unlike the other tests in this file, this doesn't
-    // construct DataWeave directly, so it hits DataWeave's default
-    // `findLibrary()` lookup. Point DATAWEAVE_NATIVE_LIB at this test file
-    // (guaranteed to exist) so that lookup succeeds without depending on a
-    // real built dwlib -- ffi.initialize() is mocked, so the path's contents
-    // are never touched.
-    const prevEnvLib = process.env.DATAWEAVE_NATIVE_LIB;
-    process.env.DATAWEAVE_NATIVE_LIB = __filename;
-    try {
-      const before = process.listenerCount("exit") + process.listenerCount("beforeExit");
-      // Drive several singleton create -> cleanup cycles via the module API.
-      for (let i = 0; i < 5; i++) {
-        run("%dw 2.0\noutput application/json\n---\n1 + 1"); // creates the singleton (+ hooks on first)
-        await cleanup(); // releases the singleton
-      }
-      const after = process.listenerCount("exit") + process.listenerCount("beforeExit");
-      // Register-once: at most the single pair added on the very first create,
-      // never one pair per cycle.
-      expect(after - before).toBeLessThanOrEqual(2);
-    } finally {
-      if (prevEnvLib === undefined) delete process.env.DATAWEAVE_NATIVE_LIB;
-      else process.env.DATAWEAVE_NATIVE_LIB = prevEnvLib;
-    }
+  it("does not register process lifecycle listeners for explicit instances", async () => {
+    const beforeExitCount = process.listenerCount("beforeExit");
+    const exitCount = process.listenerCount("exit");
+    const dw = new DataWeave();
+
+    dw.initialize();
+    await dw.cleanup();
+
+    expect(process.listenerCount("beforeExit")).toBe(beforeExitCount);
+    expect(process.listenerCount("exit")).toBe(exitCount);
   });
 
   it("still calls ffi.cleanup() (releasing the native init reference) when destroyEngine() throws", async () => {
@@ -299,53 +282,6 @@ describe("DataWeave.initialize() native ref-count safety", () => {
     // false-passes toHaveBeenLastCalledWith because the FIRST init already
     // called createEngine() with the same args -- review #6 #8).
     expect(ffi.createEngine).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not publish a poisoned singleton when the first module-level init fails", async () => {
-    // This drives the module-level run() through getGlobalInstance(), which
-    // constructs a DataWeave directly and so hits the real findLibrary() lookup
-    // (findLibrary is in the DataWeave constructor and is NOT mocked by the
-    // vi.mock("../../src/ffi") at the top of this file). Point
-    // DATAWEAVE_NATIVE_LIB at this test file (guaranteed to exist) so that
-    // lookup succeeds without depending on a staged/built dwlib -- ffi is
-    // mocked, so the path's contents are never touched. Without this the test
-    // fails with "Could not find DataWeave native library" whenever no dwlib is
-    // present (review #14 #2).
-    const prevEnvLib = process.env.DATAWEAVE_NATIVE_LIB;
-    process.env.DATAWEAVE_NATIVE_LIB = __filename;
-    try {
-      // Isolate module state: a fresh import gives a null globalInstance so this
-      // test controls the very first getGlobalInstance() call.
-      vi.resetModules();
-      const ffiMod = await import("../../src/ffi");
-      const dwMod = await import("../../src/dataweave");
-
-      // First module-level run(): ffi.initialize() throws (e.g. bad lib path).
-      vi.mocked(ffiMod.initialize).mockImplementationOnce(() => {
-        throw new Error("library not found");
-      });
-      expect(() => dwMod.run("%dw 2.0\noutput application/json\n---\n1")).toThrow();
-
-      // The fault is corrected; the NEXT module-level run() must build a fresh,
-      // working singleton -- not reuse a poisoned, uninitialized one that fails
-      // "not initialized" forever (review #6 #1).
-      vi.mocked(ffiMod.initialize).mockImplementation(() => {});
-      vi.mocked(ffiMod.createEngine).mockReturnValue(1);
-      vi.mocked(ffiMod.runScriptEngine).mockReturnValue(
-        JSON.stringify({
-          success: true,
-          result: Buffer.from("1").toString("base64"),
-          mimeType: "application/json",
-          charset: "utf-8",
-          binary: false,
-        })
-      );
-      const result = dwMod.run("%dw 2.0\noutput application/json\n---\n1");
-      expect(result.success).toBe(true);
-    } finally {
-      if (prevEnvLib === undefined) delete process.env.DATAWEAVE_NATIVE_LIB;
-      else process.env.DATAWEAVE_NATIVE_LIB = prevEnvLib;
-    }
   });
 
   it("gates re-initialization on the in-flight rollback when engine creation fails", async () => {
