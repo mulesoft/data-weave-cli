@@ -292,6 +292,7 @@ typedef enum {
   READ_CALLBACK_FAULT_GET_GLOBAL,
   READ_CALLBACK_FAULT_IS_BUFFER,
   READ_CALLBACK_FAULT_GET_BUFFER_INFO,
+  READ_CALLBACK_FAULT_DIAGNOSTIC_GENERIC,
 } read_callback_fault_t;
 
 typedef enum {
@@ -3202,12 +3203,22 @@ static bool callback_exception_detail(
     const char* callback_name) {
   napi_value value;
   napi_status status = napi_get_named_property(env, exception, property, &value);
+  if (test_consume_read_callback_fault(READ_CALLBACK_FAULT_DIAGNOSTIC_GENERIC)) {
+    status = napi_generic_failure;
+  }
   if (status == napi_ok) {
     status = napi_get_value_string_utf8(env, value, buffer, buffer_size, length);
   }
   if (status == napi_ok) return true;
 
-  if (status == napi_pending_exception && !clear_diagnostic_exception(env)) {
+  // Node 18 can return napi_generic_failure for a property accessor that
+  // throws while still leaving the exception pending. Always check and clear
+  // the pending state before returning from diagnostic-only access.
+  bool pending = false;
+  if (napi_is_exception_pending(env, &pending) != napi_ok) {
+    callback_exception_fail_closed(callback_name);
+  }
+  if (pending && !clear_diagnostic_exception(env)) {
     callback_exception_fail_closed(callback_name);
   }
   return false;
@@ -5736,6 +5747,8 @@ static napi_value napi_test_fail_next_read_callback(
     fault = READ_CALLBACK_FAULT_IS_BUFFER;
   } else if (strcmp(stage, "get-buffer-info") == 0) {
     fault = READ_CALLBACK_FAULT_GET_BUFFER_INFO;
+  } else if (strcmp(stage, "diagnostic-generic") == 0) {
+    fault = READ_CALLBACK_FAULT_DIAGNOSTIC_GENERIC;
   } else {
     napi_throw_range_error(env, NULL, "Unknown read callback fault stage");
     return NULL;

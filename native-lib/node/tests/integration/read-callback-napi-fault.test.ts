@@ -13,7 +13,8 @@ type ReadCallbackFault =
   | "create-size"
   | "get-global"
   | "is-buffer"
-  | "get-buffer-info";
+  | "get-buffer-info"
+  | "diagnostic-generic";
 
 interface TestAddon {
   initialize(libPath: string): void;
@@ -164,6 +165,42 @@ setTimeout(() => {
   process.exitCode = 91;
 }, 5_000).unref();
 `;
+const GENERIC_DIAGNOSTIC_STATUS_FIXTURE = String.raw`
+const addon = require(process.argv[1]);
+const libPath = process.argv[2];
+const script = "output application/json deferred=true\n---\npayload";
+
+async function main() {
+  addon.initialize(libPath);
+  const handle = addon.createEngine();
+  try {
+    const thrown = new Proxy({}, {
+      get(_target, property) {
+        if (property === "message") throw new Error("generic diagnostic status getter exploded");
+        return undefined;
+      },
+    });
+    addon.__test_failNextReadCallback("diagnostic-generic");
+    let operation;
+    operation = addon.runScriptTransformEngine(
+      handle, script, "{}", "payload", "application/json", "UTF-8",
+      () => { throw thrown; },
+      (chunk, sequence) => operation.acknowledge(sequence, chunk.length)
+    );
+    const metadata = JSON.parse(await operation.completion);
+    operation.close();
+    process.stdout.write(JSON.stringify({ success: metadata.success, hasError: Boolean(metadata.error) }));
+  } finally {
+    addon.destroyEngine(handle);
+    await addon.cleanup();
+  }
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+`;
 
 function runTransform(handle: number): {
   operation: NativeStreamingOperation;
@@ -305,6 +342,35 @@ describe.sequential("transform read callback N-API failures", () => {
     );
     expect(child.stderr).not.toContain("unexpected completion");
     expect(child.stderr).not.toContain("unexpected timeout");
+  });
+
+  it("clears a pending diagnostic exception reported with a generic status", () => {
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--force-node-api-uncaught-exceptions-policy",
+        "-e",
+        GENERIC_DIAGNOSTIC_STATUS_FIXTURE,
+        ADDON_PATH,
+        findLibrary(),
+      ],
+      {
+        encoding: "utf-8",
+        timeout: 30_000,
+        env: {
+          ...process.env,
+          DATAWEAVE_READ_CALLBACK_DEBUG: "1",
+          DATAWEAVE_TEST_HOOKS: "1",
+        },
+      }
+    );
+
+    expect(child.error, child.error?.message).toBeUndefined();
+    expect(child.signal, child.stderr).toBeNull();
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stderr).toContain("(Unable to extract exception details)");
+    expect(child.stderr).not.toContain("generic diagnostic status getter exploded");
+    expect(JSON.parse(child.stdout)).toEqual({ success: false, hasError: true });
   });
 
   it.each([
