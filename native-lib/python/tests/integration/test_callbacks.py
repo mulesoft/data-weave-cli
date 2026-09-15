@@ -2,6 +2,7 @@ import io
 
 import pytest
 
+
 @pytest.mark.integration
 def test_callback_streams_basic_output(runtime):
     chunks = []
