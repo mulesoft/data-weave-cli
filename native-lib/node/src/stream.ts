@@ -44,6 +44,15 @@ const NO_ERROR: ErrorState = { hasError: false };
  * Native async generators serialize `return()` behind an outstanding `next()`.
  * This wrapper intercepts `return()` and `throw()` so they can request native
  * cancellation and wake a parked pull before delegating generator finalization.
+ * Chunks are acknowledged when consumed, or during cancellation when buffered,
+ * so the native bounded-output queue can continue or terminate without leaking
+ * credits. Native completion is awaited before terminal metadata is parsed; the
+ * controller is closed exactly once after completion or successful cancellation.
+ *
+ * `interruptNativeStreamIfParked` is intentionally limited to a pull with no
+ * buffered chunk. This preserves FIFO delivery for already-produced output
+ * while allowing DataWeave cleanup and transform control operations to wake an
+ * otherwise blocked consumer.
  *
  * @param start - Launches the native call and returns its operation controller.
  * @param onStart - Called once after native admission with the managed operation.

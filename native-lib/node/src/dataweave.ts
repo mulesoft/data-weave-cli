@@ -9,6 +9,11 @@ import type { NativeStreamingOperation } from "./ffi";
 import type { ExecutionResult, StreamingResult, Inputs, TransformOptions } from "./types";
 import type { ModuleResolver } from "./resolver";
 
+/**
+ * Captures the engine identity at public-operation admission. Delayed stream
+ * setup revalidates both fields so work created for an older initialized
+ * generation cannot execute after cleanup and reinitialization.
+ */
 interface EngineOperationToken {
   readonly handle: number;
   readonly generation: number;

@@ -70,6 +70,10 @@ public class ScriptRuntime {
         return true;
     }
 
+    /**
+     * An admitted use of an engine that keeps its registry record live until
+     * closed. Closing is idempotent and releases exactly one active lease.
+     */
     public static final class EngineLease implements AutoCloseable {
         private final EngineRecord record;
         private final ScriptRuntime runtime;
@@ -96,6 +100,11 @@ public class ScriptRuntime {
         }
     }
 
+    /**
+     * Coordinates admission and destruction for one handle-addressed runtime.
+     * Destruction closes admission before waiting for previously acquired
+     * leases, preventing an engine from being removed while native work uses it.
+     */
     private static final class EngineRecord {
         private enum State {
             LIVE,
