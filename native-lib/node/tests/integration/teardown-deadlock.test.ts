@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { run, runStreaming, runTransform, cleanup } from "../../src/dataweave";
+import { DataWeave } from "../../src/dataweave";
 import { DataWeaveError } from "../../src/errors";
 
 interface TestAddon {
@@ -25,8 +25,10 @@ async function waitForAsyncOpGate(): Promise<void> {
 // outer transform drain without a deadlock after that rejection.
 describe("public API transform callback reentrancy guard", () => {
   it(
-    "rejects a nested module-level run and lets the outer transform drain",
+    "rejects a nested instance run and lets the outer transform drain",
     async () => {
+      const dw = new DataWeave();
+      dw.initialize();
       let fired = false;
       let runError: unknown;
 
@@ -42,9 +44,9 @@ describe("public API transform callback reentrancy guard", () => {
           if (!fired) {
             fired = true;
             try {
-              run('%dw 2.0\noutput application/json\n---\n1 + 1');
-            } catch (e) {
-              runError = e;
+              dw.run("%dw 2.0\noutput application/json\n---\n1 + 1");
+            } catch (error) {
+              runError = error;
             }
           }
           yield Buffer.from("x");
@@ -52,7 +54,7 @@ describe("public API transform callback reentrancy guard", () => {
       }
 
       try {
-        const gen = runTransform(
+        const gen = dw.runTransform(
           "output application/octet-stream\n---\npayload",
           input(),
           { mimeType: "application/octet-stream" }
@@ -70,7 +72,7 @@ describe("public API transform callback reentrancy guard", () => {
         expect(runError).toBeInstanceOf(DataWeaveError);
         expect(result.value.success).toBe(true);
       } finally {
-        await cleanup();
+        await dw.cleanup();
       }
     },
     20000
@@ -82,17 +84,21 @@ describe("re-init during pending teardown (W-23692110, round 5 P1)", () => {
     let cleanupPromise: Promise<void> | undefined;
     let gateArmed = false;
     let gateReleased = false;
+    const outerDw = new DataWeave();
+    const replacementDw = new DataWeave();
 
     try {
-      expect(run("%dw 2.0\noutput application/json\n---\n6 * 7").success).toBe(true);
+      outerDw.initialize();
+      expect(outerDw.run("%dw 2.0\noutput application/json\n---\n6 * 7").success).toBe(true);
       testAddon.__test_holdNextAsyncOp();
       gateArmed = true;
-      const outer = runStreaming("%dw 2.0\noutput application/json\n---\n[1,2,3]");
+      const outer = outerDw.runStreaming("%dw 2.0\noutput application/json\n---\n[1,2,3]");
       const firstNext = outer.next();
       await waitForAsyncOpGate();
-      cleanupPromise = cleanup();
+      cleanupPromise = outerDw.cleanup();
 
-      const result = run("%dw 2.0\noutput application/json\n---\n1 + 1");
+      replacementDw.initialize();
+      const result = replacementDw.run("%dw 2.0\noutput application/json\n---\n1 + 1");
       expect(result.success).toBe(true);
       expect(JSON.parse(result.getString()!)).toBe(2);
 
@@ -103,8 +109,15 @@ describe("re-init during pending teardown (W-23692110, round 5 P1)", () => {
       await cleanupPromise;
     } finally {
       if (gateArmed && !gateReleased) testAddon.__test_releaseAsyncOp();
-      if (cleanupPromise) await cleanupPromise;
-      await cleanup();
+      try {
+        if (cleanupPromise) await cleanupPromise;
+      } finally {
+        try {
+          await outerDw.cleanup();
+        } finally {
+          await replacementDw.cleanup();
+        }
+      }
     }
   }, 20000);
 });

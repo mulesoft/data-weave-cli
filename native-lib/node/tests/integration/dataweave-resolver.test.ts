@@ -1,16 +1,10 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { DataWeave, cleanup } from '../../src/dataweave';
+import { DataWeave } from '../../src/dataweave';
 import { DataWeaveError } from '../../src/errors';
 import { modulesFromMap } from '../../src/resolver';
 
-// Every test below constructs its own explicit DataWeave instance (rather
-// than the module-level singleton) so each can configure its own resolver.
-// `cleanup()` above only releases the *singleton* (`globalInstance`), which
-// nothing in this file ever creates -- so without this tracking, every
-// explicit instance's native library reference (and its own engine handle,
-// see addon.c's create_engine/destroy_engine) would leak for the lifetime of
-// the test process. Track every instance created in this file and release
-// them all in afterAll.
+// Every test below constructs its own explicit DataWeave instance so each can
+// configure its own resolver. Track every instance and release it in afterAll.
 const instances: DataWeave[] = [];
 function trackedDataWeave(...args: ConstructorParameters<typeof DataWeave>): DataWeave {
   const dw = new DataWeave(...args);
@@ -22,7 +16,6 @@ afterAll(async () => {
   for (const dw of instances) {
     await dw.cleanup();
   }
-  await cleanup();
 });
 
 describe('DataWeave with resolver', () => {

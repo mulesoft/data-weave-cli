@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { DataWeave, cleanup } from "../../src/dataweave";
+import { DataWeave } from "../../src/dataweave";
 import { modulesFromMap } from "../../src/resolver";
 
 const instances: DataWeave[] = [];
@@ -10,7 +10,6 @@ function tracked(...args: ConstructorParameters<typeof DataWeave>): DataWeave {
 }
 afterAll(async () => {
   for (const dw of instances) await dw.cleanup();
-  await cleanup();
 });
 
 const scriptImporting = (mod: string) =>
