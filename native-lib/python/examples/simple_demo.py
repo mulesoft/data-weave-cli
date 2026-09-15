@@ -16,9 +16,14 @@ import dataweave
 def main():
     print("=== DataWeave Python Demo ===\n")
 
+    with dataweave.DataWeave() as dw:
+        run_examples(dw)
+
+
+def run_examples(dw: dataweave.DataWeave):
     # Example 1: Simple arithmetic
     print("1. Simple arithmetic:")
-    result = dataweave.run("2 + 2")
+    result = dw.run("2 + 2")
     if result.success:
         output = result.get_string()
         print(f"   2 + 2 = {output}\n")
@@ -28,7 +33,7 @@ def main():
     # Example 2: Script with inputs
     print("2. Script with inputs:")
     inputs = {"name": "World"}
-    result = dataweave.run('"Hello, " ++ name ++ "!"', inputs)
+    result = dw.run('"Hello, " ++ name ++ "!"', inputs)
     if result.success:
         output = result.get_string()
         print(f"   {output}\n")
@@ -46,7 +51,7 @@ def main():
         }
     }
     script = "output application/json --- payload.users map { name: $.name }"
-    result = dataweave.run(script, inputs)
+    result = dw.run(script, inputs)
     if result.success:
         output = result.get_string()
         print(f"   {output}\n")
@@ -55,20 +60,19 @@ def main():
 
     # Example 4: Using context manager
     print("4. Using context manager:")
-    with dataweave.DataWeave() as dw:
-        r1 = dw.run("10 * 5")
-        r2 = dw.run("a + b", {"a": 100, "b": 23})
+    r1 = dw.run("10 * 5")
+    r2 = dw.run("a + b", {"a": 100, "b": 23})
 
-        if r1.success:
-            print(f"   10 * 5 = {r1.get_string()}")
-        if r2.success:
-            print(f"   100 + 23 = {r2.get_string()}")
+    if r1.success:
+        print(f"   10 * 5 = {r1.get_string()}")
+    if r2.success:
+        print(f"   100 + 23 = {r2.get_string()}")
     print()
 
     # Example 5: Error handling with raise_on_error
     print("5. Error handling:")
     try:
-        result = dataweave.run("invalid syntax here", raise_on_error=True)
+        result = dw.run("invalid syntax here", raise_on_error=True)
         print(f"   Result: {result.get_string()}")
     except dataweave.DataWeaveScriptError as e:
         print(f"   Caught script error: {e.result.error[:50]}...")
@@ -81,7 +85,7 @@ def main():
         mime_type="application/csv",
         properties={"header": False, "separator": ","}
     )
-    result = dataweave.run("payload.column_1[0]", {"payload": input_value})
+    result = dw.run("payload.column_1[0]", {"payload": input_value})
     if result.success:
         print(f"   First CSV value: {result.get_string()}\n")
     else:

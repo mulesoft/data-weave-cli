@@ -2,50 +2,48 @@ import io
 
 import pytest
 
-import dataweave
-
 
 @pytest.mark.integration
-def test_callback_streams_basic_output():
+def test_callback_streams_basic_output(runtime):
     chunks = []
 
     def on_write(data: bytes) -> int:
         chunks.append(data)
         return 0
 
-    result = dataweave.run_callback("2 + 2", on_write)
+    result = runtime.run_callback("2 + 2", on_write)
 
     assert result.success is True
     assert b"".join(chunks).decode(result.charset or "utf-8") == "4"
 
 
 @pytest.mark.integration
-def test_callback_streams_output_with_inputs():
+def test_callback_streams_output_with_inputs(runtime):
     chunks = []
 
     def on_write(data: bytes) -> int:
         chunks.append(data)
         return 0
 
-    result = dataweave.run_callback("num1 + num2", on_write, inputs={"num1": 25, "num2": 17})
+    result = runtime.run_callback("num1 + num2", on_write, inputs={"num1": 25, "num2": 17})
 
     assert result.success is True
     assert b"".join(chunks).decode(result.charset or "utf-8") == "42"
 
 
 @pytest.mark.integration
-def test_callback_translates_write_callback_exception_to_unsuccessful_result():
+def test_callback_translates_write_callback_exception_to_unsuccessful_result(runtime):
     def on_write(_data: bytes) -> int:
         raise RuntimeError("write callback failed")
 
-    result = dataweave.run_callback("2 + 2", on_write)
+    result = runtime.run_callback("2 + 2", on_write)
 
     assert result.success is False
     assert result.error is not None
 
 
 @pytest.mark.integration
-def test_callback_transforms_streamed_input_and_output():
+def test_callback_transforms_streamed_input_and_output(runtime):
     source = io.BytesIO(b"[10, 20, 30, 40, 50]")
     chunks = []
 
@@ -56,7 +54,7 @@ def test_callback_transforms_streamed_input_and_output():
         chunks.append(data)
         return 0
 
-    result = dataweave.run_input_output_callback(
+    result = runtime.run_input_output_callback(
         "output application/json\n---\npayload map ($ * 2)",
         input_name="payload",
         input_mime_type="application/json",
@@ -71,7 +69,7 @@ def test_callback_transforms_streamed_input_and_output():
 
 
 @pytest.mark.integration
-def test_callback_accepts_large_streamed_input():
+def test_callback_accepts_large_streamed_input(runtime):
     records = b"[" + b",".join(f'{{"id":{index}}}'.encode() for index in range(1, 1001)) + b"]"
     source = io.BytesIO(records)
     chunks = []
@@ -83,7 +81,7 @@ def test_callback_accepts_large_streamed_input():
         chunks.append(data)
         return 0
 
-    result = dataweave.run_input_output_callback(
+    result = runtime.run_input_output_callback(
         "output application/json\n---\nsizeOf(payload)",
         input_name="payload",
         input_mime_type="application/json",
@@ -96,14 +94,14 @@ def test_callback_accepts_large_streamed_input():
 
 
 @pytest.mark.integration
-def test_input_output_callback_translates_read_callback_exception_to_unsuccessful_result():
+def test_input_output_callback_translates_read_callback_exception_to_unsuccessful_result(runtime):
     def on_read(_buffer_size: int) -> bytes:
         raise RuntimeError("read callback failed")
 
     def on_write(_data: bytes) -> int:
         return 0
 
-    result = dataweave.run_input_output_callback(
+    result = runtime.run_input_output_callback(
         "output application/json\n---\npayload",
         input_name="payload",
         input_mime_type="application/json",
@@ -116,14 +114,14 @@ def test_input_output_callback_translates_read_callback_exception_to_unsuccessfu
 
 
 @pytest.mark.integration
-def test_input_output_callback_translates_write_callback_exception_to_unsuccessful_result():
+def test_input_output_callback_translates_write_callback_exception_to_unsuccessful_result(runtime):
     def on_read(_buffer_size: int) -> bytes:
         return b"[1]"
 
     def on_write(_data: bytes) -> int:
         raise RuntimeError("write callback failed")
 
-    result = dataweave.run_input_output_callback(
+    result = runtime.run_input_output_callback(
         "output application/json\n---\npayload",
         input_name="payload",
         input_mime_type="application/json",

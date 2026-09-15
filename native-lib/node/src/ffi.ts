@@ -1,30 +1,59 @@
 import { resolveAddonPath } from "./addon-path";
+import { DataWeaveError } from "./errors";
 import type { ModuleResolver } from "./resolver";
+
+export interface NativeStreamingOperation {
+  readonly completion: Promise<string>;
+  acknowledge(sequence: bigint, bytes: number): void;
+  cancel(): void;
+  close(): void;
+}
+
+export type NativeChunkCallback = (chunk: Buffer, sequence: bigint) => void;
 
 interface NativeAddon {
   initialize(libPath: string): void;
-  runScript(script: string, inputsJson: string): string;
-  runScriptStreaming(script: string, inputsJson: string, chunkCb: (chunk: Buffer) => void): Promise<string>;
-  runScriptTransform(
+  createEngine(): number;
+  createEngineWithResolver(resolver: ModuleResolver): number;
+  destroyEngine(handle: number): void;
+  runScriptEngine(handle: number, script: string, inputsJson: string): string;
+  runScriptStreamingEngine(
+    handle: number,
+    script: string,
+    inputsJson: string,
+    chunkCb: NativeChunkCallback
+  ): NativeStreamingOperation;
+  runScriptTransformEngine(
+    handle: number,
     script: string,
     inputsJson: string,
     inputName: string,
     inputMimeType: string,
     inputCharset: string | null,
     readCb: (bufSize: number) => Buffer | null,
-    writeCb: (chunk: Buffer) => void
-  ): Promise<string>;
-  runWithResolver(
-    script: string,
-    inputsJson: string,
-    mimeType: string,
-    resolverCallback: ModuleResolver,
-    isolate: null
-  ): string;
-  cleanup(): void;
+    writeCb: NativeChunkCallback
+  ): NativeStreamingOperation;
+  cleanup(): Promise<void>;
 }
 
 let addon: NativeAddon | null = null;
+
+function callNative<T>(invoke: () => T): T {
+  try {
+    return invoke();
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ERR_DATAWEAVE_CALLBACK_REENTRANCY"
+    ) {
+      const message = "message" in error ? String(error.message) : String(error);
+      throw new DataWeaveError(message);
+    }
+    throw error;
+  }
+}
 
 function getAddon(addonPath?: string): NativeAddon {
   if (!addon) {
@@ -34,42 +63,60 @@ function getAddon(addonPath?: string): NativeAddon {
 }
 
 export function initialize(libPath: string, addonPath?: string): void {
-  getAddon(addonPath).initialize(libPath);
+  callNative(() => getAddon(addonPath).initialize(libPath));
 }
 
-export function runScript(script: string, inputsJson: string): string {
-  return getAddon().runScript(script, inputsJson);
+export function createEngine(): number {
+  return callNative(() => getAddon().createEngine());
 }
 
-export function runScriptStreaming(
+export function createEngineWithResolver(resolver: ModuleResolver): number {
+  return callNative(() => getAddon().createEngineWithResolver(resolver));
+}
+
+export function destroyEngine(handle: number): void {
+  callNative(() => getAddon().destroyEngine(handle));
+}
+
+export function runScriptEngine(handle: number, script: string, inputsJson: string): string {
+  return callNative(() => getAddon().runScriptEngine(handle, script, inputsJson));
+}
+
+export function runScriptStreamingEngine(
+  handle: number,
   script: string,
   inputsJson: string,
-  chunkCb: (chunk: Buffer) => void
-): Promise<string> {
-  return getAddon().runScriptStreaming(script, inputsJson, chunkCb);
+  chunkCb: NativeChunkCallback
+): NativeStreamingOperation {
+  return callNative(() =>
+    getAddon().runScriptStreamingEngine(handle, script, inputsJson, chunkCb)
+  );
 }
 
-export function runScriptTransform(
+export function runScriptTransformEngine(
+  handle: number,
   script: string,
   inputsJson: string,
   inputName: string,
   inputMimeType: string,
   inputCharset: string | null,
   readCb: (bufSize: number) => Buffer | null,
-  writeCb: (chunk: Buffer) => void
-): Promise<string> {
-  return getAddon().runScriptTransform(script, inputsJson, inputName, inputMimeType, inputCharset, readCb, writeCb);
+  writeCb: NativeChunkCallback
+): NativeStreamingOperation {
+  return callNative(() =>
+    getAddon().runScriptTransformEngine(
+      handle,
+      script,
+      inputsJson,
+      inputName,
+      inputMimeType,
+      inputCharset,
+      readCb,
+      writeCb
+    )
+  );
 }
 
-export function runWithResolver(
-  script: string,
-  inputsJson: string,
-  mimeType: string,
-  resolverCallback: ModuleResolver
-): string {
-  return getAddon().runWithResolver(script, inputsJson, mimeType, resolverCallback, null);
-}
-
-export function cleanup(): void {
-  getAddon().cleanup();
+export function cleanup(): Promise<void> {
+  return callNative(() => getAddon().cleanup());
 }

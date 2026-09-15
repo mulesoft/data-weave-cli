@@ -3,6 +3,7 @@ package org.mule.weave.lib;
 import org.graalvm.nativeimage.CurrentIsolate;
 import org.graalvm.nativeimage.c.type.CCharPointer;
 import org.graalvm.nativeimage.c.type.CTypeConversion;
+import org.graalvm.word.PointerBase;
 import org.mule.weave.v2.parser.ast.variables.NameIdentifier;
 import org.mule.weave.v2.sdk.NameIdentifierHelper;
 import org.mule.weave.v2.sdk.WeaveResource;
@@ -20,12 +21,14 @@ import java.util.Collections;
  */
 public class CallbackWeaveResourceResolver implements WeaveResourceResolver {
     private final NativeCallbacks.ResolveModuleCallback callback;
+    private final PointerBase ctx;
 
-    public CallbackWeaveResourceResolver(NativeCallbacks.ResolveModuleCallback callback) {
+    public CallbackWeaveResourceResolver(NativeCallbacks.ResolveModuleCallback callback, PointerBase ctx) {
         if (callback.isNull()) {
             throw new IllegalArgumentException("Resolver callback cannot be null");
         }
         this.callback = callback;
+        this.ctx = ctx;
     }
 
     @Override
@@ -42,6 +45,7 @@ public class CallbackWeaveResourceResolver implements WeaveResourceResolver {
                 // Invoke callback (blocks if threadsafe function is in use)
                 CCharPointer resultPtr = callback.invoke(
                     CurrentIsolate.getCurrentThread(),
+                    ctx,
                     pathPtr
                 );
 
@@ -59,8 +63,21 @@ public class CallbackWeaveResourceResolver implements WeaveResourceResolver {
                 );
             }
         } catch (Exception e) {
-            // Log and return empty on any error
-            System.err.println("Error resolving module " + path + ": " + e.getMessage());
+            // Log and return empty on any error. Mirrors the C-side resolver bridge's
+            // policy (see resolve_module_callback in addon.c): both the exception
+            // message AND the module path are resolver-controlled/dynamic content
+            // (module source, file paths, credentials can leak through either), so
+            // the default log line is fully static/content-free, with no path and no
+            // message. Only include them when the caller has opted in via
+            // DATAWEAVE_RESOLVER_DEBUG=1.
+            if ("1".equals(System.getenv("DATAWEAVE_RESOLVER_DEBUG"))) {
+                System.err.println("Error resolving module " + path + ": " + e.getMessage());
+            } else {
+                System.err.println(
+                    "Error resolving module (details suppressed; set "
+                    + "DATAWEAVE_RESOLVER_DEBUG=1 to log path/message — may expose "
+                    + "resolver-controlled data).");
+            }
             return Option.empty();
         }
     }

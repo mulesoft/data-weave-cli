@@ -25,9 +25,8 @@ def assert_resolver_restrictions(document: str) -> None:
         "key to the module source string or `None`."
     ) in normalized
     assert (
-        "Custom resolver configuration is available only on an explicit "
-        "`DataWeave` instance; the module-level `dataweave.run()` singleton "
-        "does not accept `resolve_module`."
+        "Custom resolver configuration is provided through the `resolve_module` "
+        "option on each `DataWeave` instance."
     ) in normalized
     assert (
         "`run_streaming()`, `run_transform()`, and the low-level callback "
@@ -90,8 +89,20 @@ def test_python_readme_documents_module_resolver_contract():
     normalized = " ".join(readme.split())
     assert "without a leading path separator" in normalized
     assert "without a leading slash or separator" not in normalized
-    assert "Each initialized explicit Python `DataWeave` instance owns a dedicated Graal isolate." in normalized
-    assert "retains the resolver callback until successful isolate teardown" in normalized
+    # Lifecycle: one process-wide, reference-counted isolate with per-instance
+    # handle-addressed engines (review #12 #4 / #13 finding E). The stale
+    # "dedicated Graal isolate per instance" claim must stay gone.
+    assert (
+        "There is a single process-wide GraalVM isolate, reference-counted by the "
+        "number of live engines across all `DataWeave` instances" in normalized
+    )
+    assert (
+        "Each `DataWeave` instance owns its own handle-addressed engine within "
+        "that shared isolate." in normalized
+    )
+    assert "owns a dedicated Graal isolate" not in normalized
+    assert "retains the resolver callback until its engine is destroyed" in normalized
+    assert "until successful isolate teardown" not in normalized
 
 
 @pytest.mark.unit
@@ -103,8 +114,8 @@ def test_python_readme_documents_module_resolver_contract():
             "The `ModuleResolver` contract is an asynchronous callable",
         ),
         (
-            "singleton does not accept `resolve_module`",
-            "singleton does accept `resolve_module`",
+            "provided through the `resolve_module` option",
+            "not provided through the `resolve_module` option",
         ),
         (
             "streaming API do not use custom resolvers and can import only built-in modules",
@@ -185,3 +196,45 @@ def test_named_step_if_does_not_read_a_later_step_guard():
 
     with pytest.raises(AssertionError, match="missing if guard"):
         named_step_if(mutated_workflow, "Fail if binding artifacts failed")
+
+
+@pytest.mark.unit
+def test_examples_do_not_use_removed_module_level_runtime_api():
+    root = Path(__file__).resolve().parents[3]
+    examples = [
+        root / "example_dataweave_module.py",
+        root / "example_streaming.py",
+        root / "python" / "examples" / "simple_demo.py",
+        root / "python" / "examples" / "streaming_demo.py",
+        root / "example_streaming.mjs",
+    ]
+    removed = (
+        "dataweave.run(",
+        "dataweave.run_streaming(",
+        "dataweave.run_transform(",
+        "dataweave.run_callback(",
+        "dataweave.run_input_output_callback(",
+        "dataweave.cleanup(",
+        "import { runTransform, cleanup }",
+    )
+
+    for example in examples:
+        content = example.read_text(encoding="utf-8")
+        assert not any(symbol in content for symbol in removed), example
+
+
+@pytest.mark.unit
+def test_python_module_example_reports_cleanup_after_owned_runtimes_exit():
+    example = (
+        Path(__file__).resolve().parents[3] / "example_dataweave_module.py"
+    ).read_text(encoding="utf-8")
+
+    simple_invocation = example.index("example_simple_functions(dw)")
+    simple_cleanup = example.index('print("\\n[OK] Cleanup completed")')
+    context_invocation = example.index("example_context_manager(dw)")
+    context_cleanup = example.index(
+        'print("\\n[OK] Context manager automatically cleaned up resources")'
+    )
+
+    assert simple_invocation < simple_cleanup
+    assert context_invocation < context_cleanup

@@ -54,4 +54,8 @@ def load_wrapper(src=None):
             f"DataWeave Python binding not importable from {site}. "
             f"Run: ./gradlew native-lib:stagePythonNativeLib  ({e})"
         )
+    if not isinstance(getattr(dataweave, "DataWeave", None), type):
+        raise RuntimeError(
+            f"DataWeave Python binding at {site} did not export a DataWeave constructor"
+        )
     return dataweave

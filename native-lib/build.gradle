@@ -157,6 +157,9 @@ tasks.register('pythonTest', Exec) {
 
   dependsOn tasks.named('stagePythonNativeLib')
   workingDir("${projectDir}/python")
+  def nativeLibraryExtension = System.getProperty('os.name').toLowerCase().contains('windows') ? 'dll' :
+    (System.getProperty('os.name').toLowerCase().contains('mac') ? 'dylib' : 'so')
+  environment 'DATAWEAVE_NATIVE_LIB', "${layout.buildDirectory.get().asFile}/native/nativeCompile/dwlib.${nativeLibraryExtension}"
   inputs.dir("${projectDir}/python/tests")
   inputs.file("${projectDir}/python/pytest.ini")
   inputs.file("${projectDir}/python/pyproject.toml")

@@ -17,9 +17,14 @@ import dataweave
 def main():
     print("=== DataWeave Python Streaming Demo ===\n")
 
+    with dataweave.DataWeave() as dw:
+        run_examples(dw)
+
+
+def run_examples(dw: dataweave.DataWeave):
     # Example 1: Output streaming
     print("1. Output streaming (small dataset):")
-    stream = dataweave.run_streaming("output application/json --- (1 to 10) map {id: $}")
+    stream = dw.run_streaming("output application/json --- (1 to 10) map {id: $}")
     chunks = []
     for chunk in stream:
         chunks.append(chunk)
@@ -31,7 +36,7 @@ def main():
 
     # Example 2: Output streaming with larger dataset
     print("2. Output streaming (large dataset - 1000 items):")
-    stream = dataweave.run_streaming("output application/json --- (1 to 1000)")
+    stream = dw.run_streaming("output application/json --- (1 to 1000)")
 
     total_bytes = 0
     chunk_count = 0
@@ -46,7 +51,7 @@ def main():
     # Example 3: Bidirectional streaming (from bytes)
     print("3. Bidirectional streaming (in-memory):")
     json_input = b'[1, 2, 3, 4, 5]'
-    stream = dataweave.run_transform(
+    stream = dw.run_transform(
         "output application/json --- payload map ($ * $)",
         input_stream=[json_input],
         input_mime_type="application/json"
@@ -66,7 +71,7 @@ def main():
         yield b'{"id":2,"name":"Bob"},'
         yield b'{"id":3,"name":"Charlie"}]'
 
-    stream = dataweave.run_transform(
+    stream = dw.run_transform(
         "output application/json --- payload map { name: $.name }",
         input_stream=generate_json_chunks(),
         input_mime_type="application/json"
@@ -87,7 +92,7 @@ def main():
     csv_data = b"id,name,age\n1,Alice,25\n2,Bob,30\n3,Charlie,35\n"
     input_file = io.BytesIO(csv_data)
 
-    stream = dataweave.run_transform(
+    stream = dw.run_transform(
         'output application/json --- payload map { name: $.name, age: $.age }',
         input_stream=iter(lambda: input_file.read(20), b""),  # Read 20 bytes at a time
         input_mime_type="application/csv"
@@ -115,7 +120,7 @@ def main():
         output_chunks_cb.append(data)
         return 0  # 0 = success
 
-    result = dataweave.run_input_output_callback(
+    result = dw.run_input_output_callback(
         "output application/json deferred=true --- payload map ($ * 2)",
         input_name="payload",
         input_mime_type="application/json",
@@ -129,15 +134,14 @@ def main():
 
     # Example 7: Using with context manager
     print("7. Streaming with context manager:")
-    with dataweave.DataWeave() as dw:
-        stream = dw.run_streaming("output application/csv --- (1 to 5)")
-        csv_output = b"".join(stream).decode('utf-8')
-        print(f"   CSV output: {csv_output}")
+    stream = dw.run_streaming("output application/csv --- (1 to 5)")
+    csv_output = b"".join(stream).decode('utf-8')
+    print(f"   CSV output: {csv_output}")
     print()
 
     # Example 8: Error handling in streaming
     print("8. Error handling in streaming:")
-    stream = dataweave.run_streaming("output application/json --- invalid syntax here")
+    stream = dw.run_streaming("output application/json --- invalid syntax here")
 
     # Drain chunks (there may be none)
     for chunk in stream:

@@ -1,5 +1,10 @@
 # Python Binding Modernization Design
 
+> **Superseded in part (2026-09-15).** The architecture and streaming work in
+> this historical design remains relevant, but its module-level convenience API
+> was subsequently removed. Current public lifecycle semantics are defined by
+> [`2026-09-15-explicit-instance-only-bindings-design.md`](2026-09-15-explicit-instance-only-bindings-design.md).
+
 ## Goal
 
 Modernize the Python `dataweave` binding without changing its supported public
@@ -14,10 +19,11 @@ types live in `models.py`; input/output wire conversion lives in `encoding.py`;
 `native.py` owns ctypes library loading, isolate lifecycle, ABI signatures, and
 native string release; `runtime.py` owns `DataWeave` orchestration.
 
-`DataWeave` composes one `NativeRuntime`. Module-level functions retain the
-existing lazy singleton behavior. Explicit callers can use `DataWeave` as a
-context manager. Native failures raise `DataWeaveError`; script failures remain
-result envelopes unless the caller selects `raise_on_error`.
+`DataWeave` composes one `NativeRuntime`. This design originally retained
+module-level functions with lazy singleton behavior; those functions were
+subsequently removed. Callers use `DataWeave` as a context manager or manage its
+lifecycle explicitly. Native failures raise `DataWeaveError`; script failures
+remain result envelopes unless the caller selects `raise_on_error`.
 
 ## Streaming
 
@@ -26,10 +32,12 @@ native worker attaches and detaches its own isolate thread. Callback exceptions
 return `-1` and never unwind across the C ABI. Stream input retains remainders
 when the iterable source provides chunks larger than the native buffer.
 
-`Stream.close()` and its context manager request cancellation. Python cannot
-forcibly interrupt a native call, so cleanup uses a short bounded join and an
-unresponsive worker is daemonized; finalization never raises. Low-level callback
-input larger than the supplied native buffer is rejected rather than truncated.
+`Stream.close()` and its context manager request cancellation. This design
+originally used a short bounded join and daemonized an unresponsive worker; that
+cleanup behavior was subsequently superseded. Python cannot forcibly interrupt
+a native call, so current explicit-instance `DataWeave.cleanup()` refuses while
+an active registered streaming worker remains attached. Low-level callback input
+larger than the supplied native buffer is rejected rather than truncated.
 
 ## Testing And TCK
 

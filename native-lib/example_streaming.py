@@ -11,7 +11,7 @@ import resource
 import psutil, os
 import time
 
-def example_streaming_input_output_callback():
+def example_streaming_input_output_callback(dw: dataweave.DataWeave):
     print("\nTesting streaming input and output using callbacks (square numbers)...")
     try:
         start_time = time.monotonic()
@@ -75,7 +75,7 @@ payload map ($ * $)"""
         current_rss = psutil.Process(os.getpid()).memory_info().rss
         print(f">>> Before run_input_output_callback, Max RSS: {usage.ru_maxrss / 1048576:.1f} MB, Current RSS: {current_rss / 1048576:.1f} MB ---")
 
-        result = dataweave.run_input_output_callback(
+        result = dw.run_input_output_callback(
             script,
             input_name="payload",
             input_mime_type="application/json",
@@ -100,7 +100,7 @@ payload map ($ * $)"""
         return False
 
 
-def example_streaming_run_transform():
+def example_streaming_run_transform(dw: dataweave.DataWeave):
     print("\nTesting streaming input and output using run_transform (square numbers)...")
     try:
         start_time = time.monotonic()
@@ -151,7 +151,7 @@ payload map ($ * $)"""
         current_rss = psutil.Process(os.getpid()).memory_info().rss
         print(f">>> Before run_transform, Max RSS: {usage.ru_maxrss / 1048576:.1f} MB, Current RSS: {current_rss / 1048576:.1f} MB ---")
 
-        stream = dataweave.run_transform(
+        stream = dw.run_transform(
             script,
             input_stream=input_chunks(),
             input_mime_type="application/json",
@@ -185,7 +185,7 @@ payload map ($ * $)"""
         return False
 
 
-def doc_example():
+def doc_example(dw: dataweave.DataWeave):
     json_input = b'[1,2,3,4,5]'
     pos = 0
 
@@ -200,7 +200,7 @@ def doc_example():
         chunks.append(data)
         return 0  # 0 = success
 
-    result = dataweave.run_input_output_callback(
+    result = dw.run_input_output_callback(
         "output application/json deferred=true --- payload map ($ * $)",
         input_name="payload",
         input_mime_type="application/json",
@@ -213,19 +213,20 @@ def doc_example():
 
 
 def main():
-    print("=" * 70)
-    print("run_input_output_callback (low-level callbacks)")
-    print("=" * 70)
-    example_streaming_input_output_callback()
+    with dataweave.DataWeave() as dw:
+        print("=" * 70)
+        print("run_input_output_callback (low-level callbacks)")
+        print("=" * 70)
+        example_streaming_input_output_callback(dw)
 
-    print("\n")
-    print("=" * 70)
-    print("run_transform (Pythonic generator API)")
-    print("=" * 70)
-    example_streaming_run_transform()
+        print("\n")
+        print("=" * 70)
+        print("run_transform (Pythonic generator API)")
+        print("=" * 70)
+        example_streaming_run_transform(dw)
 
-    print("\n")
-    doc_example()
+        print("\n")
+        doc_example(dw)
 
 
 if __name__ == "__main__":
