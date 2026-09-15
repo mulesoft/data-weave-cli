@@ -116,8 +116,6 @@ def example_context_manager(dw: dataweave.DataWeave):
     result = dw.run(script, {"numbers": [1, 2, 3, 4, 5], "multiplier": 10})
     ok = assert_result(script, result, "[\n  10, \n  20, \n  30, \n  40, \n  50\n]") and ok
 
-    print("\n[OK] Operations share the same runtime")
-
     return ok
 
 
@@ -169,14 +167,21 @@ def main():
     print("Just import and use - no ctypes, no manual memory management.\n")
     
     try:
+        all_ok = True
+
         with dataweave.DataWeave() as dw:
-            all_ok = True
             all_ok = example_simple_functions(dw) and all_ok
+
+        print("\n[OK] Cleanup completed")
+
+        with dataweave.DataWeave() as dw:
             all_ok = example_context_manager(dw) and all_ok
-            all_ok = example_explicit_format(dw) and all_ok
-            example_error_handling(dw)
 
         print("\n[OK] Context manager automatically cleaned up resources")
+
+        with dataweave.DataWeave() as dw:
+            all_ok = example_explicit_format(dw) and all_ok
+            example_error_handling(dw)
 
         print("\n" + "="*70)
         if all_ok:
