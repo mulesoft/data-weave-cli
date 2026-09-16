@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ mulesoft-ubuntu, mulesoft-windows, macos-latest ]
+        os: [ mulesoft-ubuntu, mulesoft-windows, macos-15 ]
         include:
           # script_name → artifact-name OS token (our naming convention).
           # distro_os   → Gradle distro classifier (native-cli getOsName():
@@ -30,7 +30,7 @@ jobs:
           - os: mulesoft-windows
             script_name: windows
             distro_os: windows
-          - os: macos-latest
+          - os: macos-15
             script_name: macos
             distro_os: osx
     runs-on: ${{ matrix.os }}
@@ -43,10 +43,25 @@ jobs:
         run: echo "ARCH=$(uname -m)" >> "$GITHUB_ENV"
         shell: bash
 
+      - name: Set macOS deployment target
+        if: runner.os == 'macOS'
+        run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+        shell: bash
+
       - name: Build foundation
         uses: ./.github/actions/build-foundation
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify macOS native deployment targets
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          for artifact in native-cli/build/native/nativeCompile/dw native-lib/build/native/nativeCompile/dwlib.dylib; do
+            min_os=$(/usr/bin/otool -l "$artifact" | awk '$1 == "minos" { print $2; exit }')
+            test "$min_os" = "11.0"
+          done
+        shell: bash
 
       - name: CLI
         uses: ./.github/actions/cli
