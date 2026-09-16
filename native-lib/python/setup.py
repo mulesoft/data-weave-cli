@@ -38,24 +38,11 @@ def get_platform_tag():
         machine = "i686"
 
     if system == "darwin":
-        # macOS: use macosx_11_0 as minimum for universal compatibility
-        # Adjust based on actual deployment target if needed
-        mac_ver = platform.mac_ver()[0]
-        if mac_ver:
-            parts = mac_ver.split(".")
-            major = int(parts[0])
-            minor = int(parts[1]) if len(parts) > 1 else 0
-            # Use at least 11.0 for arm64, 10.9 for x86_64
-            if machine == "arm64":
-                major = max(major, 11)
-                minor = 0
-            else:
-                major = max(major, 10)
-                minor = max(minor, 9) if major == 10 else 0
-        else:
-            major, minor = (11, 0) if machine == "arm64" else (10, 9)
-
-        return f"macosx_{major}_{minor}_{machine}"
+        # Match the deployment target used to build the bundled native library,
+        # rather than the version of the macOS CI runner.
+        if machine == "arm64":
+            return "macosx_11_0_arm64"
+        return "macosx_11_0_x86_64"
 
     elif system == "linux":
         # Linux: use manylinux2014 for broad compatibility
