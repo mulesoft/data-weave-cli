@@ -80,7 +80,11 @@ The GraalVM `buildArgs` in each `build.gradle` are load-bearing. When adding dep
 - `buildPythonWheel` (setup.py `bdist_wheel`) and `buildNodePackage` (npm install → node-gyp rebuild → tsc → npm pack) produce distributables.
 - Bindings locate the library via `DATAWEAVE_NATIVE_LIB=/abs/path/to/dwlib.*`, then fall back to the packaged/dev-build locations.
 
-See `native-lib/README.md` for the full binding API (sync `run`, `run_streaming`, `run_transform`, callback streaming, error types).
+Both bindings require caller-owned `DataWeave` instances. Python callers use a
+context manager (or explicitly call `initialize()` / `cleanup()`); Node callers
+call `initialize()` and await `cleanup()` in `finally`. See
+`native-lib/README.md` for the full instance API (buffered execution, streaming,
+callback streaming, resolver configuration, lifecycle, and error types).
 
 ## Domain concepts (`dw` CLI)
 

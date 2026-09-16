@@ -48,9 +48,9 @@ export async function loadWrapper() {
   const wrapperPath = resolveWrapperPath();
 
   const mod = await import(pathToFileURL(wrapperPath).href);
-  const api = mod.run ? mod : mod.default;
-  if (!api || typeof api.run !== "function") {
-    throw new Error(`Wrapper at ${wrapperPath} did not export a run() function`);
+  const api = mod.DataWeave ? mod : mod.default;
+  if (!api || typeof api.DataWeave !== "function") {
+    throw new Error(`Wrapper at ${wrapperPath} did not export a DataWeave constructor`);
   }
   return api;
 }

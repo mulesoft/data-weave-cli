@@ -127,7 +127,7 @@ class TestEnv(unittest.TestCase):
 class TestWrapper(unittest.TestCase):
     def test_load_wrapper_exposes_api(self):
         api = wrapper.load_wrapper()
-        for attr in ("DataWeave", "run", "run_transform", "run_streaming"):
+        for attr in ("DataWeave", "ExecutionResult", "InputValue"):
             self.assertTrue(hasattr(api, attr), f"binding missing {attr}")
 
     def test_env_override_missing_dir_raises(self):
@@ -165,9 +165,6 @@ class TestWrapper(unittest.TestCase):
             library.write_bytes(b"external dwlib")
             (dw_pkg / "__init__.py").write_text(
                 "class DataWeave: pass\n"
-                "def run(*a, **k): return None\n"
-                "def run_transform(*a, **k): return None\n"
-                "def run_streaming(*a, **k): return None\n"
             )
 
             old_env = os.environ.get("DW_BENCH_PY_SITE")
@@ -178,7 +175,6 @@ class TestWrapper(unittest.TestCase):
                 self.assertEqual(wrapper.resolve_dwlib_path(), library)
                 api = wrapper.load_wrapper()
                 self.assertTrue(hasattr(api, "DataWeave"))
-                self.assertTrue(hasattr(api, "run"))
             finally:
                 if old_env is not None:
                     os.environ["DW_BENCH_PY_SITE"] = old_env
@@ -188,6 +184,36 @@ class TestWrapper(unittest.TestCase):
                     sys.modules["dataweave"] = old_modules
                 else:
                     sys.modules.pop("dataweave", None)
+                if tmpdir in sys.path:
+                    sys.path.remove(tmpdir)
+
+    def test_env_override_without_dataweave_constructor_raises(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dw_pkg = Path(tmpdir) / "dataweave"
+            dw_pkg.mkdir()
+            (dw_pkg / "__init__.py").write_text("source = 'override'\n")
+
+            old_env = os.environ.get("DW_BENCH_PY_SITE")
+            cached_modules = {
+                name: module
+                for name, module in sys.modules.items()
+                if name == "dataweave" or name.startswith("dataweave.")
+            }
+            try:
+                os.environ["DW_BENCH_PY_SITE"] = tmpdir
+                with self.assertRaisesRegex(
+                    RuntimeError, "did not export a DataWeave constructor"
+                ):
+                    wrapper.load_wrapper()
+            finally:
+                if old_env is not None:
+                    os.environ["DW_BENCH_PY_SITE"] = old_env
+                else:
+                    os.environ.pop("DW_BENCH_PY_SITE", None)
+                for name in list(sys.modules):
+                    if name == "dataweave" or name.startswith("dataweave."):
+                        del sys.modules[name]
+                sys.modules.update(cached_modules)
                 if tmpdir in sys.path:
                     sys.path.remove(tmpdir)
 
@@ -210,7 +236,9 @@ class TestWrapper(unittest.TestCase):
                 site = Path(tmpdir)
                 dw_pkg = site / "dataweave"
                 dw_pkg.mkdir()
-                (dw_pkg / "__init__.py").write_text("source = 'override'\n")
+                (dw_pkg / "__init__.py").write_text(
+                    "class DataWeave: pass\nsource = 'override'\n"
+                )
 
                 os.environ["DW_BENCH_PY_SITE"] = tmpdir
                 override_api = wrapper.load_wrapper()

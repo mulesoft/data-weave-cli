@@ -33,11 +33,13 @@ export async function main() {
   // Cold-start / first-run first (fresh processes), then warm/streaming in-process.
   const coldRows = await runColdStartAndFirstRun(manifest);
   const api = await loadWrapper();
+  const dw = new api.DataWeave();
+  dw.initialize();
   let warmRows;
   try {
-    warmRows = await runWarmAndStreaming(api, manifest);
+    warmRows = await runWarmAndStreaming(dw, manifest);
   } finally {
-    api.cleanup();
+    await dw.cleanup();
   }
 
   const cases = [...coldRows, ...warmRows];

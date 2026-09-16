@@ -4,6 +4,26 @@
 **Module:** `native-lib` Python binding
 **Related implementation:** Node external-module support in PR #154
 
+> **⚠️ Superseded (2026-08-31).** This document describes an early Python-only
+> resolver design that PR #157 did not implement. It is retained for historical
+> context only. The shipped design is
+> [`2026-08-07-native-lib-multi-engine-design.md`](2026-08-07-native-lib-multi-engine-design.md).
+> The following assertions below are stale and no longer accurate:
+> - `dwlib` no longer exports `run_script_with_resolver`; resolver-backed
+>   execution goes through the handle-based `create_engine_with_resolver` +
+>   `run_script_engine` ABI.
+> - The feature *did* require Java and native-image changes (the shared engine
+>   layer), not "no Java/Node changes."
+> - There are no dedicated per-instance Python isolates; all `DataWeave`
+>   instances share one process-wide isolate, addressed by opaque handles.
+> - The resolver is bound at `DataWeave.initialize()` (via
+>   `create_engine_with_resolver`), not installed on the first `run()`.
+>
+> **Further superseded (2026-09-15).** The module-level execution and cleanup
+> functions discussed below were subsequently removed. The current public API
+> is defined by
+> [`2026-09-15-explicit-instance-only-bindings-design.md`](2026-09-15-explicit-instance-only-bindings-design.md).
+
 ## Problem
 
 The Python binding cannot resolve reusable DataWeave modules supplied by an
@@ -91,8 +111,9 @@ with DataWeave(resolve_module=resolver) as dw:
 Export `ModuleResolver`, all four factories, and the existing public symbols
 from `dataweave.__init__`.
 
-The module-level convenience functions remain unchanged. Like Node, callers
-must construct a `DataWeave` instance to provide `resolve_module`.
+This proposal originally left module-level convenience functions unchanged.
+They were subsequently removed; every caller now constructs a `DataWeave`
+instance, including callers that provide `resolve_module`.
 
 ## Resolver Factories
 
@@ -317,7 +338,8 @@ No file under `native-lib/node` is modified.
 - content-free default diagnostics and debug opt-in;
 - missing `run_script_with_resolver` capability;
 - resolver-less versus resolver-aware `DataWeave.run()` dispatch;
-- module-level convenience API remains resolver-less.
+- module-level convenience API remained resolver-less in this proposal (it was
+  subsequently removed).
 
 ### Native Integration
 

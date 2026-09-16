@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { runTransform, cleanup } from "./node/dist/index.js";
+import { DataWeave } from "./node/dist/index.js";
 
 function formatBytes(bytes) {
   return (bytes / 1048576).toFixed(1);
@@ -59,7 +59,7 @@ function* inputChunks(numElements) {
   // This shouldn't happen but just in case
 }
 
-async function exampleRunTransform() {
+async function exampleRunTransform(dw) {
   console.log("\nTesting streaming input and output using runTransform (square numbers)...");
 
   const startTime = process.hrtime.bigint();
@@ -72,7 +72,7 @@ payload map ($ * $)`;
   const startRSS = getRSS();
   console.log(`>>> Before runTransform, RSS: ${formatBytes(startRSS)} MB`);
 
-  const gen = runTransform(script, inputChunks(numElements), {
+  const gen = dw.runTransform(script, inputChunks(numElements), {
     mimeType: "application/json",
     charset: "utf-8",
   });
@@ -114,13 +114,15 @@ async function main() {
   console.log("Node.js runTransform (AsyncGenerator API)");
   console.log("=".repeat(70));
 
+  const dw = new DataWeave();
+  dw.initialize();
   try {
-    await exampleRunTransform();
+    await exampleRunTransform(dw);
   } catch (e) {
     console.error(`[FAIL] runTransform failed: ${e.message}`);
     console.error(e.stack);
   } finally {
-    cleanup();
+    await dw.cleanup();
   }
 }
 

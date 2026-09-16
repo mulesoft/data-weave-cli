@@ -57,13 +57,19 @@ npm run build
 ### Basic Script Execution
 
 ```javascript
-import * as dataweave from 'dataweave-native';
+import { DataWeave } from 'dataweave-native';
 
-const result = dataweave.run('2 + 2');
-if (result.success) {
-  console.log(result.getString());  // "4"
-} else {
-  console.error('Error:', result.error);
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const result = dw.run('2 + 2');
+  if (result.success) {
+    console.log(result.getString());  // "4"
+  } else {
+    console.error('Error:', result.error);
+  }
+} finally {
+  await dw.cleanup();
 }
 ```
 
@@ -72,41 +78,59 @@ if (result.success) {
 Inputs can be plain JavaScript values (auto-encoded):
 
 ```javascript
-const result = dataweave.run(
-  'num1 + num2',
-  { num1: 25, num2: 17 }
-);
-console.log(result.getString());  // "42"
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const result = dw.run(
+    'num1 + num2',
+    { num1: 25, num2: 17 }
+  );
+  console.log(result.getString());  // "42"
+} finally {
+  await dw.cleanup();
+}
 ```
 
 ### Error Handling
 
 ```javascript
-const result = dataweave.run('invalid syntax', {}, { raiseOnError: true });
-// Throws DataWeaveScriptError with result.error details
+const dw = new DataWeave();
+dw.initialize();
+try {
+  dw.run('invalid syntax', {}, { raiseOnError: true });
+  // Throws DataWeaveScriptError with result.error details
+} finally {
+  await dw.cleanup();
+}
 ```
 
 ## API Reference
 
-### Module-Level Functions
+### `DataWeave` Class
 
-The module exports convenience functions that use a global singleton instance:
+Construct one `DataWeave` per lifecycle owner, call `initialize()` before use,
+and always await `cleanup()` in `finally`.
 
-#### `run(script, inputs?, opts?): ExecutionResult`
+#### `dw.run(script, inputs?, opts?): ExecutionResult`
 
 Execute a DataWeave script and return the complete result.
 
 ```javascript
-import { run } from 'dataweave-native';
+import { DataWeave } from 'dataweave-native';
 
-const result = run(
-  '%dw 2.0\noutput application/json\n---\npayload.items map $.price',
-  { payload: { items: [{ price: 10 }, { price: 20 }] } }
-);
-
-if (result.success) {
-  console.log(result.getString());  // "[10, 20]"
-  console.log(result.mimeType);     // "application/json"
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const result = dw.run(
+    '%dw 2.0\noutput application/json\n---\npayload.items map $.price',
+    { payload: { items: [{ price: 10 }, { price: 20 }] } }
+  );
+  if (result.success) {
+    console.log(result.getString());  // "[10, 20]"
+    console.log(result.mimeType);     // "application/json"
+  }
+} finally {
+  await dw.cleanup();
 }
 ```
 
@@ -126,24 +150,30 @@ if (result.success) {
 - `getString()`: Decode result as string
 - `getBytes()`: Decode result as Buffer
 
-#### `runStreaming(script, inputs?): AsyncGenerator<Buffer, StreamingResult>`
+#### `dw.runStreaming(script, inputs?): AsyncGenerator<Buffer, StreamingResult>`
 
 Execute a DataWeave script with streaming output.
 
 ```javascript
-import { runStreaming } from 'dataweave-native';
+import { DataWeave } from 'dataweave-native';
 
-const generator = runStreaming(
-  '%dw 2.0\noutput application/json\n---\n[1, 2, 3, 4, 5]'
-);
-
-for await (const chunk of generator) {
-  console.log('Chunk:', chunk.toString());
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const generator = dw.runStreaming(
+    '%dw 2.0\noutput application/json\n---\n[1, 2, 3, 4, 5]'
+  );
+  // Drive next() manually to capture the terminal StreamingResult.
+  let meta;
+  while (true) {
+    const { value, done } = await generator.next();
+    if (done) { meta = value; break; }
+    console.log('Chunk:', value.toString());
+  }
+  console.log('MIME type:', meta.mimeType);
+} finally {
+  await dw.cleanup();
 }
-
-// Generator return value contains metadata:
-const meta = await generator.return();
-console.log('MIME type:', meta.value.mimeType);
 ```
 
 **Parameters:**
@@ -159,30 +189,55 @@ console.log('MIME type:', meta.value.mimeType);
 - `charset` (string | null): Output character encoding
 - `binary` (boolean): Whether output is binary
 
-#### `runTransform(script, input, opts?): AsyncGenerator<Buffer, StreamingResult>`
+#### `dw.runTransform(script, input, opts?): AsyncGenerator<Buffer, StreamingResult>`
 
 Execute a DataWeave script with streaming input and output (bidirectional streaming).
 
 ```javascript
-import { runTransform } from 'dataweave-native';
-import { createReadStream } from 'fs';
+import { DataWeave } from 'dataweave-native';
+import { readFileSync } from 'fs';
 
-// Transform a large CSV file to JSON without loading it all into memory
-const generator = runTransform(
-  '%dw 2.0\noutput application/json\n---\npayload',
-  createReadStream('large-file.csv'),
-  {
-    inputName: 'payload',
-    mimeType: 'application/csv',
-    charset: 'UTF-8',
-    inputs: { threshold: 100 }
+// The native read callback is synchronous, so an ASYNC input iterable (e.g.
+// fs.createReadStream) is fully pre-buffered into memory before the transform
+// starts. A SYNCHRONOUS iterable is instead consumed on demand -- one chunk at a
+// time -- so the transform makes no extra full copy of the input (it does NOT by
+// itself bound total memory: a source like readFileSync still holds the whole
+// input). (See "Sync vs async input and memory" below.)
+function* chunked(buf, size = 65536) {
+  for (let i = 0; i < buf.length; i += size) yield buf.subarray(i, i + size);
+}
+
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const generator = dw.runTransform(
+    '%dw 2.0\noutput application/json\n---\npayload',
+    chunked(readFileSync('large-file.csv')),
+    {
+      inputName: 'payload',
+      mimeType: 'application/csv',
+      charset: 'UTF-8',
+      inputs: { threshold: 100 }
+    }
+  );
+  for await (const chunk of generator) {
+    process.stdout.write(chunk);
   }
-);
-
-for await (const chunk of generator) {
-  process.stdout.write(chunk);
+} finally {
+  await dw.cleanup();
 }
 ```
+
+> **Sync vs async input and memory.** The native read callback runs synchronously
+> on the JS thread. **Synchronous** iterables (arrays, generators) are consumed
+> on demand — the transform holds only one chunk at a time and makes no extra
+> full copy of the input. This bounds the transform's *added* memory, not total
+> memory: if the source itself already holds the whole input (e.g. `readFileSync`),
+> that memory is still resident. **Async** iterables (e.g. `fs.createReadStream()`)
+> are **fully pre-buffered** into memory before the transform starts, because their
+> `.next()` returns a Promise that cannot be awaited inside the synchronous
+> callback. For large inputs, prefer a synchronous generator so the transform adds
+> no second copy.
 
 **Parameters:**
 - `script` (string): DataWeave script
@@ -190,27 +245,49 @@ for await (const chunk of generator) {
 - `opts` (object, optional): Options
   - `inputName` (string): Name of input variable (default: "payload")
   - `mimeType` (string): Input MIME type (default: "application/json")
-  - `charset` (string | null): Input character encoding
+  - `charset` (string, optional): Input character encoding
   - `inputs` (object): Additional input variables
 
 **Yields:** `Buffer` chunks as they're produced
 
 **Returns:** `StreamingResult`
 
-#### `cleanup(): void`
+#### `dw.cleanup(): Promise<void>`
 
-Clean up the global DataWeave runtime instance. Called automatically on process exit.
+Cleanup is required for every initialized instance and is never registered as a
+process hook. It closes the instance to new work, cancels and waits for its
+abandoned streams/transforms, destroys its engine, and releases its reference to
+the shared native isolate. When this is the final reference, the promise resolves
+after teardown is attempted. An ordinary teardown failure retains the isolate
+for a safe retry; an unrecoverable teardown-plus-detach double failure emits a
+diagnostic and deliberately leaks that isolate for the process lifetime. If
+other instances remain initialized, they continue using the shared isolate.
 
-```javascript
-import { cleanup } from 'dataweave-native';
+Install application signal handlers when graceful signal shutdown is required,
+and have them await each owned instance's `cleanup()` before exiting. `SIGKILL`
+cannot be handled.
 
-// Manual cleanup (usually not needed)
-cleanup();
-```
+### Callback and stream lifecycle
 
-### Class-Based API
+Resolver, read, and write callbacks must not call DataWeave lifecycle or
+execution APIs on the same thread. The binding rejects that reentry with a
+public `DataWeaveError` instead of recursively entering the native runtime.
+Native addon callers receive the message `DataWeave native methods cannot be
+called from a native callback` and code `ERR_DATAWEAVE_CALLBACK_REENTRANCY`.
 
-For more control, use the `DataWeave` class directly:
+Streaming and transform work captures the initialized engine generation. If
+cleanup or reinitialization happens before it is consumed or admitted, it fails
+with `DataWeaveError: DataWeave operation belongs to a stale engine generation.`
+and never runs against the replacement engine. Cleanup cancels and waits for
+abandoned active streams and transforms before destroying their engine.
+
+The addon uses bounded native output buffering. Its byte and chunk watermarks,
+finite thread-safe-function queue, and controller/sequence credit bookkeeping
+are implementation details, not public configuration or a BigInt sequence API.
+The bound excludes `Buffer` objects retained by application code after a chunk
+is yielded.
+
+### Lifecycle Example
 
 ```javascript
 import { DataWeave } from 'dataweave-native';
@@ -222,24 +299,28 @@ try {
   const result = dw.run('2 + 2');
   console.log(result.getString());
 } finally {
-  dw.cleanup();
+  await dw.cleanup();
 }
 ```
 
 **Methods:**
 - `initialize()`: Initialize the native library
-- `cleanup()`: Release native resources
-- `run(script, inputs?, opts?)`: Same as module-level `run()`
-- `runStreaming(script, inputs?)`: Same as module-level `runStreaming()`
-- `runTransform(script, input, opts?)`: Same as module-level `runTransform()`
+- `cleanup(): Promise<void>`: Release this instance's native resources. When it releases the last initialized instance in the process, it drains any in-flight streaming/transform op, then resolves once the teardown **attempt** completes — logical release is guaranteed, physical reclamation is not (an ordinary failure retains the isolate and retries where safe; an unrecoverable teardown-plus-detach double failure leaks it until process exit, with a diagnostic). Otherwise it resolves as soon as this instance is released, leaving the isolate live for other instances.
+- `run(script, inputs?, opts?)`: Execute and buffer a complete result
+- `runStreaming(script, inputs?)`: Stream output asynchronously
+- `runTransform(script, input, opts?)`: Stream input and output asynchronously
 
 ### External Modules
 
-DataWeave scripts can import external modules using the `resolveModule` option. The module-level convenience functions (`run()`, `runStreaming()`, `runTransform()`) operate on a lazily-initialized singleton that cannot be configured with a resolver — you must construct your own `DataWeave` instance:
+Configure external modules with the `resolveModule` constructor option. Custom
+modules resolve for `dw.run()`. They do not resolve inside
+`dw.runStreaming()`/`dw.runTransform()` because those operations execute on a
+background thread that cannot safely call the JavaScript resolver.
 
 ```typescript
 import { DataWeave, composeResolvers, modulesFromDirectory, modulesFromJars } from 'dataweave-native';
 
+// Inside an async function (uses `await` for modulesFromJars and cleanup()).
 const dw = new DataWeave({
   resolveModule: composeResolvers(
     modulesFromDirectory('./my-modules'),
@@ -247,21 +328,33 @@ const dw = new DataWeave({
   )
 });
 dw.initialize();
+try {
+  const result = dw.run(`
+    %dw 2.0
+    import org::company::utils
+    output application/json
+    ---
+    utils::doSomething()
+  `);
 
-const result = dw.run(`
-  %dw 2.0
-  import org::company::utils
-  output application/json
-  ---
-  utils::doSomething()
-`);
-
-if (result.success) {
-  console.log(result.getString());
+  if (result.success) {
+    console.log(result.getString());
+  }
+} finally {
+  // Release the engine and resolver closure when done.
+  await dw.cleanup();
 }
 ```
 
 See [docs/external-modules.md](docs/external-modules.md) for complete documentation, resolver factories, error handling, and dependency management. Note: a resolver runs with full process permissions (no sandboxing) — see the "Security / Trust Model" section there before pointing one at untrusted sources.
+
+### Custom module resolution scope
+
+- A `resolveModule` you configure applies to `run()`.
+- Built-in modules (e.g. `dw::core::*`) resolve everywhere — `run()`, `runStreaming()`, and `runTransform()`.
+- Custom modules do **not** resolve inside `runStreaming()`/`runTransform()`: those execute on a background thread that must not call back into your resolver, so a streamed/transformed script that imports a custom module fails closed (reports the module as not found) rather than making an unsafe cross-thread call. If you need a custom module in a streamed/transform script, resolve it via `run()` instead, or inline the module into the script.
+
+See [docs/external-modules.md](docs/external-modules.md#multiple-independent-engines) for the full explanation, including the Worker-thread ownership rules.
 
 ### Input Formats
 
@@ -272,7 +365,7 @@ Inputs can be provided in multiple formats:
 Automatically serialized to JSON:
 
 ```javascript
-run('payload.name', { payload: { name: 'Alice', age: 30 } });
+dw.run('payload.name', { payload: { name: 'Alice', age: 30 } });
 ```
 
 #### Explicit Input Configuration
@@ -280,7 +373,7 @@ run('payload.name', { payload: { name: 'Alice', age: 30 } });
 For non-JSON inputs, use the input configuration format:
 
 ```javascript
-const result = run(
+const result = dw.run(
   'payload.person.name',
   {
     payload: {
@@ -302,7 +395,7 @@ const result = run(
 #### CSV Example
 
 ```javascript
-run(
+dw.run(
   'payload.column_0[0]',
   {
     payload: {
@@ -319,7 +412,7 @@ run(
 ### JSON Transformation
 
 ```javascript
-import { run } from 'dataweave-native';
+import { DataWeave } from 'dataweave-native';
 
 const input = {
   users: [
@@ -337,15 +430,21 @@ output application/json
 }
 `;
 
-const result = run(script, { payload: input });
-console.log(result.getString());
-// {"admins":["Alice"]}
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const result = dw.run(script, { payload: input });
+  console.log(result.getString());
+  // {"admins":["Alice"]}
+} finally {
+  await dw.cleanup();
+}
 ```
 
 ### XML Parsing
 
 ```javascript
-import { run } from 'dataweave-native';
+import { DataWeave } from 'dataweave-native';
 
 const xmlData = `
 <?xml version="1.0"?>
@@ -362,20 +461,27 @@ output application/json
 sum(payload.orders.*order.total)
 `;
 
-const result = run(script, {
-  payload: {
-    content: xmlData,
-    mimeType: 'application/xml'
-  }
-});
-console.log(result.getString());  // "300"
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const result = dw.run(script, {
+    payload: {
+      content: xmlData,
+      mimeType: 'application/xml'
+    }
+  });
+  console.log(result.getString());  // "300"
+} finally {
+  await dw.cleanup();
+}
 ```
 
 ### Streaming Large Files
 
 ```javascript
-import { runTransform } from 'dataweave-native';
-import { createReadStream, createWriteStream } from 'fs';
+import { once } from "node:events";
+import { readFileSync, createWriteStream } from "node:fs";
+import { DataWeave } from "dataweave-native";
 
 const script = `
 %dw 2.0
@@ -384,19 +490,33 @@ output application/json
 payload filter $.amount > 1000
 `;
 
-const generator = runTransform(
-  script,
-  createReadStream('large-transactions.csv'),
-  { mimeType: 'application/csv' }
-);
-
-const output = createWriteStream('filtered.json');
-
-for await (const chunk of generator) {
-  output.write(chunk);
+// A synchronous generator is consumed on demand: the transform does not make a
+// second full copy of the input. Note readFileSync still holds the whole file in
+// memory, so this bounds the transform's *added* memory, not total memory -- the
+// native read callback is synchronous, so there is no fully-streaming-from-disk
+// path (an async createReadStream would instead be pre-buffered in full first).
+function* chunked(buf, size = 65536) {
+  for (let i = 0; i < buf.length; i += size) yield buf.subarray(i, i + size);
 }
 
-output.end();
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const generator = dw.runTransform(
+    script,
+    chunked(readFileSync('large-transactions.csv')),
+    { mimeType: 'application/csv' }
+  );
+  const output = createWriteStream('filtered.json');
+  for await (const chunk of generator) {
+    if (!output.write(chunk)) {
+      await once(output, "drain");
+    }
+  }
+  output.end();
+} finally {
+  await dw.cleanup();
+}
 ```
 
 ## Error Handling
@@ -404,42 +524,64 @@ output.end();
 ### Result-Based Error Handling
 
 ```javascript
-const result = run('invalid syntax');
-if (!result.success) {
-  console.error('Execution failed:', result.error);
-  // Error: Unexpected token 'syntax'
+import { DataWeave } from 'dataweave-native';
+
+const dw = new DataWeave();
+dw.initialize();
+try {
+  const result = dw.run('invalid syntax');
+  if (!result.success) {
+    console.error('Execution failed:', result.error);
+  }
+} finally {
+  await dw.cleanup();
 }
 ```
 
 ### Exception-Based Error Handling
 
 ```javascript
-import { run, DataWeaveScriptError } from 'dataweave-native';
+import { DataWeave, DataWeaveScriptError } from 'dataweave-native';
 
+const dw = new DataWeave();
+dw.initialize();
 try {
-  run('invalid syntax', {}, { raiseOnError: true });
+  dw.run('invalid syntax', {}, { raiseOnError: true });
 } catch (err) {
   if (err instanceof DataWeaveScriptError) {
     console.error('Script error:', err.message);
     console.error('Result:', err.result.error);
   }
+} finally {
+  await dw.cleanup();
 }
 ```
 
 ### Streaming Error Handling
 
 ```javascript
+import { DataWeave } from 'dataweave-native';
+
+const dw = new DataWeave();
+dw.initialize();
 try {
-  const generator = runStreaming('invalid syntax');
-  for await (const chunk of generator) {
-    // Process chunks
+  const generator = dw.runStreaming('invalid syntax');
+  // Drive next() manually so the terminal { done: true, value: StreamingResult }
+  // is captured; a `for await` loop would consume it and a later
+  // generator.return() would give { value: undefined }.
+  let meta;
+  while (true) {
+    const { value, done } = await generator.next();
+    if (done) { meta = value; break; }
+    // Process chunk `value`
   }
-  const meta = await generator.return();
-  if (!meta.value.success) {
-    console.error('Streaming error:', meta.value.error);
+  if (!meta.success) {
+    console.error('Streaming error:', meta.error);
   }
 } catch (err) {
   console.error('Native error:', err);
+} finally {
+  await dw.cleanup();
 }
 ```
 
@@ -449,20 +591,22 @@ The Node.js binding uses **N-API** (Node-API) for C addon integration:
 
 - **Thread-safe**: N-API calls are serialized on the Node.js event loop
 - **Async operations**: Streaming operations yield control to the event loop between chunks
-- **No blocking**: Long-running scripts execute on the native side without blocking the event loop
+- **No event-loop blocking for streaming**: `runStreaming`/`runTransform` execute on a background worker and yield to the event loop between chunks. Note the **synchronous** `run()` runs native work directly on the calling JS thread and *does* block it until the script completes — use the streaming methods for long-running work you cannot block on.
 
-**Important:** Do not share a single `DataWeave` instance across Worker threads. Use the module-level functions (which use a global singleton) or create separate instances per thread.
+**Important:** Do not share a `DataWeave` instance across Worker threads. Each
+Worker that executes DataWeave must construct, initialize, use, and await cleanup
+of its own instance on that Worker.
 
-**Custom module resolvers and Worker threads:** the native layer installs at
-most one resolver callback for the whole process lifetime, and it is bound to
-the Worker (main thread or a `worker_threads` Worker) that registered it
-first — see [External Modules: Multiple Resolvers](docs/external-modules.md#multiple-resolvers-in-one-process).
+**Custom module resolvers and Worker threads:** each resolver-backed
+`DataWeave` instance's native engine is bound to the thread that created it
+(main thread or a `worker_threads` Worker) — see
+[External Modules: Multiple Independent Engines](docs/external-modules.md#multiple-independent-engines).
 Custom-module resolution attempted from any *other* thread is not routed to
-that thread's own `resolveModule` callback; it silently falls back to
-built-in modules only (custom module paths resolve as "not found" rather than
-crashing or hanging). If you need per-Worker custom modules, resolve them on
-the thread that first constructs a resolver-backed `DataWeave` instance, or
-avoid resolver-backed instances in worker pools altogether.
+that engine's `resolveModule` callback; it silently falls back to built-in
+modules only (custom module paths resolve as "not found" rather than
+crashing or hanging). If you need custom modules on multiple Workers,
+construct and use a separate resolver-backed `DataWeave` instance on each
+Worker, created on that Worker itself.
 
 ## Platform Support
 
@@ -501,6 +645,15 @@ This should not happen with the N-API implementation. If you encounter this:
 1. Ensure you're using Node >= 18
 2. Verify the native library is compatible with your platform
 3. Check for library version mismatches
+
+### Read callback diagnostics
+
+If an input read callback throws, the addon logs a fixed diagnostic to stderr but
+suppresses the exception message and stack because they may contain input data,
+credentials, paths, or other callback-controlled data. To include those details
+while debugging in a trusted environment, set `DATAWEAVE_READ_CALLBACK_DEBUG=1`
+before starting the process. Do not enable it where stderr is collected in shared
+logs.
 
 ### TypeScript Errors
 
@@ -552,12 +705,12 @@ Tests use **Vitest** and cover:
 
 - **Buffered execution** (`run`): Best for small scripts with sub-MB outputs
 - **Streaming execution** (`runStreaming`): Best for large outputs (MB+), reduces memory footprint
-- **Bidirectional streaming** (`runTransform`): Best for large inputs and outputs, constant memory usage
+- **Bidirectional streaming** (`runTransform`): Best for large outputs; input memory is bounded only with a **synchronous** input iterable (async streams are pre-buffered — see the `runTransform` memory note above)
 
 Benchmark (1MB JSON transformation):
 - `run()`: ~50ms, 2MB peak memory
 - `runStreaming()`: ~55ms, 500KB peak memory
-- `runTransform()`: ~60ms, 256KB peak memory (streaming input)
+- `runTransform()`: ~60ms, 256KB peak memory (synchronous input iterable; an async stream is pre-buffered, so peak memory scales with input size)
 
 ## See Also
 

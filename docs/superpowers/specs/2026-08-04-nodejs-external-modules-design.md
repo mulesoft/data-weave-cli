@@ -1,8 +1,28 @@
 # Design: External DataWeave Module Support in Node.js Binding
 
-**Date:** 2026-08-04  
-**Status:** Approved for implementation  
+**Date:** 2026-08-04
+**Status:** Superseded
 **Related Proposal:** [docs/proposals/nodejs-external-modules.md](../../proposals/nodejs-external-modules.md)
+
+> **⚠️ Superseded (2026-08-31).** This document describes the original
+> single-resolver Node external-module design. It is retained for historical
+> context only. The shipped design is
+> [`2026-08-07-native-lib-multi-engine-design.md`](2026-08-07-native-lib-multi-engine-design.md).
+> The following assertions below are stale and no longer accurate:
+> - **Resolver scope.** A custom resolver does *not* apply to all three
+>   execution APIs. It resolves custom modules only for `run()`; `runStreaming()`
+>   and `runTransform()` execute on a background worker that must not call back
+>   into the resolver, so custom-module imports there fail closed (report the
+>   module as not found) rather than routing to the callback. Built-in modules
+>   still resolve everywhere.
+> - **One resolver per process.** Resolvers are no longer process-global. Each
+>   `DataWeave` instance owns its own handle-addressed engine with its own
+>   resolver; multiple independent resolver-backed engines can coexist in one
+>   process (each bound to the thread that created it).
+> - **Resolver ABI and lifecycle.** The old process-wide resolver ABI is
+>   replaced by the handle-based `create_engine_with_resolver` + `run_script_engine`
+>   ABI; a resolver is bound at engine creation and released with that engine's
+>   `cleanup()`, not installed process-wide.
 
 ## Goal
 
@@ -346,20 +366,20 @@ public interface ResolveModuleCallback extends CFunctionPointer {
 ```java
 public class CallbackWeaveResourceResolver implements WeaveResourceResolver {
     private final ResolveModuleCallback callback;
-    
+
     public CallbackWeaveResourceResolver(ResolveModuleCallback callback) {
         this.callback = callback;
     }
-    
+
     @Override
     public Option<WeaveResource> resolve(ResourceDescriptor descriptor) {
         CCharPointer pathPtr = CTypeConversion.toCString(descriptor.path()).get();
         CCharPointer resultPtr = callback.invoke(CurrentIsolate.getCurrentThread(), pathPtr);
-        
+
         if (resultPtr.isNull()) {
             return Option.empty();  // Resolver returned null
         }
-        
+
         String source = CTypeConversion.toJavaString(resultPtr);
         // Note: host must free resultPtr after this returns
         return Option.apply(new StringWeaveResource(descriptor.path(), source));
@@ -442,7 +462,7 @@ static char* resolve_module_callback(void* thread, const char* module_path) {
     // Return result_source (or NULL)
 }
 
-static void resolver_js_callback(napi_env env, napi_value js_callback, 
+static void resolver_js_callback(napi_env env, napi_value js_callback,
                                   void* context, void* data) {
     // Call JS: result = resolveModule(modulePath)
     // Extract result string or null

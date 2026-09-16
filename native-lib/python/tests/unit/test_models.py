@@ -1,5 +1,6 @@
 import base64
 
+import ctypes
 import pytest
 
 import dataweave
@@ -16,6 +17,17 @@ def test_public_models_are_exported_from_models_module():
     assert models.DataWeaveLibraryNotFoundError is dataweave.DataWeaveLibraryNotFoundError
     assert models.READ_CALLBACK is dataweave.READ_CALLBACK
     assert models.WRITE_CALLBACK is dataweave.WRITE_CALLBACK
+
+
+@pytest.mark.unit
+def test_resolve_module_callback_has_ctx_argument():
+    # thread, ctx, module_path
+    assert models.RESOLVE_MODULE_CALLBACK._argtypes_ == (
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+    )
+    assert models.RESOLVE_MODULE_CALLBACK._restype_ is ctypes.c_void_p
 
 
 @pytest.mark.unit

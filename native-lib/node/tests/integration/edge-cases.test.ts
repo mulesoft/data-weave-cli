@@ -2,12 +2,18 @@
 // concurrency / FFI lifecycle, and the error & edge-input matrix. These run
 // against the real native library (dwlib). (Closes gaps F3 and F5 in
 // native-lib/node/TESTING_ASSESSMENT.md.)
-import { describe, it, expect, afterAll } from "vitest";
-import { DataWeave, run, runStreaming, runTransform, cleanup } from "../../src/index";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { DataWeave } from "../../src/index";
 import type { StreamingResult } from "../../src/types";
 
-afterAll(() => {
-  cleanup();
+const dw = new DataWeave();
+
+beforeAll(() => {
+  dw.initialize();
+});
+
+afterAll(async () => {
+  await dw.cleanup();
 });
 
 /** Drains a streaming/transform generator, returning its chunks and terminal metadata. */
@@ -29,7 +35,7 @@ describe("runTransform with async-iterable input", () => {
       for (const s of ["[1, 2, ", "3, 4", ", 5]"]) yield Buffer.from(s);
     }
     const { text, metadata } = await drain(
-      runTransform("output application/json\n---\npayload map ($ * 10)", asyncChunks(), {
+      dw.runTransform("output application/json\n---\npayload map ($ * 10)", asyncChunks(), {
         mimeType: "application/json",
       })
     );
@@ -41,7 +47,7 @@ describe("runTransform with async-iterable input", () => {
   it("handles an empty async input", async () => {
     async function* empty(): AsyncGenerator<Buffer> { /* yields nothing */ }
     const { metadata } = await drain(
-      runTransform("output application/json\n---\n{ ok: true }", empty(), { mimeType: "application/json" })
+      dw.runTransform("output application/json\n---\n{ ok: true }", empty(), { mimeType: "application/json" })
     );
     // Script ignores payload; empty input must not hang or crash.
     expect(metadata.success).toBe(true);
@@ -53,7 +59,7 @@ describe("runTransform with async-iterable input", () => {
       throw new Error("source failed");
     }
     const { text, metadata } = await drain(
-      runTransform("output application/json\n---\nsizeOf(payload)", boom(), { mimeType: "application/json" })
+      dw.runTransform("output application/json\n---\nsizeOf(payload)", boom(), { mimeType: "application/json" })
     );
     expect(metadata.success).toBe(true);
     expect(text.trim()).toBe("3");
@@ -61,7 +67,7 @@ describe("runTransform with async-iterable input", () => {
 });
 
 describe("multi-instance lifecycle", () => {
-  it("runs two independent instances and cleans them up independently", () => {
+  it("runs two independent instances and cleans them up independently", async () => {
     const a = new DataWeave();
     const b = new DataWeave();
     a.initialize();
@@ -70,8 +76,8 @@ describe("multi-instance lifecycle", () => {
       expect(a.run("1 + 1").getString()).toBe("2");
       expect(b.run("2 + 3").getString()).toBe("5");
     } finally {
-      a.cleanup();
-      b.cleanup();
+      await a.cleanup();
+      await b.cleanup();
     }
     // After cleanup, a fresh instance still works (runtime not permanently torn down).
     const c = new DataWeave();
@@ -79,28 +85,32 @@ describe("multi-instance lifecycle", () => {
     try {
       expect(c.run("6 * 7").getString()).toBe("42");
     } finally {
-      c.cleanup();
+      await c.cleanup();
     }
   });
 
-  it("initialize is idempotent and re-initialization after cleanup works", () => {
+  it("initialize is idempotent and re-initialization after cleanup works", async () => {
     const dw = new DataWeave();
     dw.initialize();
     dw.initialize(); // no-op, must not throw
     expect(dw.run("1").getString()).toBe("1");
-    dw.cleanup();
-    dw.cleanup(); // double cleanup, must not throw
+    await dw.cleanup();
+    await dw.cleanup(); // double cleanup, must not throw
     dw.initialize(); // re-init
     try {
       expect(dw.run("2").getString()).toBe("2");
     } finally {
-      dw.cleanup();
+      await dw.cleanup();
     }
   });
 
-  it("run before initialize throws a DataWeaveError", () => {
-    const dw = new DataWeave();
-    expect(() => dw.run("1 + 1")).toThrow(/not initialized/i);
+  it("run before initialize throws a DataWeaveError", async () => {
+    const uninitializedDw = new DataWeave();
+    try {
+      expect(() => uninitializedDw.run("1 + 1")).toThrow(/not initialized/i);
+    } finally {
+      await uninitializedDw.cleanup();
+    }
   });
 
   // NOTE: initialize() with a bad library path throwing a DataWeaveError is only
@@ -113,9 +123,9 @@ describe("multi-instance lifecycle", () => {
 });
 
 describe("concurrent execution", () => {
-  it("runs many concurrent scripts on the shared singleton", async () => {
+  it("runs many concurrent scripts on the shared explicit instance", async () => {
     const results = await Promise.all(
-      Array.from({ length: 25 }, (_, i) => Promise.resolve().then(() => run(`${i} * 2`)))
+      Array.from({ length: 25 }, (_, i) => Promise.resolve().then(() => dw.run(`${i} * 2`)))
     );
     results.forEach((r, i) => {
       expect(r.success).toBe(true);
@@ -125,7 +135,7 @@ describe("concurrent execution", () => {
 
   it("interleaves multiple concurrent streaming generators", async () => {
     const gens = Array.from({ length: 4 }, (_, i) =>
-      runStreaming(`output application/json --- (1 to 200) map ($ + ${i * 1000})`)
+      dw.runStreaming(`output application/json --- (1 to 200) map ($ + ${i * 1000})`)
     );
     const drained = await Promise.all(gens.map(drain));
     drained.forEach(({ metadata, text }, i) => {
@@ -139,7 +149,7 @@ describe("concurrent execution", () => {
 
 describe("binary output", () => {
   it("marks binary output and round-trips through getBytes", () => {
-    const r = run("output application/octet-stream\n---\npayload", {
+    const r = dw.run("output application/octet-stream\n---\npayload", {
       payload: { content: Buffer.from([0, 1, 2, 255]), mimeType: "application/octet-stream" },
     });
     expect(r.success).toBe(true);
@@ -153,7 +163,7 @@ describe("output charsets (buffered path)", () => {
   // charset names that Node's Buffer.toString rejects; decodeBytes normalizes them.
   for (const enc of ["UTF-8", "UTF-16", "UTF-16LE", "UTF-16BE", "ISO-8859-1"]) {
     it(`decodes ${enc} output without throwing`, () => {
-      const r = run(`output text/plain encoding="${enc}"\n---\n"café"`);
+      const r = dw.run(`output text/plain encoding="${enc}"\n---\n"café"`);
       expect(r.success).toBe(true);
       expect(() => r.getString()).not.toThrow();
       expect(r.getString()).toBe("café");
@@ -161,7 +171,7 @@ describe("output charsets (buffered path)", () => {
   }
 
   it("substitutes unrepresentable characters for US-ASCII output", () => {
-    const r = run(`output text/plain encoding="US-ASCII"\n---\n"café"`);
+    const r = dw.run(`output text/plain encoding="US-ASCII"\n---\n"café"`);
     expect(r.success).toBe(true);
     // 'é' is not representable in ASCII; the runtime substitutes it on encode.
     expect(r.getString()).toBe("caf?");
@@ -170,31 +180,31 @@ describe("output charsets (buffered path)", () => {
 
 describe("malformed / unsupported input", () => {
   it("fails on an unknown input mime type", () => {
-    const r = run("payload", { payload: { content: "x", mimeType: "application/nonsense-xyz" } });
+    const r = dw.run("payload", { payload: { content: "x", mimeType: "application/nonsense-xyz" } });
     expect(r.success).toBe(false);
     expect(r.error).toBeTruthy();
   });
 
   it("fails on an unknown output mime type", () => {
-    const r = run("output application/nonsense-xyz\n---\n{ a: 1 }");
+    const r = dw.run("output application/nonsense-xyz\n---\n{ a: 1 }");
     expect(r.success).toBe(false);
     expect(r.error).toBeTruthy();
   });
 
   it("fails when referencing a missing input", () => {
-    const r = run("missingInput + 1");
+    const r = dw.run("missingInput + 1");
     expect(r.success).toBe(false);
     expect(r.error).toBeTruthy();
   });
 
   it("fails on a script with a compilation/syntax error", () => {
-    const r = run("output application/json\n---\n{ unclosed:");
+    const r = dw.run("output application/json\n---\n{ unclosed:");
     expect(r.success).toBe(false);
     expect(r.error).toBeTruthy();
   });
 
   it("surfaces malformed input content as a failed result", () => {
-    const r = run("payload.value", { payload: { content: "{ not valid json", mimeType: "application/json" } });
+    const r = dw.run("payload.value", { payload: { content: "{ not valid json", mimeType: "application/json" } });
     expect(r.success).toBe(false);
     expect(r.error).toBeTruthy();
   });

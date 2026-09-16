@@ -1,27 +1,33 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { DataWeave, run, runStreaming, runTransform, cleanup } from "../../src/index";
+import { DataWeave } from "../../src/index";
 
-afterAll(() => {
-  cleanup();
+const dw = new DataWeave();
+
+beforeAll(() => {
+  dw.initialize();
+});
+
+afterAll(async () => {
+  await dw.cleanup();
 });
 
 describe("DataWeave Node.js API", () => {
   describe("run (buffered)", () => {
     it("basic arithmetic", () => {
-      const result = run("2 + 2");
+      const result = dw.run("2 + 2");
       expect(result.success).toBe(true);
       expect(result.getString()).toBe("4");
     });
 
     it("with inputs", () => {
-      const result = run("num1 + num2", { num1: 25, num2: 17 });
+      const result = dw.run("num1 + num2", { num1: 25, num2: 17 });
       expect(result.success).toBe(true);
       expect(result.getString()).toBe("42");
     });
 
-    it("explicit instance lifecycle", () => {
+    it("explicit instance lifecycle", async () => {
       const dw = new DataWeave();
       dw.initialize();
       try {
@@ -30,7 +36,7 @@ describe("DataWeave Node.js API", () => {
         const r2 = dw.run("sqrt(10000)");
         expect(r2.getString()).toBe("100");
       } finally {
-        dw.cleanup();
+        await dw.cleanup();
       }
     });
 
@@ -42,7 +48,7 @@ describe("DataWeave Node.js API", () => {
 ---
 [payload.person]`;
 
-      const result = run(script, {
+      const result = dw.run(script, {
         payload: {
           content: xmlBytes,
           mimeType: "application/xml",
@@ -59,26 +65,26 @@ describe("DataWeave Node.js API", () => {
     });
 
     it("auto-conversion of array input", () => {
-      const result = run("numbers[0]", { numbers: [1, 2, 3] });
+      const result = dw.run("numbers[0]", { numbers: [1, 2, 3] });
       expect(result.success).toBe(true);
       expect(result.getString()).toBe("1");
     });
 
     it("error handling", () => {
-      const result = run("invalid_var_xyz");
+      const result = dw.run("invalid_var_xyz");
       expect(result.success).toBe(false);
       expect(result.error).toBeTruthy();
     });
 
     it("raiseOnError throws", () => {
-      expect(() => run("invalid_var_xyz", {}, { raiseOnError: true })).toThrow();
+      expect(() => dw.run("invalid_var_xyz", {}, { raiseOnError: true })).toThrow();
     });
   });
 
   describe("runStreaming", () => {
     it("basic streaming output", async () => {
       const chunks: Buffer[] = [];
-      const gen = runStreaming("output application/json --- {a: 1, b: 2}");
+      const gen = dw.runStreaming("output application/json --- {a: 1, b: 2}");
       let result = await gen.next();
       while (!result.done) {
         chunks.push(result.value);
@@ -94,7 +100,7 @@ describe("DataWeave Node.js API", () => {
 
     it("large output produces multiple chunks", async () => {
       const chunks: Buffer[] = [];
-      const gen = runStreaming(
+      const gen = dw.runStreaming(
         'output application/json --- (1 to 5000) map {id: $, name: "item_" ++ $}'
       );
       let result = await gen.next();
@@ -112,7 +118,7 @@ describe("DataWeave Node.js API", () => {
 
     it("error propagation", async () => {
       const chunks: Buffer[] = [];
-      const gen = runStreaming("output application/json --- invalid_var");
+      const gen = dw.runStreaming("output application/json --- invalid_var");
       let result = await gen.next();
       while (!result.done) {
         chunks.push(result.value);
@@ -127,7 +133,7 @@ describe("DataWeave Node.js API", () => {
 
     it("with inputs", async () => {
       const chunks: Buffer[] = [];
-      const gen = runStreaming("num1 + num2", { num1: 25, num2: 17 });
+      const gen = dw.runStreaming("num1 + num2", { num1: 25, num2: 17 });
       let result = await gen.next();
       while (!result.done) {
         chunks.push(result.value);
@@ -147,7 +153,7 @@ describe("DataWeave Node.js API", () => {
       const script = "output application/json\n---\npayload map ($ * 2)";
 
       const chunks: Buffer[] = [];
-      const gen = runTransform(script, inputData, { mimeType: "application/json" });
+      const gen = dw.runTransform(script, inputData, { mimeType: "application/json" });
       let result = await gen.next();
       while (!result.done) {
         chunks.push(result.value);
@@ -180,7 +186,7 @@ describe("DataWeave Node.js API", () => {
 
       const script = "output application/json\n---\nsizeOf(payload)";
       const chunks: Buffer[] = [];
-      const gen = runTransform(script, chunked(fullInput), { mimeType: "application/json" });
+      const gen = dw.runTransform(script, chunked(fullInput), { mimeType: "application/json" });
       let result = await gen.next();
       while (!result.done) {
         chunks.push(result.value);
@@ -205,7 +211,7 @@ describe("DataWeave Node.js API", () => {
 
       const script = "output application/csv header=true\n---\n[payload.person]";
       const chunks: Buffer[] = [];
-      const gen = runTransform(script, chunked(xmlData), {
+      const gen = dw.runTransform(script, chunked(xmlData), {
         mimeType: "application/xml",
         charset: "UTF-16",
       });

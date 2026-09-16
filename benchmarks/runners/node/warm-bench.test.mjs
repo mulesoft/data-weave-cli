@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadManifest, resolveStreamingScript } from "../../lib/manifest.mjs";
-import { loadWrapper } from "./wrapper.mjs";
 import { runWarmAndStreaming } from "./warm-bench.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -16,26 +15,32 @@ test("streaming uses the deferred=true script variant", () => {
 });
 
 test("warm + streaming rows are produced with valid stats", async () => {
-  const api = await loadWrapper();
-  try {
-    const manifest = loadManifest(CORPUS);
-    const rows = await runWarmAndStreaming(api, manifest);
+  const runtime = {
+    run() {
+      return { success: true };
+    },
+    runTransform() {
+      return (async function* () {
+        yield Buffer.from("output");
+        return { success: true };
+      })();
+    },
+  };
+  const manifest = loadManifest(CORPUS);
+  const rows = await runWarmAndStreaming(runtime, manifest);
 
-    const warm = rows.filter((r) => r.metric === "warm");
-    const streaming = rows.filter((r) => r.metric === "streaming");
-    assert.ok(warm.length >= 1, "expected at least one warm row");
-    assert.ok(streaming.length >= 1, "expected at least one streaming row");
+  const warm = rows.filter((r) => r.metric === "warm");
+  const streaming = rows.filter((r) => r.metric === "streaming");
+  assert.ok(warm.length >= 1, "expected at least one warm row");
+  assert.ok(streaming.length >= 1, "expected at least one streaming row");
 
-    for (const r of warm) {
-      assert.equal(r.unit, "ms");
-      assert.ok(r.stats.median >= 0);
-      assert.ok(r.stats.p99 >= r.stats.median);
-    }
-    for (const r of streaming) {
-      assert.equal(r.unit, "MB/s");
-      assert.ok(r.stats.median > 0);
-    }
-  } finally {
-    api.cleanup();
+  for (const r of warm) {
+    assert.equal(r.unit, "ms");
+    assert.ok(r.stats.median >= 0);
+    assert.ok(r.stats.p99 >= r.stats.median);
+  }
+  for (const r of streaming) {
+    assert.equal(r.unit, "MB/s");
+    assert.ok(r.stats.median > 0);
   }
 });
