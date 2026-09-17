@@ -1,4 +1,4 @@
-name: Promote release
+name: Promote release artifacts
 
 on:
   workflow_dispatch:
@@ -122,11 +122,17 @@ jobs:
   node:
     if: inputs.artifact == 'node' || inputs.artifact == 'all'
     runs-on: mulesoft-ubuntu
+    permissions:
+      contents: read
+      # Lets npm exchange GitHub's short-lived OIDC token for publish credentials.
+      id-token: write
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           registry-url: https://registry.npmjs.org
+      - name: Upgrade npm for OIDC trusted publishing support
+        run: npm install -g npm@latest
       - name: Verify Node package versions are not published
         env:
           TAG: ${{ inputs.tag }}
@@ -214,10 +220,9 @@ jobs:
               }
             ' "$PACKAGE" "$VERSION"
           done
-      - name: Publish Node packages
+      - name: Publish Node packages via OIDC trusted publishing
         if: inputs.dry_run == false
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           TAG: ${{ inputs.tag }}
           RELEASE_DIR: ${{ env.RELEASE_DIR }}
         run: |
@@ -228,5 +233,7 @@ jobs:
             "dataweave-native-win32-x64-${VERSION}.tgz" \
             "dataweave-native-darwin-arm64-${VERSION}.tgz" \
             "dataweave-native-${VERSION}.tgz"; do
-            npm publish "$RELEASE_DIR/$ASSET" --access public
+            # These tarballs are built by the release workflow, so promotion does
+            # not attach provenance for the download-and-publish step.
+            npm publish "$RELEASE_DIR/$ASSET" --access public --provenance=false
           done
