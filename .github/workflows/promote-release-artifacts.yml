@@ -1,4 +1,4 @@
-name: Promote release
+name: Promote release artifacts
 
 on:
   workflow_dispatch:
