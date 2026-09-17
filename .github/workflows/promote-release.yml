@@ -179,7 +179,7 @@ jobs:
           VERSION="${TAG#v}"
           RELEASE_DIR=$(mktemp -d)
           echo "RELEASE_DIR=$RELEASE_DIR" >> "$GITHUB_ENV"
-          gh release download "$TAG" --dir "$RELEASE_DIR" \
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RELEASE_DIR" \
             --pattern "dataweave-native-${VERSION}.tgz" \
             --pattern "dataweave-native-linux-x64-${VERSION}.tgz" \
             --pattern "dataweave-native-win32-x64-${VERSION}.tgz" \
