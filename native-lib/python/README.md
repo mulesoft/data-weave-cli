@@ -2,30 +2,41 @@
 
 Python FFI bindings for the DataWeave native library.
 
-## Prerequisites
-
-1. Build the native library:
-   ```bash
-   ./gradlew :native-lib:nativeCompile
-   ```
-
-2. The shared library will be at:
-   - macOS: `native-lib/build/native/nativeCompile/dwlib.dylib`
-   - Linux: `native-lib/build/native/nativeCompile/dwlib.so`
-   - Windows: `native-lib/build/native/nativeCompile/dwlib.dll`
-
 ## Installation
 
-### Option A: Install the wheel (recommended)
+Install the prebuilt native wheel from PyPI:
 
-After building:
+```bash
+python3 -m pip install dataweave-native
+```
+
+`pip` selects the wheel that matches your operating system and architecture.
+The released wheel already bundles the native library.
+
+## Development and local builds
+
+Build the native library before creating a local wheel or using an editable
+installation:
+
+```bash
+./gradlew :native-lib:nativeCompile
+```
+
+The shared library is built at:
+
+- macOS: `native-lib/build/native/nativeCompile/dwlib.dylib`
+- Linux: `native-lib/build/native/nativeCompile/dwlib.so`
+- Windows: `native-lib/build/native/nativeCompile/dwlib.dll`
+
+### Build and install a local wheel
+
 
 ```bash
 ./gradlew :native-lib:buildPythonWheel
 python3 -m pip install native-lib/python/dist/dataweave_native-*-py3-*.whl
 ```
 
-### Option B: Editable install for development
+### Editable install
 
 ```bash
 ./gradlew :native-lib:stagePythonNativeLib
@@ -41,7 +52,7 @@ cd native-lib/python
 python3 -m pip install '.[test]'
 ```
 
-### Option C: Use externally-built library via environment variable
+### Use an externally-built library
 
 ```bash
 export DATAWEAVE_NATIVE_LIB=/path/to/dwlib.dylib
