@@ -305,7 +305,9 @@ jobs:
               echo "Wheel metadata is missing: $WHEEL"
               exit 1
             fi
-            METADATA=$(unzip -p "$WHEEL" "$METADATA_PATH")
+            # Windows wheels store METADATA with CRLF line endings; normalize
+            # them so the field checks below are platform-independent.
+            METADATA=$(unzip -p "$WHEEL" "$METADATA_PATH" | tr -d '\r')
             if ! grep -qx 'Name: dataweave-native' <<<"$METADATA" || \
               ! grep -qx "Version: ${VERSION}" <<<"$METADATA"; then
               echo "Unexpected package metadata in $WHEEL"
