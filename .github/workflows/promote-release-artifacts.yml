@@ -15,6 +15,7 @@ on:
         options:
           - cli
           - node
+          - python
           - all
       dry_run:
         description: Validate the selected promotion and print changes without publishing
@@ -237,3 +238,82 @@ jobs:
             # not attach provenance for the download-and-publish step.
             npm publish "$RELEASE_DIR/$ASSET" --access public --provenance=false
           done
+
+  python:
+    if: inputs.artifact == 'python' || inputs.artifact == 'all'
+    runs-on: mulesoft-ubuntu
+    environment: pypi
+    permissions:
+      contents: read
+      # Lets PyPI exchange GitHub's short-lived OIDC token for upload credentials.
+      id-token: write
+    steps:
+      - name: Verify Python package version is not published
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          RESPONSE=$(mktemp)
+          STATUS=$(curl --silent --show-error --output "$RESPONSE" --write-out '%{http_code}' \
+            "https://pypi.org/pypi/dataweave-native/${VERSION}/json")
+          case "$STATUS" in
+            404)
+              echo "dataweave-native@${VERSION} is not published"
+              ;;
+            200)
+              echo "Python package version already exists: dataweave-native@${VERSION}"
+              exit 1
+              ;;
+            *)
+              echo "Unable to determine whether dataweave-native@${VERSION} exists"
+              cat "$RESPONSE"
+              exit 1
+              ;;
+          esac
+      - name: Print Python package promotion
+        if: inputs.dry_run
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          echo "Publish dataweave_native-${VERSION}-py3-none-*.whl to PyPI via OIDC"
+      - name: Download and validate Python wheels
+        if: inputs.dry_run == false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          RELEASE_DIR="release-assets/python"
+          mkdir -p "$RELEASE_DIR"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RELEASE_DIR" \
+            --pattern "dataweave_native-${VERSION}-py3-none-*.whl"
+
+          shopt -s nullglob
+          WHEELS=("$RELEASE_DIR"/dataweave_native-"${VERSION}"-py3-none-*.whl)
+          if [ "${#WHEELS[@]}" -ne 3 ]; then
+            echo "Expected three Python wheels for ${TAG}, found ${#WHEELS[@]}"
+            exit 1
+          fi
+
+          for WHEEL in "${WHEELS[@]}"; do
+            METADATA_PATH=$(unzip -Z1 "$WHEEL" | awk '/\.dist-info\/METADATA$/ { print; exit }')
+            if [ -z "$METADATA_PATH" ]; then
+              echo "Wheel metadata is missing: $WHEEL"
+              exit 1
+            fi
+            METADATA=$(unzip -p "$WHEEL" "$METADATA_PATH")
+            if ! grep -qx 'Name: dataweave-native' <<<"$METADATA" || \
+              ! grep -qx "Version: ${VERSION}" <<<"$METADATA"; then
+              echo "Unexpected package metadata in $WHEEL"
+              exit 1
+            fi
+          done
+      - name: Publish Python wheels via PyPI trusted publishing
+        if: inputs.dry_run == false
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: release-assets/python
