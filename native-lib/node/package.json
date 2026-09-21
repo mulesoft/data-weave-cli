@@ -40,7 +40,7 @@
     "url": "https://github.com/mulesoft/data-weave-cli/issues"
   },
   "dependencies": {
-    "adm-zip": "^0.6.0"
+    "adm-zip": "^0.6.1"
   },
   "optionalDependencies": {
     "dataweave-native-linux-x64": "0.0.1",
