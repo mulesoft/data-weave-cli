@@ -268,6 +268,8 @@ tasks.register('buildNodePackage', Exec) {
   inputs.file("${projectDir}/node/binding.gyp")
   inputs.file("${projectDir}/node/tsconfig.json")
   inputs.file("${projectDir}/node/scripts/pack-packages.mjs")
+  inputs.file("${projectDir}/node/README.md")
+  inputs.file("${rootProject.projectDir}/LICENSE.txt")
   inputs.property('nativeVersion', project.version.toString())
   outputs.dir("${projectDir}/node/dist")
   outputs.file("${projectDir}/node/build/Release/dwlib_addon.node")
