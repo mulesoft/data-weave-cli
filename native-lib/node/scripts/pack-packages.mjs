@@ -88,9 +88,11 @@ export async function packPackages({
     main: "./dwlib_addon.node",
     os: [platform],
     cpu: [arch],
-    files: ["dwlib_addon.node", "dwlib.*"],
+    license: "BSD-3-Clause",
+    files: ["dwlib_addon.node", "dwlib.*", "LICENSE.txt"],
   }, null, 2)}\n`);
   await cp(join(nodeDir, "build", "Release", "dwlib_addon.node"), join(nativeDir, "dwlib_addon.node"));
+  await cp(join(nodeDir, "..", "..", "LICENSE.txt"), join(nativeDir, "LICENSE.txt"));
   const nativeFiles = await readdir(join(nodeDir, "native"));
   const nativeLibrary = nativeFiles.find((file) => /^dwlib\.(dylib|so|dll)$/.test(file));
   if (nativeLibrary === undefined) {

@@ -118,6 +118,19 @@ test("packs meta and supported native package staging", async () => {
   assert.deepEqual(native.os, ["darwin"]);
   assert.deepEqual(native.cpu, ["arm64"]);
   assert.equal(native.main, "./dwlib_addon.node");
+  assert.equal(native.license, "BSD-3-Clause");
+  assert.deepEqual(native.files, ["dwlib_addon.node", "dwlib.*", "LICENSE.txt"]);
+  assert.equal(
+    readFileSync(join(nodeDir, "build", "npm", "dataweave-native-darwin-arm64", "LICENSE.txt"), "utf8"),
+    "BSD 3-Clause License\n",
+  );
+
+  const nativeTarEntries = readTarEntries(join(nodeDir, "dataweave-native-darwin-arm64-1.2.3.tgz"));
+  assert.equal(nativeTarEntries.has("package/README.md"), false);
+  assert.equal(nativeTarEntries.get("package/LICENSE.txt"), "BSD 3-Clause License\n");
+  const nativeTarPackage = JSON.parse(nativeTarEntries.get("package/package.json"));
+  assert.equal(nativeTarPackage.license, "BSD-3-Clause");
+  assert.deepEqual(nativeTarPackage.files, ["dwlib_addon.node", "dwlib.*", "LICENSE.txt"]);
 });
 
 test("packs only the meta package for an unsupported platform and architecture", async () => {
