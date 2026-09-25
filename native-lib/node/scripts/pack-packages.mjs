@@ -58,7 +58,8 @@ export async function packPackages({
     ...sourcePackage,
     name: "dataweave-native",
     version: packageVersion,
-    files: ["dist/", "docs/"],
+    license: "BSD-3-Clause",
+    files: ["dist/", "docs/", "README.md", "LICENSE.txt"],
     // Source package.json pins 0.0.1 so local npm install can resolve optionals
     // after a registry publish; this rewrite is the real packed version.
     optionalDependencies,
@@ -70,6 +71,8 @@ export async function packPackages({
   await writeFile(join(metaDir, "package.json"), `${JSON.stringify(metaPackage, null, 2)}\n`);
   await cp(join(nodeDir, "dist"), join(metaDir, "dist"), { recursive: true });
   await copyIfPresent(join(nodeDir, "docs"), join(metaDir, "docs"));
+  await cp(join(nodeDir, "README.md"), join(metaDir, "README.md"));
+  await cp(join(nodeDir, "..", "..", "LICENSE.txt"), join(metaDir, "LICENSE.txt"));
   await runNpmPack(metaDir, nodeDir);
 
   const nativeName = skipNative ? undefined : nativePackageName(platform, arch);
